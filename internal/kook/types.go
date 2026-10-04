@@ -14,6 +14,7 @@ package kook
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 )
 
 // 平台的 API 基础地址。
@@ -149,7 +150,62 @@ type Channel struct {
 	IsCategory bool   `json:"is_category"`
 }
 
-// Message 是消息对象（发送成功后返回）。
+// Attachment 是消息附件的元数据。
+//
+// 图片 / 视频 / 文件 / 语音消息在事件与 message/view 详情中都会带上它，
+// 其中 url 是真实资源地址；事件顶层 content 在部分场景为空，需要用这里的 url 兜底。
+type Attachment struct {
+	Type     string  `json:"type"`
+	Name     string  `json:"name"`
+	URL      string  `json:"url"`
+	FileType string  `json:"file_type"`
+	Size     int64   `json:"size"`
+	Duration float64 `json:"duration"`
+	Width    int     `json:"width"`
+	Height   int     `json:"height"`
+}
+
+// Attachments 兼容平台下发的对象与数组两种形态（事件里是对象，
+// 部分接口历史上返回过数组），避免因形态差异导致整条事件解析失败。
+type Attachments []Attachment
+
+// UnmarshalJSON 同时接受对象、数组与 null。
+func (a *Attachments) UnmarshalJSON(data []byte) error {
+	raw := bytes.TrimSpace(data)
+	if len(raw) == 0 || string(raw) == "null" {
+		*a = nil
+		return nil
+	}
+	if raw[0] == '[' {
+		var list []Attachment
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return err
+		}
+		*a = list
+		return nil
+	}
+	var single Attachment
+	if err := json.Unmarshal(raw, &single); err != nil {
+		return err
+	}
+	*a = Attachments{single}
+	return nil
+}
+
+// Primary 返回首个带地址的附件；没有附件时返回零值。
+func (a Attachments) Primary() Attachment {
+	for _, item := range a {
+		if strings.TrimSpace(item.URL) != "" {
+			return item
+		}
+	}
+	if len(a) > 0 {
+		return a[0]
+	}
+	return Attachment{}
+}
+
+// Message 是消息对象（发送成功后的返回值，以及 message/view 的消息详情）。
 type Message struct {
 	ID        string `json:"id"`
 	MsgID     string `json:"msg_id"`
@@ -157,6 +213,13 @@ type Message struct {
 	Type      int    `json:"type"`
 	ChannelID string `json:"channel_id"`
 	AuthorID  string `json:"author_id"`
+
+	// Author 是 message/view 返回的作者信息。
+	Author User `json:"author"`
+	// Attachments 是媒体消息的附件（消息详情接口返回）。
+	Attachments Attachments `json:"attachments"`
+	// CreateAt 是消息创建时间（毫秒时间戳，消息详情接口返回）。
+	CreateAt int64 `json:"create_at"`
 }
 
 // Emoji 是表情对象。
@@ -263,6 +326,8 @@ type Extra struct {
 	GuildID string `json:"guild_id"`
 	// ChannelName 是消息所在频道名（用于面板展示）。
 	ChannelName string `json:"channel_name"`
+	// Attachments 是媒体消息（图片/视频/文件/语音）的附件元数据。
+	Attachments Attachments `json:"attachments"`
 	// Body 保持原始 JSON，由上层按 Type 反序列化成具体结构。
 	Body Body `json:"body"`
 	// Author 是系统事件中的作者信息。

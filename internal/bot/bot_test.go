@@ -650,6 +650,91 @@ func TestMessagesAreArchivedWithTypeMapping(t *testing.T) {
 	}
 }
 
+// TestMediaMessageStoresMediaFields 验证媒体消息的结构化字段：
+//
+// WebUI 需要根据 media_url 直接渲染图片/播放器/下载链接。
+// 事件顶层 content 为空时（平台个别场景），必须回退到 extra.attachments.url。
+func TestMediaMessageStoresMediaFields(t *testing.T) {
+	env := newBotEnv(t)
+	channelID := env.openTicketForTest()
+
+	// 常规图片消息：content 就是图片地址。
+	env.mock.Push(kook.EventTypeImage, kooktest.ImageMessageEvent(channelID, userAsker, "https://img.example/a.png", env.user(userAsker)))
+
+	// content 为空的图片消息：地址只在 extra.attachments 里。
+	fallback := kooktest.ImageMessageEvent(channelID, userAsker, "", env.user(userAsker))
+	fallback["extra"].(map[string]any)["attachments"] = map[string]any{
+		"type": "image", "name": "b.png", "url": "https://img.example/b.png",
+	}
+	env.mock.Push(kook.EventTypeImage, fallback)
+
+	ticket := env.firstTicket()
+	env.waitFor("媒体消息归档", func() bool {
+		messages, err := env.store.Tickets.Messages(ticket.No, 20, 0)
+		return err == nil && len(messages) >= 3
+	})
+
+	messages, _ := env.store.Tickets.Messages(ticket.No, 20, 0)
+	first := messages[len(messages)-2]
+	if first.MediaURL != "https://img.example/a.png" || first.MediaName != "a.png" {
+		t.Fatalf("图片消息未保存媒体字段: %+v", first)
+	}
+	second := messages[len(messages)-1]
+	if second.MediaURL != "https://img.example/b.png" || second.MediaName != "b.png" {
+		t.Fatalf("附件兜底的图片消息未保存媒体字段: %+v", second)
+	}
+}
+
+// TestCardMessageContentIsEnrichedFromMessageView 是回归测试：
+//
+// 真实平台的卡片消息事件 content 为空，必须再调 message/view 才能拿到卡片 JSON；
+// 平台也把用户上传的文件转成了卡片消息。这里验证卡片 JSON、文本摘要以及
+// 卡片内文件附件（media_* 字段）都会被补全，保证 WebUI 能正常展示与下载。
+func TestCardMessageContentIsEnrichedFromMessageView(t *testing.T) {
+	env := newBotEnv(t)
+	channelID := env.openTicketForTest()
+
+	cardJSON := `[{"type":"card","theme":"info","modules":[` +
+		`{"type":"header","text":{"type":"plain-text","content":"服务器维护公告"}},` +
+		`{"type":"section","text":{"type":"kmarkdown","content":"维护时间 **22:00-23:00**"}},` +
+		`{"type":"file","src":"https://files.example/guide.pdf","title":"guide.pdf"}]}]`
+
+	env.mock.InjectMessage("msg-card-1", kook.Message{
+		ID:      "msg-card-1",
+		Type:    kook.EventTypeCard,
+		Content: cardJSON,
+	})
+	env.mock.Push(kook.EventTypeCard, kooktest.CardMessageEvent(channelID, userAsker, "msg-card-1", env.user(userAsker)))
+
+	ticket := env.firstTicket()
+	env.waitFor("卡片消息补全", func() bool {
+		messages, err := env.store.Tickets.Messages(ticket.No, 20, 0)
+		if err != nil || len(messages) < 2 {
+			return false
+		}
+		last := messages[len(messages)-1]
+		return last.MsgType == store.MsgTypeCard && last.CardJSON != "" && last.MediaURL != ""
+	})
+
+	messages, _ := env.store.Tickets.Messages(ticket.No, 20, 0)
+	last := messages[len(messages)-1]
+	if last.CardJSON != cardJSON {
+		t.Fatalf("卡片 JSON 未入库: %q", last.CardJSON)
+	}
+	if !strings.Contains(last.Content, "服务器维护公告") || !strings.Contains(last.Content, "维护时间") {
+		t.Fatalf("卡片文本摘要未入库: %q", last.Content)
+	}
+	if last.MediaURL != "https://files.example/guide.pdf" || last.MediaName != "guide.pdf" {
+		t.Fatalf("卡片文件附件未入库: %+v", last)
+	}
+	if last.MediaType != "file" {
+		t.Fatalf("附件类型异常: %+v", last)
+	}
+	if len(env.mock.CallsOf("message/view")) == 0 {
+		t.Fatalf("应调用 message/view 补全卡片内容")
+	}
+}
+
 func TestMessagesFromOtherGuildAreIgnored(t *testing.T) {
 	env := newBotEnv(t)
 	channelID := env.openTicketForTest()

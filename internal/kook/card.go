@@ -37,15 +37,30 @@ type Module struct {
 	Elements  []Element `json:"elements,omitempty"`
 	Accessory *Element  `json:"accessory,omitempty"`
 	Mode      string    `json:"mode,omitempty"`
+	// Src / Title / Cover 用于 file、audio、video 模块。
+	Src   string `json:"src,omitempty"`
+	Title string `json:"title,omitempty"`
+	Cover string `json:"cover,omitempty"`
+	// EndTime / StartTime 用于 countdown 模块。
+	EndTime   int64 `json:"endTime,omitempty"`
+	StartTime int64 `json:"startTime,omitempty"`
 }
 
-// Element 是模块内的元素（文本、按钮等）。
+// Element 是模块内的元素（文本、按钮、图片等）。
 type Element struct {
 	Type  string    `json:"type"`
 	Text  *TextElem `json:"text,omitempty"`
 	Value string    `json:"value,omitempty"`
 	Click string    `json:"click,omitempty"`
 	Theme string    `json:"theme,omitempty"`
+	// Content 是 context 模块中 plain-text / kmarkdown 元素的直接内容。
+	Content string `json:"content,omitempty"`
+	// Src / Alt / Circle / FallbackURL / Size 是图片元素字段。
+	Src         string `json:"src,omitempty"`
+	Alt         string `json:"alt,omitempty"`
+	Circle      bool   `json:"circle,omitempty"`
+	FallbackURL string `json:"fallbackUrl,omitempty"`
+	Size        string `json:"size,omitempty"`
 }
 
 // TextElem 是文本元素。
@@ -183,4 +198,134 @@ func NoticeCard(theme, heading, content string) string {
 		return heading + "\n" + content
 	}
 	return encoded
+}
+
+// ---------------------------------------------------------------------------
+// 卡片解析（用于聊天记录归档与渲染兜底）
+// ---------------------------------------------------------------------------
+
+// ParseCards 解析卡片 JSON，兼容「单个对象」与「卡片数组」两种写法。
+func ParseCards(content string) ([]Card, error) {
+	raw := strings.TrimSpace(content)
+	if raw == "" {
+		return nil, fmt.Errorf("卡片内容为空")
+	}
+	if raw[0] == '[' {
+		var cards []Card
+		if err := json.Unmarshal([]byte(raw), &cards); err != nil {
+			return nil, err
+		}
+		return cards, nil
+	}
+	var card Card
+	if err := json.Unmarshal([]byte(raw), &card); err != nil {
+		return nil, err
+	}
+	return []Card{card}, nil
+}
+
+// CardSummary 从卡片 JSON 中提取可读文本摘要。
+//
+// 用途：聊天记录检索、导出与不支持卡片渲染时的兜底展示。
+// 无法解析或没有文本时返回空串，由调用方决定兜底文案。
+func CardSummary(content string) string {
+	cards, err := ParseCards(content)
+	if err != nil {
+		return ""
+	}
+	var lines []string
+	for _, card := range cards {
+		for _, module := range card.Modules {
+			if text := modulePlainText(module); text != "" {
+				lines = append(lines, text)
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// CardAttachments 提取卡片中的媒体资源（文件/音频/视频/图片模块）。
+//
+// 平台已把文件消息转为卡片消息下发，事件的 content 为空，
+// 只有解析卡片才能拿到可下载的地址与文件名。
+func CardAttachments(content string) []Attachment {
+	cards, err := ParseCards(content)
+	if err != nil {
+		return nil
+	}
+	var out []Attachment
+	for _, card := range cards {
+		for _, module := range card.Modules {
+			switch module.Type {
+			case "file", "audio", "video":
+				if module.Src != "" {
+					out = append(out, Attachment{Type: module.Type, URL: module.Src, Name: module.Title})
+				}
+			case "image-group", "container":
+				for _, element := range module.Elements {
+					if element.Type == "image" && element.Src != "" {
+						out = append(out, Attachment{Type: "image", URL: element.Src, Name: element.Alt})
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// modulePlainText 提取模块中的可读文本。
+func modulePlainText(module Module) string {
+	switch module.Type {
+	case "header", "section":
+		if module.Text != nil {
+			return strings.TrimSpace(module.Text.Content)
+		}
+	case "context":
+		var parts []string
+		for _, element := range module.Elements {
+			if text := elementPlainText(element); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " ")
+	case "action-group":
+		var parts []string
+		for _, element := range module.Elements {
+			if text := elementPlainText(element); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " ")
+	case "file", "audio", "video":
+		title := strings.TrimSpace(module.Title)
+		if title == "" {
+			title = "附件"
+		}
+		return "[" + attachmentTypeName(module.Type) + "] " + title
+	}
+	return ""
+}
+
+// elementPlainText 提取元素中的文本（兼容 text 嵌套与直接 content 两种形态）。
+func elementPlainText(element Element) string {
+	if element.Text != nil && strings.TrimSpace(element.Text.Content) != "" {
+		return strings.TrimSpace(element.Text.Content)
+	}
+	return strings.TrimSpace(element.Content)
+}
+
+// attachmentTypeName 把卡片附件模块类型转成中文名。
+func attachmentTypeName(moduleType string) string {
+	switch moduleType {
+	case "file":
+		return "文件"
+	case "audio":
+		return "语音"
+	case "video":
+		return "视频"
+	case "image":
+		return "图片"
+	default:
+		return "附件"
+	}
 }

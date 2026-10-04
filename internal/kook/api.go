@@ -427,6 +427,19 @@ func (c *Client) SendDirectMessage(ctx context.Context, userID string, msgType i
 	return &out, nil
 }
 
+// MessageView 获取频道消息详情。
+//
+// 卡片消息（type=10）的事件推送不带内容（content 为空），平台把用户上传的
+// 文件也统一转成了卡片消息；只有该接口才能拿到卡片 JSON 与附件信息，
+// 用于把聊天记录归档成可在 WebUI 渲染/下载的形态。
+func (c *Client) MessageView(ctx context.Context, msgID string) (*Message, error) {
+	var out Message
+	if err := c.call(ctx, http.MethodGet, "message/view", map[string]any{"msg_id": msgID}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // UpdateChannelMessage 更新频道消息（用于刷新日志卡片）。
 func (c *Client) UpdateChannelMessage(ctx context.Context, msgID, content string) error {
 	return c.call(ctx, http.MethodPost, "message/update", map[string]any{

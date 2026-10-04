@@ -10,7 +10,6 @@ import {
   ArrowLeft,
   Bot,
   Download,
-  Image as ImageIcon,
   LockKeyhole,
   MessageSquare,
   RefreshCw,
@@ -25,6 +24,8 @@ import { Link, useParams, useSearchParams } from "react-router"
 
 import { StatusBadge } from "@/components/Badges"
 import { ConfirmDialog } from "@/components/ConfirmDialog"
+import { KookCardView } from "@/components/KookCardView"
+import { MessageBody } from "@/components/MessageBody"
 import { PageHeader } from "@/components/PageHeader"
 import { EmptyState, ErrorState, InlineLoader } from "@/components/StateViews"
 import { Badge } from "@/components/ui/badge"
@@ -266,16 +267,13 @@ export function TicketDetailPage() {
                               {formatDateTime(message.createdAt, i18n.language)}
                             </span>
                           </div>
-                          <div className="bg-muted/50 rounded-lg px-3 py-2 text-sm break-words whitespace-pre-wrap">
-                            {message.type === "image" ? (
-                              <span className="text-muted-foreground inline-flex items-center gap-1.5">
-                                <ImageIcon className="size-3.5" />
-                                {message.content}
-                              </span>
-                            ) : (
-                              message.content
-                            )}
-                          </div>
+                          {message.type === "card" ? (
+                            <KookCardView json={message.cardJson} fallback={message.content} />
+                          ) : (
+                            <div className="bg-muted/50 rounded-lg px-3 py-2 text-sm break-words">
+                              <MessageBody message={message} />
+                            </div>
+                          )}
                         </div>
                       </li>
                     )

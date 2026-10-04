@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -408,10 +410,42 @@ func (b *Bot) archiveMessage(ctx context.Context, event kook.Event) {
 		return
 	}
 
+	message := archivedMessage(event, t.No)
+	if err := b.deps.Store.Tickets.AddMessage(message); err != nil {
+		b.deps.Logger.Warn("归档工单消息失败", "ticket_no", t.No, "err", err)
+		return
+	}
+	b.publishMessage(t.No, message)
+
+	// 卡片消息的事件推送不带内容（用户上传的文件也被平台转成卡片消息下发），
+	// 需要异步调用 message/view 补全卡片 JSON 与媒体地址。
+	if event.Type == kook.EventTypeCard && event.MsgID != "" && strings.TrimSpace(event.Content) == "" {
+		go b.enrichCardMessage(t.No, message.ID, event.MsgID)
+	}
+}
+
+// publishMessage 把消息推送给 WebUI（列表与详情自动刷新）。
+func (b *Bot) publishMessage(ticketNo string, message *store.TicketMessage) {
+	if b.deps.Bus == nil || message == nil {
+		return
+	}
+	b.deps.Bus.Publish(eventbus.Event{
+		Type:     eventbus.EventTicketMessage,
+		TicketNo: ticketNo,
+		Data:     message,
+		At:       store.Now(),
+	})
+}
+
+// archivedMessage 把平台事件转换成入库记录。
+//
+// 媒体消息的 content 是资源地址，附件（extra.attachments）作为兜底；
+// 归档时同时写入 media_* 字段，WebUI 可以直接渲染图片 / 播放器 / 下载链接。
+func archivedMessage(event kook.Event, ticketNo string) *store.TicketMessage {
 	message := &store.TicketMessage{
-		TicketNo:  t.No,
+		TicketNo:  ticketNo,
 		MsgID:     event.MsgID,
-		ChannelID: channelID,
+		ChannelID: event.TargetID,
 		UserID:    event.AuthorID,
 		UserName:  event.Author.FullName(),
 		Content:   archivedContent(event),
@@ -419,18 +453,143 @@ func (b *Bot) archiveMessage(ctx context.Context, event kook.Event) {
 		IsBot:     false,
 		CreatedAt: messageTime(event),
 	}
-	if err := b.deps.Store.Tickets.AddMessage(message); err != nil {
-		b.deps.Logger.Warn("归档工单消息失败", "ticket_no", t.No, "err", err)
+
+	switch message.MsgType {
+	case store.MsgTypeImage, store.MsgTypeVideo, store.MsgTypeFile, store.MsgTypeAudio:
+		if attachment, ok := eventAttachment(event); ok {
+			message.MediaURL = attachment.URL
+			message.MediaName = attachment.Name
+			message.MediaType = mediaTypeName(attachment)
+		}
+	case store.MsgTypeCard:
+		// 事件偶尔会带上卡片 JSON（大多数情况下为空），能解析就直接落库。
+		if content := strings.TrimSpace(event.Content); content != "" {
+			if _, err := kook.ParseCards(content); err == nil {
+				message.CardJSON = content
+				message.Content = cardContent(content)
+				if attachment, ok := cardPrimaryAttachment(content); ok {
+					message.MediaURL = attachment.URL
+					message.MediaName = attachment.Name
+					message.MediaType = mediaTypeName(attachment)
+				}
+			}
+		}
+	}
+	return message
+}
+
+// enrichCardMessage 异步补全卡片消息内容。
+//
+// 平台下发的卡片消息事件 content 为空，需要再调 message/view 取卡片 JSON。
+// 事件到达时平台侧可能尚未落库，因此做几次短重试；失败只记录日志，
+// 记录里至少保留「[卡片消息]」兜底文案。
+func (b *Bot) enrichCardMessage(ticketNo string, messageID uint, msgID string) {
+	client := b.Client()
+	if client == nil {
 		return
 	}
-	if b.deps.Bus != nil {
-		b.deps.Bus.Publish(eventbus.Event{
-			Type:     eventbus.EventTicketMessage,
-			TicketNo: t.No,
-			Data:     message,
-			At:       store.Now(),
-		})
+
+	backoffs := []time.Duration{0, 800 * time.Millisecond, 2 * time.Second}
+	for attempt, wait := range backoffs {
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		detail, err := client.MessageView(ctx, msgID)
+		cancel()
+		if err != nil {
+			b.deps.Logger.Debug("拉取消息详情失败", "msg_id", msgID, "attempt", attempt+1, "err", err)
+			continue
+		}
+
+		cardJSON := strings.TrimSpace(detail.Content)
+		if cardJSON == "" {
+			// 详情里也没有内容：说明卡片确实无文本（或已被删除），不再重试。
+			return
+		}
+
+		patch := store.MessagePatch{CardJSON: cardJSON, Content: cardContent(cardJSON)}
+		if attachment, ok := cardPrimaryAttachment(cardJSON); ok {
+			patch.MediaURL = attachment.URL
+			patch.MediaName = attachment.Name
+			patch.MediaType = mediaTypeName(attachment)
+		}
+		changed, err := b.deps.Store.Tickets.UpdateMessageRich(messageID, patch)
+		if err != nil {
+			b.deps.Logger.Warn("补全卡片消息失败", "msg_id", msgID, "err", err)
+			return
+		}
+		if !changed {
+			return
+		}
+		if message, err := b.deps.Store.Tickets.MessageByID(messageID); err == nil {
+			b.publishMessage(ticketNo, message)
+		} else {
+			b.deps.Logger.Debug("读取补全后的消息失败", "msg_id", msgID, "err", err)
+		}
+		return
 	}
+}
+
+// cardContent 生成卡片消息的入库文本：保留「[卡片消息]」前缀便于检索，并附上摘要。
+func cardContent(cardJSON string) string {
+	summary := kook.EscapeMentionText(kook.CardSummary(cardJSON))
+	if strings.TrimSpace(summary) == "" {
+		return "[卡片消息]"
+	}
+	return "[卡片消息] " + summary
+}
+
+// eventAttachment 提取媒体事件的附件信息。
+//
+// 优先使用事件顶层 content（它本身就是资源地址），为空时回退到
+// extra.attachments.url；名称与 MIME 类型同理。
+func eventAttachment(event kook.Event) (kook.Attachment, bool) {
+	attachment := event.Extra.Attachments.Primary()
+	url := strings.TrimSpace(event.Content)
+	if url == "" {
+		url = strings.TrimSpace(attachment.URL)
+	}
+	if url == "" {
+		return kook.Attachment{}, false
+	}
+	attachment.URL = url
+	if strings.TrimSpace(attachment.Name) == "" {
+		attachment.Name = fileNameFromURL(url)
+	}
+	return attachment, true
+}
+
+// cardPrimaryAttachment 返回卡片中最值得展示的媒体（优先文件/音视频，其次图片）。
+func cardPrimaryAttachment(cardJSON string) (kook.Attachment, bool) {
+	attachments := kook.CardAttachments(cardJSON)
+	if len(attachments) == 0 {
+		return kook.Attachment{}, false
+	}
+	for _, attachment := range attachments {
+		if attachment.Type != "image" {
+			return attachment, true
+		}
+	}
+	return attachments[0], true
+}
+
+// mediaTypeName 归一化附件的类型描述（MIME 优先，其次平台类别）。
+func mediaTypeName(attachment kook.Attachment) string {
+	if value := strings.TrimSpace(attachment.FileType); value != "" {
+		return value
+	}
+	return strings.TrimSpace(attachment.Type)
+}
+
+// fileNameFromURL 从资源地址中推断文件名（无文件名时的兜底展示）。
+func fileNameFromURL(rawURL string) string {
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Path != "" {
+		if name := path.Base(parsed.Path); name != "." && name != "/" {
+			return name
+		}
+	}
+	return ""
 }
 
 // archivedType 把 KOOK 消息类型映射到内部类型。
@@ -460,13 +619,16 @@ func archivedContent(event kook.Event) string {
 		kook.EventTypeVideo: "[视频] ",
 		kook.EventTypeFile:  "[文件] ",
 		kook.EventTypeAudio: "[语音] ",
-		kook.EventTypeCard:  "",
 	}
 	if prefix, ok := label[event.Type]; ok {
-		if event.Type == kook.EventTypeCard {
-			return "[卡片消息]"
+		attachment, hasAttachment := eventAttachment(event)
+		if hasAttachment {
+			return prefix + attachment.URL
 		}
 		return prefix + strings.TrimSpace(event.Content)
+	}
+	if event.Type == kook.EventTypeCard {
+		return "[卡片消息]"
 	}
 	// 文本内容同样转义提及语法，避免记录页被用于伪造 @全体成员。
 	return kook.EscapeMentionText(event.Content)

@@ -208,15 +208,44 @@ func seedTickets(st *store.Store, loc *time.Location, rng *rand.Rand, now time.T
 			}
 			// 部分工单追加一条图片消息，验证记录页对非文本类型的展示。
 			if i%4 == 0 {
+				imageURL := "https://placehold.co/640x360/png?text=KOOK+Ticket"
 				if err := st.Tickets.AddMessage(&store.TicketMessage{
 					TicketNo:  t.No,
 					MsgID:     demoUserID(9300 + i),
 					ChannelID: t.ChannelID,
 					UserID:    userID,
 					UserName:  userName,
-					Content:   "[图片] 截图 260105.png",
+					Content:   "[图片] " + imageURL,
 					MsgType:   store.MsgTypeImage,
+					MediaURL:  imageURL,
+					MediaName: "screenshot.png",
+					MediaType: "image/png",
 					CreatedAt: replyAt.Add(2 * time.Minute),
+				}); err != nil {
+					return err
+				}
+			}
+			// 部分工单追加一条卡片消息，验证卡片渲染（含文件模块）。
+			if i%5 == 0 {
+				cardJSON := `[{"type":"card","theme":"info","modules":[` +
+					`{"type":"header","text":{"type":"plain-text","content":"处理进度"}},` +
+					`{"type":"section","text":{"type":"kmarkdown","content":"已定位到问题原因，**预计今天内完成**"}},` +
+					`{"type":"context","elements":[{"type":"plain-text","content":"TicketBot 自动同步"}]},` +
+					`{"type":"file","src":"https://example.com/report.pdf","title":"处理报告.pdf"}]}]`
+				if err := st.Tickets.AddMessage(&store.TicketMessage{
+					TicketNo:  t.No,
+					MsgID:     demoUserID(9400 + i),
+					ChannelID: t.ChannelID,
+					UserID:    "bot",
+					UserName:  "TicketBot",
+					Content:   "[卡片消息] 处理进度\n已定位到问题原因，**预计今天内完成**\nTicketBot 自动同步\n[文件] 处理报告.pdf",
+					MsgType:   store.MsgTypeCard,
+					CardJSON:  cardJSON,
+					MediaURL:  "https://example.com/report.pdf",
+					MediaName: "处理报告.pdf",
+					MediaType: "file",
+					IsBot:     true,
+					CreatedAt: replyAt.Add(4 * time.Minute),
 				}); err != nil {
 					return err
 				}

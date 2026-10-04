@@ -45,6 +45,8 @@ type Server struct {
 	roles    []kook.Role
 	users    map[string]kook.User
 	games    map[int64]kook.Game
+	// messages 是 message/create 与 InjectMessage 注册的消息，供 message/view 查询。
+	messages map[string]kook.Message
 	// gameSystem 标记哪些游戏属于 KOOK 内置（game?type=2），用于列表过滤。
 	gameSystem map[int64]bool
 	nextID     int64
@@ -81,6 +83,7 @@ func New() *Server {
 		channels:   make(map[string]kook.Channel),
 		users:      make(map[string]kook.User),
 		games:      make(map[int64]kook.Game),
+		messages:   make(map[string]kook.Message),
 		gameSystem: make(map[int64]bool),
 		conns:      make(map[*websocket.Conn]bool),
 		upgrader: websocket.Upgrader{
@@ -135,6 +138,19 @@ func (s *Server) AddChannel(channel kook.Channel) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.channels[channel.ID] = channel
+}
+
+// InjectMessage 注册一条消息详情，供 message/view 查询。
+//
+// 真实平台的卡片消息事件不带内容，只有 message/view 能拿到卡片 JSON，
+// 因此测试需要预先注入消息详情来验证归档补全逻辑。
+func (s *Server) InjectMessage(msgID string, message kook.Message) {
+	if message.ID == "" {
+		message.ID = msgID
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.messages[msgID] = message
 }
 
 // Games 返回当前游戏库快照。
@@ -321,12 +337,31 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(endpoint, "direct-message") {
 			prefix = "dm"
 		}
-		writeData(w, kook.Message{
+		message := kook.Message{
 			ID:      fmt.Sprintf("%s-%d", prefix, atomic.AddInt64(&s.nextID, 1)),
 			MsgID:   fmt.Sprintf("%s-%d", prefix, s.nextID),
 			Type:    toInt(params["type"]),
 			Content: fmt.Sprint(params["content"]),
-		})
+		}
+		if message.Type == 0 {
+			message.Type = kook.MsgTypeKMarkdown
+		}
+		message.ChannelID = fmt.Sprint(params["target_id"])
+		s.mu.Lock()
+		s.messages[message.ID] = message
+		s.mu.Unlock()
+		writeData(w, message)
+
+	case "message/view", "direct-message/view":
+		msgID := fmt.Sprint(params["msg_id"])
+		s.mu.Lock()
+		message, ok := s.messages[msgID]
+		s.mu.Unlock()
+		if !ok {
+			writeJSON(w, http.StatusNotFound, 40400, "消息不存在", nil)
+			return
+		}
+		writeData(w, message)
 
 	case "message/update", "direct-message/update", "message/delete", "direct-message/delete":
 		writeData(w, map[string]any{})
@@ -537,6 +572,20 @@ func ImageMessageEvent(channelID, userID, url string, user kook.User) map[string
 	event["type"] = kook.EventTypeImage
 	if extra, ok := event["extra"].(map[string]any); ok {
 		extra["type"] = kook.EventTypeImage
+	}
+	return event
+}
+
+// CardMessageEvent 构造卡片消息事件。
+//
+// 与真实平台保持一致：content 为空，卡片 JSON 只能通过 message/view 获取，
+// 用于验证“事件 → 异步补全卡片内容”的归档逻辑。
+func CardMessageEvent(channelID, userID, msgID string, user kook.User) map[string]any {
+	event := TextMessageEvent(channelID, userID, "", user)
+	event["type"] = kook.EventTypeCard
+	event["msg_id"] = msgID
+	if extra, ok := event["extra"].(map[string]any); ok {
+		extra["type"] = kook.EventTypeCard
 	}
 	return event
 }

@@ -40,6 +40,14 @@ export interface TicketMessage {
   type: string
   isBot: boolean
   createdAt: string
+  /** 富媒体（图片/视频/文件/语音）的资源地址，旧记录可能为空。 */
+  mediaUrl?: string
+  /** 附件文件名（如果有）。 */
+  mediaName?: string
+  /** 附件类型（MIME 或平台类别）。 */
+  mediaType?: string
+  /** 卡片消息的原始 JSON，供 WebUI 按 KOOK 卡片结构渲染。 */
+  cardJson?: string
 }
 
 export interface TicketNote {

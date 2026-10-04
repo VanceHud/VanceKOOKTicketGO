@@ -137,6 +137,18 @@ type TicketMessage struct {
 	MsgType string `gorm:"size:16" json:"type"`
 	IsBot   bool   `json:"isBot"`
 
+	// MediaURL / MediaName / MediaType 描述富媒体消息（图片/视频/文件/语音）的资源。
+	//
+	// 事件里的 content 在部分场景为空（例如用户上传的文件被平台转成卡片消息），
+	// 归档时会从 extra.attachments、卡片 JSON 或 message/view 接口补全这三个字段，
+	// WebUI 与导出据此直接渲染图片 / 播放器 / 下载链接，而不用再解析 Content 里的文本。
+	MediaURL  string `gorm:"size:512" json:"mediaUrl,omitempty"`
+	MediaName string `gorm:"size:256" json:"mediaName,omitempty"`
+	MediaType string `gorm:"size:64" json:"mediaType,omitempty"`
+	// CardJSON 是卡片消息的原始 JSON（单个对象或对象数组），供 WebUI 原样渲染；
+	// 事件的卡片消息 content 为空，归档时会异步调用 message/view 补全。
+	CardJSON string `gorm:"type:text" json:"cardJson,omitempty"`
+
 	CreatedAt time.Time `gorm:"index" json:"createdAt"`
 }
 

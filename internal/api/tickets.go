@@ -326,7 +326,7 @@ func (s *Server) handleTicketExport(c *gin.Context) {
 		// 加 BOM，保证 Excel 正确识别 UTF-8。
 		buf.WriteString("\ufeff")
 		writer := csv.NewWriter(&buf)
-		_ = writer.Write([]string{"时间(UTC)", "消息ID", "用户ID", "用户名", "类型", "来源", "内容"})
+		_ = writer.Write([]string{"时间(UTC)", "消息ID", "用户ID", "用户名", "类型", "来源", "内容", "媒体链接"})
 		for _, m := range messages {
 			source := "用户"
 			if m.IsBot {
@@ -340,6 +340,7 @@ func (s *Server) handleTicketExport(c *gin.Context) {
 				m.MsgType,
 				source,
 				m.Content,
+				mediaURL(m),
 			})
 		}
 		writer.Flush()
@@ -382,7 +383,7 @@ func renderTicketHTML(t *store.Ticket, messages []store.TicketMessage, notes []s
 			who += " <span class=\"bot\">[机器人]</span>"
 		}
 		b.WriteString("<tr><td><time>" + m.CreatedAt.Format("2006-01-02 15:04:05") + "</time></td><td>" + who + "</td><td>" +
-			html.EscapeString(m.Content) + "</td></tr>")
+			renderHTMLMessage(m) + "</td></tr>")
 	}
 	b.WriteString("</tbody></table>")
 	if len(notes) > 0 {
@@ -394,4 +395,71 @@ func renderTicketHTML(t *store.Ticket, messages []store.TicketMessage, notes []s
 	}
 	b.WriteString("</body></html>")
 	return b.String()
+}
+
+// renderHTMLMessage 渲染单条消息：图片/视频/语音内联展示，文件渲染为下载链接。
+//
+// 所有动态内容（包括资源地址）都经过 html.EscapeString 转义。
+func renderHTMLMessage(m store.TicketMessage) string {
+	url := mediaURL(m)
+	escapedURL := html.EscapeString(url)
+	switch m.MsgType {
+	case store.MsgTypeImage:
+		if url != "" {
+			return `<a href="` + escapedURL + `" target="_blank" rel="noopener"><img src="` + escapedURL +
+				`" alt="` + html.EscapeString(mediaLabel(m)) + `" style="max-width:360px;max-height:360px;border-radius:6px"></a>`
+		}
+	case store.MsgTypeVideo:
+		if url != "" {
+			return `<video controls preload="metadata" src="` + escapedURL + `" style="max-width:360px"></video><br><a href="` +
+				escapedURL + `" target="_blank" rel="noopener">打开视频</a>`
+		}
+	case store.MsgTypeAudio:
+		if url != "" {
+			return `<audio controls preload="metadata" src="` + escapedURL + `"></audio><br><a href="` + escapedURL +
+				`" target="_blank" rel="noopener">` + html.EscapeString(mediaLabel(m)) + `</a>`
+		}
+	case store.MsgTypeFile:
+		if url != "" {
+			return `<a href="` + escapedURL + `" download>` + html.EscapeString(mediaLabel(m)) + `</a>`
+		}
+	case store.MsgTypeCard:
+		// 卡片无法在离线 HTML 里还原，展示文本摘要并附上卡片内的文件链接（如果有）。
+		if url != "" {
+			return html.EscapeString(m.Content) + `<br><a href="` + escapedURL + `" download>` + html.EscapeString(mediaLabel(m)) + `</a>`
+		}
+	}
+	return html.EscapeString(m.Content)
+}
+
+// mediaURL 返回富媒体消息的实际地址：优先结构化字段，兼容旧记录的「[类型] 地址」文本。
+func mediaURL(m store.TicketMessage) string {
+	if url := strings.TrimSpace(m.MediaURL); url != "" {
+		return url
+	}
+	content := strings.TrimSpace(m.Content)
+	for _, prefix := range []string{"[图片] ", "[视频] ", "[文件] ", "[语音] "} {
+		if strings.HasPrefix(content, prefix) {
+			content = strings.TrimSpace(strings.TrimPrefix(content, prefix))
+			break
+		}
+	}
+	if fields := strings.Fields(content); len(fields) > 0 && strings.HasPrefix(fields[0], "http") {
+		return fields[0]
+	}
+	return ""
+}
+
+// mediaLabel 返回资源的展示名称（文件名优先，其次从地址推导）。
+func mediaLabel(m store.TicketMessage) string {
+	if name := strings.TrimSpace(m.MediaName); name != "" {
+		return name
+	}
+	if url := mediaURL(m); url != "" {
+		if index := strings.LastIndex(url, "/"); index >= 0 && index+1 < len(url) {
+			return url[index+1:]
+		}
+		return url
+	}
+	return "附件"
 }

@@ -231,6 +231,56 @@ func (r *TicketsRepo) AddMessage(m *TicketMessage) error {
 	})
 }
 
+// MessagePatch 描述对已归档消息的补全内容；空字符串字段不会被写入。
+type MessagePatch struct {
+	Content   string
+	MediaURL  string
+	MediaName string
+	MediaType string
+	CardJSON  string
+}
+
+// UpdateMessageRich 补全已归档消息的富内容（媒体地址、卡片 JSON 等）。
+//
+// 卡片消息的事件推送不带内容，需要异步调用 message/view 后回填；
+// 回填失败不影响原始记录，因此这里的错误只需记录日志。
+// 返回值 changed 表示是否确实写入了字段。
+func (r *TicketsRepo) UpdateMessageRich(id uint, patch MessagePatch) (bool, error) {
+	fields := map[string]any{}
+	if patch.Content != "" {
+		fields["content"] = patch.Content
+	}
+	if patch.MediaURL != "" {
+		fields["media_url"] = patch.MediaURL
+	}
+	if patch.MediaName != "" {
+		fields["media_name"] = patch.MediaName
+	}
+	if patch.MediaType != "" {
+		fields["media_type"] = patch.MediaType
+	}
+	if patch.CardJSON != "" {
+		fields["card_json"] = patch.CardJSON
+	}
+	if len(fields) == 0 {
+		return false, nil
+	}
+	result := r.db.Model(&TicketMessage{}).Where("id = ?", id).Updates(fields)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
+// MessageByID 按主键返回一条消息（用于补全后推送 SSE 事件）。
+func (r *TicketsRepo) MessageByID(id uint) (*TicketMessage, error) {
+	var msg TicketMessage
+	if err := r.db.Where("id = ?", id).First(&msg).Error; err != nil {
+		return nil, mapNotFound(err)
+	}
+	return &msg, nil
+}
+
 // Notes 返回工单备注，按时间正序。
 func (r *TicketsRepo) Notes(no string) ([]TicketNote, error) {
 	var notes []TicketNote

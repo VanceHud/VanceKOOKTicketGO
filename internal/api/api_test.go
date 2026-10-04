@@ -699,6 +699,21 @@ func TestTicketExportFormats(t *testing.T) {
 		t.Fatalf("写入消息失败: %v", err)
 	}
 
+	// 富媒体消息：导出的 HTML 应内联渲染图片，CSV 应带上媒体链接列。
+	if err := env.store.Tickets.AddMessage(&store.TicketMessage{
+		TicketNo:  ticket.No,
+		MsgID:     "90000000000000778",
+		UserID:    ticket.UserID,
+		UserName:  "测试用户",
+		Content:   "[图片] https://img.example/a.png",
+		MsgType:   store.MsgTypeImage,
+		MediaURL:  "https://img.example/a.png",
+		MediaName: "a.png",
+		CreatedAt: store.Now(),
+	}); err != nil {
+		t.Fatalf("写入图片消息失败: %v", err)
+	}
+
 	// JSON
 	res := env.do(t, http.MethodGet, "/api/v1/tickets/"+ticket.No+"/export?format=json", nil, withCookie(cookie))
 	if res.status != http.StatusOK {
@@ -713,6 +728,9 @@ func TestTicketExportFormats(t *testing.T) {
 	if res.status != http.StatusOK || !strings.HasPrefix(res.raw, "\ufeff") {
 		t.Fatalf("CSV 导出应带 BOM: %d", res.status)
 	}
+	if !strings.Contains(res.raw, "媒体链接") || !strings.Contains(res.raw, "https://img.example/a.png") {
+		t.Fatal("CSV 导出应包含媒体链接列")
+	}
 
 	// HTML：聊天内容必须被转义，不能原样输出脚本
 	res = env.do(t, http.MethodGet, "/api/v1/tickets/"+ticket.No+"/export?format=html", nil, withCookie(cookie))
@@ -724,6 +742,9 @@ func TestTicketExportFormats(t *testing.T) {
 	}
 	if !strings.Contains(res.raw, "&lt;script&gt;") {
 		t.Fatal("HTML 导出应包含转义后的内容")
+	}
+	if !strings.Contains(res.raw, `<img src="https://img.example/a.png"`) {
+		t.Fatal("HTML 导出应内联渲染图片消息")
 	}
 
 	// 不支持的格式
