@@ -31,10 +31,24 @@ func (p *NoopPlatform) SetUserSpeak(_ context.Context, channelID, userID string,
 }
 
 // NotifyClosed 记录一次“关闭通知”意图并返回空消息 ID。
-func (p *NoopPlatform) NotifyClosed(_ context.Context, t *store.Ticket, note string) (string, string, error) {
+func (p *NoopPlatform) NotifyClosed(_ context.Context, t *store.Ticket, actor Actor, note string) (string, string, error) {
 	p.log.Debug("dry-run: 跳过关闭通知发送",
-		"ticket_no", t.No, "channel_id", t.ChannelID, "note", note)
+		"ticket_no", t.No, "channel_id", t.ChannelID, "actor", actor.Name, "note", note)
 	return "", "", nil
+}
+
+// NotifyLocked 记录一次“锁定通知”意图。
+func (p *NoopPlatform) NotifyLocked(_ context.Context, t *store.Ticket, actor Actor, reason string) error {
+	p.log.Debug("dry-run: 跳过锁定通知发送",
+		"ticket_no", t.No, "channel_id", t.ChannelID, "actor", actor.Name, "reason", reason)
+	return nil
+}
+
+// NotifyReopened 记录一次“重新激活通知”意图。
+func (p *NoopPlatform) NotifyReopened(_ context.Context, t *store.Ticket, actor Actor) error {
+	p.log.Debug("dry-run: 跳过重新激活通知发送",
+		"ticket_no", t.No, "channel_id", t.ChannelID, "actor", actor.Name)
+	return nil
 }
 
 // CloseTicketChannel 记录一次“删除频道”意图。

@@ -318,7 +318,19 @@
       "category_id": "Ticket category ID",
       "log_channel_id": "Log channel ID",
       "debug_channel_id": "Debug channel ID"
-    }
+    },
+    "restart": "Reconnect",
+    "restarting": "Connecting…",
+    "restartSuccess": "Reconnected with the latest configuration",
+    "restartFailed": "Connection failed",
+    "eventsHandled": "Events handled",
+    "sessionId": "Session ID",
+    "lastEventAt": "Last event",
+    "startedAt": "Started at",
+    "notRunning": "Not running",
+    "liveTitle": "Runtime status",
+    "noBot": "The bot module is not enabled",
+    "startingAt": "Connected at"
   },
   "settings": {
     "title": "Settings",
@@ -406,5 +418,25 @@
     "conflict": "The current state does not allow this action",
     "unknown": "Something went wrong, please retry",
     "requestId": "Request ID: {{id}}"
+  },
+  "account": {
+    "title": "My account",
+    "description": "Profile, KOOK identity linking and password management",
+    "profileTitle": "Profile",
+    "username": "Username",
+    "displayName": "Display name",
+    "role": "Permission",
+    "kookBinding": "KOOK link",
+    "bound": "Linked",
+    "notBound": "Not linked",
+    "bindTitle": "Link KOOK identity",
+    "bindDesc": "Send /bind to the bot in a KOOK direct message, then enter the code here to link your KOOK identity to this account. Afterwards you can also sign in with /login codes.",
+    "bindPlaceholder": "Enter the 6-character bind code",
+    "bindSubmit": "Link",
+    "bindSuccess": "Linked successfully",
+    "bindHint": "Linking only associates identities; permissions still come from the role mapping.",
+    "passwordTitle": "Change password",
+    "passwordDesc": "Sessions on other devices are revoked immediately",
+    "gotoPassword": "Change password"
   }
 }

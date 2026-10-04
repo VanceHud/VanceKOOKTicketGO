@@ -1,0 +1,583 @@
+package bot
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"vancekookticket/internal/kook"
+	"vancekookticket/internal/secure"
+	"vancekookticket/internal/store"
+)
+
+// roleMentionPattern 匹配 KMarkdown 中的角色提及：(rol)12345(rol)。
+var roleMentionPattern = regexp.MustCompile(`\(rol\)\s*(\d+)\s*\(rol\)`)
+
+// codeTTL 是一次性码的有效期（与 WebUI 文案保持一致）。
+const codeTTL = 5 * time.Minute
+
+// codeCooldown 是同一用户重复申请一次性码的最小间隔。
+const codeCooldown = 30 * time.Second
+
+// handleCommand 解析并执行命令。
+func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
+	fields := strings.Fields(strings.TrimSpace(event.Content))
+	if len(fields) == 0 {
+		return
+	}
+	command := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	args := fields[1:]
+
+	// 私聊专属命令
+	if event.IsDirect() {
+		switch command {
+		case "login":
+			b.cmdLogin(ctx, event)
+		case "bind":
+			b.cmdBind(ctx, event)
+		case "tkhelp", "help":
+			b.replyDirect(ctx, event.AuthorID, b.helpCard())
+		default:
+			b.replyDirect(ctx, event.AuthorID, "私聊仅支持 `/login`、`/bind` 与 `/tkhelp`")
+		}
+		return
+	}
+
+	switch command {
+	case "hello":
+		b.replyEphemeral(ctx, event, "world!")
+	case "tkhelp", "help":
+		b.replyEphemeral(ctx, event, b.helpCard())
+	case "ticket":
+		b.cmdTicketPanel(ctx, event)
+	case "tkcm":
+		b.cmdTicketComment(ctx, event, args)
+	case "aar", "add_admin_role":
+		b.cmdAddAdminRole(ctx, event, args)
+	case "kill":
+		b.cmdKill(ctx, event)
+	case "gaming":
+		b.cmdGaming(ctx, event, args)
+	case "singing":
+		b.cmdSinging(ctx, event, args)
+	case "sleeping":
+		b.cmdSleeping(ctx, event, args)
+	default:
+		// 未识别的命令静默忽略，避免刷屏。
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 面板与备注
+// ---------------------------------------------------------------------------
+
+// cmdTicketPanel 在当前频道创建/刷新工单面板。
+func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event) {
+	channelID := event.TargetID
+	if channelID == "" {
+		return
+	}
+	if !b.isAdmin(ctx, event.AuthorID, channelID) {
+		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
+		return
+	}
+	client, _, err := b.ready()
+	if err != nil {
+		b.replyEphemeral(ctx, event, "机器人尚未连接 KOOK")
+		return
+	}
+
+	const title = "请点击右侧按钮发起工单"
+	openValue := b.encodeButton(actionOpen, "", channelID)
+	content := b.panelCard(title, "ticket", openValue)
+
+	message, err := client.SendChannelMessage(ctx, channelID, kook.MsgTypeCard, content, kook.MessageOptions{})
+	if err != nil {
+		b.deps.Logger.Error("发送工单面板失败", "channel_id", channelID, "err", err)
+		b.replyEphemeral(ctx, event, "发送工单面板失败，请确认机器人拥有发送消息权限")
+		return
+	}
+
+	panel := &store.Panel{
+		ChannelID:   channelID,
+		ChannelName: event.Extra.ChannelName,
+		MsgID:       message.ID,
+		Title:       title,
+		Enabled:     true,
+	}
+	if err := b.deps.Store.Panels.Upsert(panel); err != nil {
+		b.deps.Logger.Error("保存面板配置失败", "channel_id", channelID, "err", err)
+		b.replyEphemeral(ctx, event, "面板已发送，但保存配置失败")
+		return
+	}
+
+	b.deps.Store.Audit.Write(&store.AuditLog{
+		Actor:     event.Author.FullName(),
+		ActorType: store.ActorTypeKook,
+		Action:    "panel.upsert",
+		Target:    channelID,
+		Detail:    "创建或刷新工单面板",
+		CreatedAt: store.Now(),
+	})
+	b.replyEphemeral(ctx, event, "工单面板已创建/刷新，成员点击按钮即可开单")
+}
+
+// cmdTicketComment 为已关闭的工单添加备注（对应 /tkcm）。
+func (b *Bot) cmdTicketComment(ctx context.Context, event kook.Event, args []string) {
+	if !b.isAdmin(ctx, event.AuthorID, "") {
+		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
+		return
+	}
+	if len(args) < 2 {
+		b.replyEphemeral(ctx, event, "用法：`/tkcm 工单编号 备注内容`")
+		return
+	}
+	ticketNo := strings.TrimSpace(args[0])
+	content := strings.TrimSpace(strings.Join(args[1:], " "))
+
+	t, err := b.deps.Store.Tickets.ByNo(ticketNo)
+	if err != nil {
+		b.replyEphemeral(ctx, event, "找不到该工单编号")
+		return
+	}
+	if t.LogChannelMsgID == "" {
+		b.replyEphemeral(ctx, event, "工单尚未结束，暂时无法添加备注")
+		return
+	}
+
+	actor := b.ticketActor(ctx, event.AuthorID, event.TargetID)
+	if _, err := b.deps.Tickets.AddNote(t.No, actor, truncateRunes(content, 2000)); err != nil {
+		b.replyEphemeral(ctx, event, "添加备注失败："+friendlyError(err))
+		return
+	}
+
+	// 刷新日志卡片，让备注同步显示在日志频道。
+	notes, err := b.deps.Store.Tickets.Notes(t.No)
+	if err == nil {
+		if client, _, err := b.ready(); err == nil {
+			card := b.ticketLogCard(t, notes)
+			if err := client.UpdateChannelMessage(ctx, t.LogChannelMsgID, card); err != nil {
+				b.deps.Logger.Warn("刷新日志卡片失败", "ticket_no", t.No, "err", err)
+			}
+		}
+	}
+
+	b.replyEphemeral(ctx, event, fmt.Sprintf("工单「%s」备注成功", t.No))
+}
+
+// cmdAddAdminRole 把角色加入面板管理员或全局管理员（对应 /aar）。
+func (b *Bot) cmdAddAdminRole(ctx context.Context, event kook.Event, args []string) {
+	if !b.isAdmin(ctx, event.AuthorID, event.TargetID) {
+		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
+		return
+	}
+	matches := roleMentionPattern.FindStringSubmatch(strings.Join(args, " "))
+	if len(matches) < 2 {
+		b.replyEphemeral(ctx, event, "用法：`/aar @角色`（加 `-g` 设为全局管理员角色）")
+		return
+	}
+	roleID := matches[1]
+	isGlobal := false
+	for _, arg := range args {
+		if arg == "-g" || arg == "-G" {
+			isGlobal = true
+		}
+	}
+
+	roleName := b.lookupRoleName(ctx, roleID)
+
+	if isGlobal {
+		if err := b.deps.Store.Roles.AddAdmin(roleID, roleName); err != nil {
+			b.replyEphemeral(ctx, event, "添加全局管理员角色失败："+friendlyError(err))
+			return
+		}
+		b.deps.Store.Audit.Write(&store.AuditLog{
+			Actor: event.Author.FullName(), ActorType: store.ActorTypeKook,
+			Action: "role.admin.add", Target: roleID, Detail: "新增全局管理员角色",
+			CreatedAt: store.Now(),
+		})
+		b.replyEphemeral(ctx, event, fmt.Sprintf("已把「%s」设为全局管理员角色", roleName))
+		return
+	}
+
+	panel, err := b.deps.Store.Panels.ByChannel(event.TargetID)
+	if err != nil {
+		b.replyEphemeral(ctx, event, "当前频道还没有工单面板，无法设置面板管理员；若需全局管理员请在命令末尾加 `-g`")
+		return
+	}
+	if err := b.deps.Store.Panels.AddRole(panel.ID, roleID, roleName); err != nil {
+		b.replyEphemeral(ctx, event, "添加面板管理员角色失败："+friendlyError(err))
+		return
+	}
+	b.deps.Store.Audit.Write(&store.AuditLog{
+		Actor: event.Author.FullName(), ActorType: store.ActorTypeKook,
+		Action: "role.panel.add", Target: roleID, Detail: "新增面板管理员角色：" + event.TargetID,
+		CreatedAt: store.Now(),
+	})
+	b.replyEphemeral(ctx, event, fmt.Sprintf("已把「%s」设为当前频道的面板管理员角色", roleName))
+}
+
+// lookupRoleName 按 ID 查角色名（失败时退化为 ID）。
+func (b *Bot) lookupRoleName(ctx context.Context, roleID string) string {
+	roles, err := b.GuildRoles(ctx)
+	if err != nil {
+		return roleID
+	}
+	for _, role := range roles {
+		if strconv.FormatInt(role.RoleID, 10) == roleID {
+			return role.Name
+		}
+	}
+	return roleID
+}
+
+// ---------------------------------------------------------------------------
+// 运维命令
+// ---------------------------------------------------------------------------
+
+// cmdKill 优雅退出机器人（需要 @ 机器人，避免误触）。
+func (b *Bot) cmdKill(ctx context.Context, event kook.Event) {
+	if !b.isAdmin(ctx, event.AuthorID, "") {
+		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
+		return
+	}
+	botID := b.botUserID()
+	if botID != "" && !strings.Contains(event.Content, botID) {
+		b.replyEphemeral(ctx, event, "为保证命令唯一性，执行本命令必须 @ 机器人：`/kill @机器人`")
+		return
+	}
+
+	b.deps.Store.Audit.Write(&store.AuditLog{
+		Actor: event.Author.FullName(), ActorType: store.ActorTypeKook,
+		Action: "bot.kill", Target: botID, Detail: "管理员执行 /kill，机器人开始退出",
+		CreatedAt: store.Now(),
+	})
+	b.replyEphemeral(ctx, event, "机器人正在退出，容器会自动重启")
+	b.deps.Logger.Warn("收到 /kill 命令，触发优雅退出", "by", event.Author.FullName())
+
+	if b.deps.RequestStop != nil {
+		// 给回复消息留出发送时间。
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			b.deps.RequestStop()
+		}()
+	}
+}
+
+// cmdGaming 让机器人开始玩游戏。
+func (b *Bot) cmdGaming(ctx context.Context, event kook.Event, args []string) {
+	if !b.isAdmin(ctx, event.AuthorID, "") {
+		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
+		return
+	}
+	if len(args) == 0 {
+		b.replyEphemeral(ctx, event, "用法：`/gaming 游戏ID`（游戏需先在 KOOK 开发者后台创建）")
+		return
+	}
+	gameID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil || gameID <= 0 {
+		b.replyEphemeral(ctx, event, "游戏 ID 必须是正整数")
+		return
+	}
+	client, _, err := b.ready()
+	if err != nil {
+		b.replyEphemeral(ctx, event, "机器人尚未连接 KOOK")
+		return
+	}
+	if err := client.StartGameActivity(ctx, gameID); err != nil {
+		b.replyEphemeral(ctx, event, "设置游戏状态失败："+friendlyError(err))
+		return
+	}
+	b.replyEphemeral(ctx, event, fmt.Sprintf("机器人开始玩游戏（ID %d），KOOK 的状态同步可能稍有延迟", gameID))
+}
+
+// cmdSinging 让机器人开始听歌。
+func (b *Bot) cmdSinging(ctx context.Context, event kook.Event, args []string) {
+	if !b.isAdmin(ctx, event.AuthorID, "") {
+		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
+		return
+	}
+	if len(args) == 0 {
+		b.replyEphemeral(ctx, event, "用法：`/singing 歌名 歌手`")
+		return
+	}
+	name := args[0]
+	singer := "未知"
+	if len(args) > 1 {
+		singer = strings.Join(args[1:], " ")
+	}
+	client, _, err := b.ready()
+	if err != nil {
+		b.replyEphemeral(ctx, event, "机器人尚未连接 KOOK")
+		return
+	}
+	if err := client.StartMusicActivity(ctx, name, singer); err != nil {
+		b.replyEphemeral(ctx, event, "设置听歌状态失败："+friendlyError(err))
+		return
+	}
+	b.replyEphemeral(ctx, event, fmt.Sprintf("机器人开始听《%s》（%s）", name, singer))
+}
+
+// cmdSleeping 停止游戏或音乐状态。
+func (b *Bot) cmdSleeping(ctx context.Context, event kook.Event, args []string) {
+	if !b.isAdmin(ctx, event.AuthorID, "") {
+		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
+		return
+	}
+	if len(args) == 0 {
+		b.replyEphemeral(ctx, event, "用法：`/sleeping 1` 停止游戏，`/sleeping 2` 停止听歌")
+		return
+	}
+	dataType, err := strconv.Atoi(args[0])
+	if err != nil || (dataType != kook.ActivityTypeGame && dataType != kook.ActivityTypeMusic) {
+		b.replyEphemeral(ctx, event, "参数只能是 1（游戏）或 2（音乐）")
+		return
+	}
+	client, _, err := b.ready()
+	if err != nil {
+		b.replyEphemeral(ctx, event, "机器人尚未连接 KOOK")
+		return
+	}
+	if err := client.DeleteActivity(ctx, dataType); err != nil {
+		b.replyEphemeral(ctx, event, "清除状态失败："+friendlyError(err))
+		return
+	}
+	b.replyEphemeral(ctx, event, "已清除机器人动态")
+}
+
+// ---------------------------------------------------------------------------
+// 一次性登录码 / 绑定码
+// ---------------------------------------------------------------------------
+
+// cmdLogin 为私聊用户签发 WebUI 登录码。
+func (b *Bot) cmdLogin(ctx context.Context, event kook.Event) {
+	role, ok := b.resolveWebRole(ctx, event.AuthorID)
+	if !ok {
+		b.replyDirect(ctx, event.AuthorID,
+			"你的 KOOK 角色未配置 WebUI 权限，无法登录控制台。请联系管理员在「角色与权限」中配置映射。")
+		return
+	}
+	b.issueCode(ctx, event, store.CodePurposeLogin, role)
+}
+
+// cmdBind 为私聊用户签发账号绑定码。
+func (b *Bot) cmdBind(ctx context.Context, event kook.Event) {
+	// 绑定本身不授予权限，但仍要求命中角色映射，避免把无关账号绑进系统。
+	if _, ok := b.resolveWebRole(ctx, event.AuthorID); !ok {
+		b.replyDirect(ctx, event.AuthorID, "你的 KOOK 角色未配置 WebUI 权限，无法绑定控制台账号。")
+		return
+	}
+	b.issueCode(ctx, event, store.CodePurposeBind, "")
+}
+
+// issueCode 生成一次性码并回复用户。
+func (b *Bot) issueCode(ctx context.Context, event kook.Event, purpose, roleHint string) {
+	// 频率限制：同一用户 30s 内只能申请一次（基于数据库记录，重启不失效）。
+	if latest, err := b.deps.Store.Codes.Latest(event.AuthorID, purpose); err == nil && latest != nil {
+		if store.Now().Sub(latest.CreatedAt) < codeCooldown {
+			b.replyDirect(ctx, event.AuthorID, "请求过于频繁，请稍后再试")
+			return
+		}
+	}
+
+	code, err := secure.RandomCrockford(6)
+	if err != nil {
+		b.deps.Logger.Error("生成一次性码失败", "err", err)
+		b.replyDirect(ctx, event.AuthorID, "生成验证码失败，请稍后重试")
+		return
+	}
+
+	// 作废该用户此前未使用的同类码，保证同一时间只有一个有效码。
+	if err := b.deps.Store.Codes.InvalidateActive(event.AuthorID, purpose, store.Now()); err != nil {
+		b.deps.Logger.Warn("作废旧验证码失败", "err", err)
+	}
+
+	record := &store.AuthCode{
+		CodeHash:     secure.HashToken(strings.ToUpper(code)),
+		Purpose:      purpose,
+		KookUserID:   event.AuthorID,
+		KookUserName: event.Author.FullName(),
+		RoleHint:     roleHint,
+		ExpiresAt:    store.Now().Add(codeTTL),
+		CreatedAt:    store.Now(),
+	}
+	if err := b.deps.Store.Codes.Create(record); err != nil {
+		b.deps.Logger.Error("保存一次性码失败", "err", err)
+		b.replyDirect(ctx, event.AuthorID, "生成验证码失败，请稍后重试")
+		return
+	}
+
+	b.deps.Store.Audit.Write(&store.AuditLog{
+		Actor: event.Author.FullName(), ActorType: store.ActorTypeKook,
+		Action: "auth.code.issue", Target: purpose,
+		Detail: fmt.Sprintf("%s 码已签发，有效期 %s", purpose, codeTTL), CreatedAt: store.Now(),
+	})
+
+	if purpose == store.CodePurposeLogin {
+		b.replyDirect(ctx, event.AuthorID, fmt.Sprintf(
+			"你的 WebUI 登录码：**%s**\n有效期 %d 分钟，仅可使用一次。\n在控制台登录页选择「登录码」并输入即可。",
+			code, int(codeTTL.Minutes()),
+		))
+		return
+	}
+	b.replyDirect(ctx, event.AuthorID, fmt.Sprintf(
+		"你的账号绑定码：**%s**\n有效期 %d 分钟，仅可使用一次。\n请登录控制台后，在账号页输入该码完成绑定。",
+		code, int(codeTTL.Minutes()),
+	))
+}
+
+// ResolveWebRole 依据 KOOK 角色计算 WebUI 权限（供 WebUI 登录时校验权限）。
+func (b *Bot) ResolveWebRole(ctx context.Context, userID string) (string, bool) {
+	return b.resolveWebRole(ctx, userID)
+}
+
+// resolveWebRole 依据 KOOK 角色计算 WebUI 权限。
+func (b *Bot) resolveWebRole(ctx context.Context, userID string) (string, bool) {
+	roles, err := b.userRoles(ctx, userID)
+	if err != nil {
+		b.deps.Logger.Warn("读取用户角色失败", "user_id", userID, "err", err)
+		return "", false
+	}
+	roleIDs := make([]string, 0, len(roles))
+	for _, roleID := range roles {
+		roleIDs = append(roleIDs, strconv.FormatInt(roleID, 10))
+	}
+
+	// 服务器创建者始终视为管理员。
+	b.mu.RLock()
+	masterID := b.guild.MasterID
+	b.mu.RUnlock()
+	if masterID != "" && userID == masterID {
+		return store.RoleAdmin, true
+	}
+
+	role, ok, err := b.deps.Store.Roles.ResolveWebRole(roleIDs)
+	if err != nil {
+		b.deps.Logger.Error("解析角色映射失败", "err", err)
+		return "", false
+	}
+	return role, ok
+}
+
+// ---------------------------------------------------------------------------
+// 表情上角色
+// ---------------------------------------------------------------------------
+
+// handleReaction 处理表情回应：按规则给用户上角色。
+func (b *Bot) handleReaction(ctx context.Context, event kook.Event) {
+	body := event.Extra.Body
+	userID := firstNonEmpty(body.UserID, event.AuthorID)
+	messageID := firstNonEmpty(body.MsgID, event.MsgID)
+	emojiID := body.Emoji.ID
+	channelID := firstNonEmpty(body.ChannelID, body.TargetID, event.TargetID)
+
+	if userID == "" || messageID == "" || emojiID == "" {
+		return
+	}
+	if b.botUserID() == userID {
+		return
+	}
+
+	rule, err := b.deps.Store.Emoji.MatchRule(messageID, emojiID)
+	if err != nil {
+		// 不是配置过的消息/表情，忽略。
+		return
+	}
+
+	client, cfg, err := b.ready()
+	if err != nil {
+		return
+	}
+
+	// 需要服务器 ID：优先用事件里的，其次用配置
+	guildID := firstNonEmpty(event.Extra.GuildID, cfg.GuildID)
+
+	// 撤销该用户上一次通过表情获得的角色（避免同时持有多个颜色角色）
+	if previous, err := b.deps.Store.Emoji.LastGrant(userID); err == nil && previous != nil {
+		if previous.RoleID != rule.RoleID {
+			if roleID, convErr := strconv.ParseInt(previous.RoleID, 10, 64); convErr == nil {
+				if err := client.GuildRoleRevoke(ctx, guildID, userID, roleID); err != nil {
+					b.deps.Logger.Warn("撤销旧角色失败", "user_id", userID, "role_id", previous.RoleID, "err", err)
+				}
+			}
+		}
+	}
+
+	roleID, err := strconv.ParseInt(rule.RoleID, 10, 64)
+	if err != nil {
+		b.deps.Logger.Warn("表情规则中的角色 ID 非法", "role_id", rule.RoleID)
+		return
+	}
+	if err := client.GuildRoleGrant(ctx, guildID, userID, roleID); err != nil {
+		b.deps.Logger.Error("发放角色失败", "user_id", userID, "role_id", rule.RoleID, "err", err)
+		if channelID != "" {
+			b.sendEphemeral(ctx, channelID, userID,
+				"发放角色失败，请确认机器人角色位置高于目标角色，且拥有「管理角色」权限")
+		}
+		return
+	}
+
+	// 记录发放结果
+	if previous, err := b.deps.Store.Emoji.LastGrant(userID); err == nil && previous != nil {
+		if err := b.deps.Store.Emoji.UpdateGrant(previous.ID, rule.ID, rule.EmojiID, rule.RoleID); err != nil {
+			b.deps.Logger.Warn("更新发放记录失败", "err", err)
+		}
+	} else {
+		if err := b.deps.Store.Emoji.RecordGrant(&store.EmojiGrant{
+			KookUserID: userID,
+			RuleID:     rule.ID,
+			EmojiID:    rule.EmojiID,
+			RoleID:     rule.RoleID,
+			GrantedAt:  store.Now(),
+		}); err != nil {
+			b.deps.Logger.Warn("记录发放结果失败", "err", err)
+		}
+	}
+
+	if channelID != "" {
+		label := rule.Label
+		if label == "" {
+			label = rule.EmojiID
+		}
+		b.sendEphemeral(ctx, channelID, userID, fmt.Sprintf("已为你发放角色：**%s**", label))
+	}
+	b.deps.Logger.Info("表情上角色完成", "user_id", userID, "role_id", rule.RoleID, "emoji", rule.EmojiID)
+}
+
+// ---------------------------------------------------------------------------
+// 回复辅助
+// ---------------------------------------------------------------------------
+
+// replyEphemeral 在频道内以“仅本人可见”的方式回复。
+func (b *Bot) replyEphemeral(ctx context.Context, event kook.Event, content string) {
+	client, _, err := b.ready()
+	if err != nil {
+		return
+	}
+	if _, err := client.SendChannelMessage(ctx, event.TargetID, kook.MsgTypeKMarkdown, content, kook.MessageOptions{
+		TempTargetID: event.AuthorID,
+	}); err != nil {
+		b.deps.Logger.Debug("回复命令失败", "channel_id", event.TargetID, "err", err)
+	}
+}
+
+// replyDirect 私聊回复。
+func (b *Bot) replyDirect(ctx context.Context, userID, content string) {
+	client, _, err := b.ready()
+	if err != nil {
+		return
+	}
+	if _, err := client.SendDirectMessage(ctx, userID, kook.MsgTypeKMarkdown, content, kook.MessageOptions{}); err != nil {
+		b.deps.Logger.Warn("私聊回复失败", "user_id", userID, "err", err)
+	}
+}
+
+// botUserID 返回机器人自身 ID。
+func (b *Bot) botUserID() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.botUser.ID
+}

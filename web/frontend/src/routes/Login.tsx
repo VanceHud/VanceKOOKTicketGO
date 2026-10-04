@@ -10,6 +10,7 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { AlertCircle, KeyRound, Link2, ShieldCheck, Ticket } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { useQueryClient } from "@tanstack/react-query"
 import { useLocation, useNavigate } from "react-router"
 
 import { LocaleToggle } from "@/components/LocaleToggle"
@@ -20,14 +21,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { api } from "@/lib/api"
-import { useAuth } from "@/lib/auth"
+import { api, setCsrfToken } from "@/lib/api"
+import { ME_QUERY_KEY, useAuth } from "@/lib/auth"
+import type { MeResponse } from "@/lib/types"
 
 type LoginTab = "password" | "code" | "bind"
 
 export function LoginPage() {
   const { t } = useTranslation()
   const { isAuthenticated, login, loginPending, loginError, resetLoginError } = useAuth()
+  const queryClient = useQueryClient()
   const navigate = useNavigate()
   const location = useLocation()
   const from = (location.state as { from?: string } | null)?.from ?? "/"
@@ -61,7 +64,11 @@ export function LoginPage() {
     setCodeError(null)
     setCodePending(true)
     try {
-      await api.post("/auth/login-code", { code: code.trim() })
+      const me = await api.post<MeResponse>("/auth/login-code", { code: code.trim() })
+      // 与密码登录一致：写入 CSRF 令牌并刷新身份缓存
+      setCsrfToken(me.csrfToken)
+      queryClient.setQueryData(ME_QUERY_KEY, me)
+      navigate(from, { replace: true })
     } catch (error) {
       setCodeError(error instanceof Error ? error.message : t("errors.unknown"))
     } finally {

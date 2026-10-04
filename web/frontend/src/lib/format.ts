@@ -19,28 +19,36 @@ export function dateLocale(language: string): Locale {
   return localeMap[language] ?? enUS
 }
 
+/**
+ * 判断时间是否可用。
+ *
+ * 后端理论上不会下发零值时间（Go 侧已用指针 + omitempty），
+ * 但接口由多种来源拼装，这里再兜一层：早于 1970 的时间一律视为无值，
+ * 避免界面出现 0001-01-01 这类明显异常的时间。
+ */
+function isValidDate(value?: string | null): value is string {
+  if (!value) return false
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return false
+  return date.getFullYear() >= 1970
+}
+
 /** 完整日期时间，例如 2026-01-05 14:03:11。 */
 export function formatDateTime(value?: string | null, language = "zh-CN"): string {
-  if (!value) return "—"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "—"
-  return format(date, "yyyy-MM-dd HH:mm:ss", { locale: dateLocale(language) })
+  if (!isValidDate(value)) return "—"
+  return format(new Date(value), "yyyy-MM-dd HH:mm:ss", { locale: dateLocale(language) })
 }
 
 /** 仅日期，例如 2026-01-05。 */
 export function formatDate(value?: string | null, language = "zh-CN"): string {
-  if (!value) return "—"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "—"
-  return format(date, "yyyy-MM-dd", { locale: dateLocale(language) })
+  if (!isValidDate(value)) return "—"
+  return format(new Date(value), "yyyy-MM-dd", { locale: dateLocale(language) })
 }
 
 /** 相对时间，例如 “3 分钟前”。 */
 export function formatRelative(value?: string | null, language = "zh-CN"): string {
-  if (!value) return "—"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "—"
-  return formatDistanceToNowStrict(date, { addSuffix: true, locale: dateLocale(language) })
+  if (!isValidDate(value)) return "—"
+  return formatDistanceToNowStrict(new Date(value), { addSuffix: true, locale: dateLocale(language) })
 }
 
 /** 秒 → 可读时长（1h 20m / 45s）。 */

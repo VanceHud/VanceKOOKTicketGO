@@ -4,6 +4,9 @@
 *.exe
 kook-ticket
 
+# 按需安装的本地工具依赖（例如运行 scripts/e2e 所需的 playwright）
+/node_modules/
+
 # 前端
 web/frontend/node_modules/
 web/frontend/dist/

@@ -145,9 +145,25 @@ export interface SettingsResponse {
   botConnected: boolean
 }
 
+export interface BotStatus {
+  running: boolean
+  connected: boolean
+  botId?: string
+  botName?: string
+  guildId?: string
+  guildName?: string
+  sessionId?: string
+  eventsHandled: number
+  lastError?: string
+  connectedAt?: string
+  startedAt?: string
+  lastEventAt?: string
+}
+
 export interface RuntimeInfo {
   dryRun: boolean
   botConnected: boolean
+  bot?: BotStatus
   version: string
   goVersion: string
   startedAt: string

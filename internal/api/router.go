@@ -98,6 +98,7 @@ func NewRouter(d Deps) *gin.Engine {
 	admin.PUT("/roles/mappings", server.handleRoleMappingUpsert)
 	admin.DELETE("/roles/mappings/:id", server.handleRoleMappingDelete)
 	admin.GET("/audit", server.handleAuditList)
+	admin.POST("/bot/restart", server.handleBotRestart)
 
 	// 静态资源与 SPA 前端。
 	if d.Web != nil {

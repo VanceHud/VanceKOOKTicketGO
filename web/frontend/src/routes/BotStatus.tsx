@@ -1,24 +1,44 @@
 /** 机器人状态：连接情况、运行信息、业务配置与可选频道/角色。 */
 
-import { Activity, AlertTriangle, Bot, CheckCircle2, Database, Hash, ShieldCheck } from "lucide-react"
+import { Activity, AlertTriangle, Bot, CheckCircle2, Database, Hash, RefreshCw, ShieldCheck } from "lucide-react"
+import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 
 import { PageHeader } from "@/components/PageHeader"
+import { useAuth } from "@/lib/auth"
+import { api } from "@/lib/api"
+import { toastError, toastSuccess } from "@/lib/toast"
 import { EmptyState, ErrorState, InlineLoader } from "@/components/StateViews"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Separator } from "@/components/ui/separator"
-import { formatBytes, formatDuration } from "@/lib/format"
+import { formatBytes, formatDateTime, formatDuration } from "@/lib/format"
 import { useKookChannels, useKookRoles, useRuntimeInfo } from "@/lib/queries"
 
 export function BotStatusPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const { me } = useAuth()
+  const queryClient = useQueryClient()
   const runtimeQuery = useRuntimeInfo()
   const rolesQuery = useKookRoles()
   const channelsQuery = useKookChannels()
 
   const runtime = runtimeQuery.data
+  const bot = runtime?.bot
+  const isAdmin = me?.user.role === "admin"
+
+  const restartMutation = useMutation({
+    mutationFn: () => api.post<{ ok: boolean }>("/bot/restart"),
+    onSuccess: () => {
+      toastSuccess(t("bot.restartSuccess"))
+      void queryClient.invalidateQueries({ queryKey: ["runtime"] })
+      void queryClient.invalidateQueries({ queryKey: ["kook-roles"] })
+      void queryClient.invalidateQueries({ queryKey: ["kook-channels"] })
+    },
+    onError: (error) => toastError(error),
+  })
 
   return (
     <div className="space-y-5">
@@ -79,6 +99,68 @@ export function BotStatusPage() {
                 <Row label={t("bot.goVersion")} value={<span className="font-mono text-xs">{runtime.goVersion}</span>} />
                 <Row label={t("bot.uptime")} value={formatDuration(runtime.uptimeSeconds)} />
                 <Row label={t("bot.timezone")} value={runtime.ticketTimezone} />
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="flex-row items-start justify-between">
+                <div className="space-y-1">
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Bot className="size-4" />
+                    {t("bot.liveTitle")}
+                  </CardTitle>
+                  <CardDescription>
+                    {bot?.botName
+                      ? `${bot.botName} · ${bot.guildName || bot.guildId || "—"}`
+                      : runtime.bot
+                        ? t("bot.notRunning")
+                        : t("bot.noBot")}
+                  </CardDescription>
+                </div>
+                {isAdmin ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={restartMutation.isPending}
+                    onClick={() => restartMutation.mutate()}
+                  >
+                    <RefreshCw className={restartMutation.isPending ? "size-4 animate-spin" : "size-4"} />
+                    {restartMutation.isPending ? t("bot.restarting") : t("bot.restart")}
+                  </Button>
+                ) : null}
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                <Row
+                  label={t("bot.connection")}
+                  value={
+                    <Badge
+                      variant="outline"
+                      className={bot?.connected ? "border-status-open/40 text-status-open" : "text-muted-foreground"}
+                    >
+                      {bot?.running
+                        ? bot.connected
+                          ? t("bot.connected")
+                          : t("bot.notRunning")
+                        : t("bot.disconnected")}
+                    </Badge>
+                  }
+                />
+                <Row label={t("bot.eventsHandled")} value={String(bot?.eventsHandled ?? 0)} />
+                {bot?.sessionId ? (
+                  <Row label={t("bot.sessionId")} value={<span className="font-mono text-xs">{bot.sessionId}</span>} />
+                ) : null}
+                {bot?.connectedAt ? (
+                  <Row label={t("bot.startingAt")} value={formatDateTime(bot.connectedAt, i18n.language)} />
+                ) : null}
+                {bot?.lastEventAt ? (
+                  <Row label={t("bot.lastEventAt")} value={formatDateTime(bot.lastEventAt, i18n.language)} />
+                ) : null}
+                {bot?.lastError ? (
+                  <Alert variant="destructive">
+                    <AlertTriangle className="size-4" />
+                    <AlertDescription className="break-words">{bot.lastError}</AlertDescription>
+                  </Alert>
+                ) : null}
               </CardContent>
             </Card>
 

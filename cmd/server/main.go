@@ -12,15 +12,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"vancekookticket/internal/api"
 	"vancekookticket/internal/auth"
 	"vancekookticket/internal/bootstrap"
+	"vancekookticket/internal/bot"
 	"vancekookticket/internal/config"
 	"vancekookticket/internal/dryrun"
 	"vancekookticket/internal/eventbus"
+	"vancekookticket/internal/secure"
 	"vancekookticket/internal/store"
 	"vancekookticket/internal/ticket"
 	"vancekookticket/web"
@@ -85,8 +88,8 @@ func run() error {
 	}
 
 	bus := eventbus.New()
-	// 里程碑 2/3 会在这里注入真实 KOOK 客户端；当前使用空实现，
-	// 业务流程（关单/锁定/重开）在 DryRun 下只更新数据库并广播事件。
+	// 默认使用空实现：未配置 Token（或 DryRun）时，工单操作只更新数据库并广播事件。
+	// 机器人连接成功后会自动注入真实平台实现（见 bot.Bot.Start）。
 	platform := ticket.NewNoopPlatform(logger)
 	ticketService := ticket.NewService(st, bus, platform, cfg.Location, st.Settings.OutdateHours)
 
@@ -109,23 +112,48 @@ func run() error {
 		}
 	}
 
-	router := api.NewRouter(api.Deps{
-		Config:       cfg,
-		Store:        st,
-		Bus:          bus,
-		Tickets:      ticketService,
-		Sessions:     sessions,
-		Login:        loginLimiter,
-		Codes:        codeLimiter,
-		Web:          webHandler,
-		Log:          logger,
-		Started:      store.Now(),
-		Version:      Version,
-		BotConnected: func() bool { return false }, // 里程碑 3 接入 KOOK 后返回真实状态
-	})
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// 机器人管理器：读取数据库中的配置（Token 已加密存储）并按需连接 KOOK。
+	botManager, err := bot.NewManager(bot.Deps{
+		Store:     st,
+		Bus:       bus,
+		Tickets:   ticketService,
+		Config:    runtimeConfigProvider(st, cfg.AppSecret),
+		Logger:    logger,
+		Location:  cfg.Location,
+		AppSecret: cfg.AppSecret,
+		// /kill 命令触发与 Ctrl+C 相同的优雅退出路径
+		RequestStop:   stop,
+		HeartbeatTick: 30 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("初始化机器人失败: %w", err)
+	}
+	defer botManager.Stop()
+
+	router := api.NewRouter(api.Deps{
+		Config:   cfg,
+		Store:    st,
+		Bus:      bus,
+		Tickets:  ticketService,
+		Sessions: sessions,
+		Login:    loginLimiter,
+		Codes:    codeLimiter,
+		Web:      webHandler,
+		Log:      logger,
+		Started:  store.Now(),
+		Version:  Version,
+		Bot:      botManager,
+	})
+
+	// 启动机器人；失败不阻塞 WebUI —— 管理员可在界面上修正配置后点击重连。
+	if cfg.DryRun {
+		logger.Info("DryRun 模式：不连接 KOOK，工单操作仅更新数据库")
+	} else if err := botManager.Start(ctx); err != nil {
+		logger.Warn("机器人启动失败，可通过 WebUI「机器人状态 → 重新连接」重试", "err", err)
+	}
 
 	go backgroundTasks(ctx, logger, st, sessions, loginLimiter, codeLimiter, ticketService)
 
@@ -162,6 +190,35 @@ func run() error {
 	}
 	logger.Info("已退出")
 	return nil
+}
+
+// runtimeConfigProvider 把数据库配置转换成机器人运行配置。
+//
+// Token 以 AES-GCM 密文存储，这里按需解密；解密失败（密钥被更换）时返回空 Token，
+// 让机器人停在“未配置”状态，界面会提示重新填写。
+func runtimeConfigProvider(st *store.Store, appSecret []byte) bot.ConfigFunc {
+	return func(ctx context.Context) (*bot.Config, error) {
+		token, _, err := st.Settings.GetSecret(store.SettingKookToken, appSecret)
+		if err != nil && !errors.Is(err, secure.ErrDecrypt) {
+			return nil, err
+		}
+		return &bot.Config{
+			Token:          token,
+			GuildID:        settingValue(st, store.SettingGuildID),
+			CategoryID:     settingValue(st, store.SettingCategoryID),
+			LogChannelID:   settingValue(st, store.SettingLogChannelID),
+			DebugChannelID: settingValue(st, store.SettingDebugChannelID),
+			OutdateHours:   st.Settings.OutdateHours(),
+		}, nil
+	}
+}
+
+func settingValue(st *store.Store, key string) string {
+	value, err := st.Settings.GetDefault(key, "")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 // backgroundTasks 运行周期性维护任务。

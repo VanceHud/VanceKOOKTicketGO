@@ -7,12 +7,14 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"vancekookticket/internal/auth"
+	"vancekookticket/internal/kook"
 	"vancekookticket/internal/store"
 )
 
@@ -238,7 +240,35 @@ func (s *Server) handleSettingsUpdate(c *gin.Context) {
 	}
 
 	s.audit(c, "settings.update", "settings", "更新配置项："+strings.Join(changed, ", "))
-	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": changed})
+
+	// Token / 服务器等关键配置变化需要重连才生效。
+	// 连接失败不影响配置保存，把结果一并返回给界面提示。
+	response := gin.H{"ok": true, "changed": changed}
+	if s.Bot != nil && requiresBotRestart(changed) {
+		if err := s.Bot.Restart(c.Request.Context()); err != nil {
+			s.audit(c, "bot.restart", "bot", "配置变更后重连失败："+err.Error())
+			response["botRestart"] = gin.H{"ok": false, "error": err.Error()}
+		} else {
+			s.audit(c, "bot.restart", "bot", "配置变更后已重新连接")
+			response["botRestart"] = gin.H{"ok": true}
+		}
+	} else if s.Bot != nil {
+		// 仅名称等展示字段变化：清缓存即可
+		s.Bot.NotifyConfigChanged()
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+// requiresBotRestart 判断哪些配置项变化后需要重新建立 KOOK 连接。
+func requiresBotRestart(changed []string) bool {
+	for _, key := range changed {
+		switch key {
+		case "kook_token", store.SettingGuildID, store.SettingCategoryID,
+			store.SettingLogChannelID, store.SettingDebugChannelID:
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -716,9 +746,11 @@ func (s *Server) handleRuntimeInfo(c *gin.Context) {
 		dbSize = info.Size()
 	}
 
+	botStatus := s.botStatus()
 	c.JSON(http.StatusOK, gin.H{
 		"dryRun":          s.Config.DryRun,
-		"botConnected":    s.botConnected(),
+		"botConnected":    botStatus.Connected,
+		"bot":             botStatus,
 		"version":         s.Version,
 		"goVersion":       runtime.Version(),
 		"startedAt":       s.Started,
@@ -757,23 +789,36 @@ type kookOption struct {
 
 // handleGuildRoles 返回可选角色列表。
 //
-// DryRun 模式返回演示数据，便于在未接入 KOOK 时验证界面；
-// 真实数据由里程碑 3 的 KOOK 客户端提供。
+// 机器人在线时读取真实角色；DryRun 或未连接时返回演示数据/空列表，
+// 保证界面在离线状态下依然可用。
 func (s *Server) handleGuildRoles(c *gin.Context) {
+	if s.botConnected() {
+		roles, err := s.Bot.GuildRoles(c.Request.Context())
+		if err != nil {
+			s.failInternal(c, err, "meta.guild.roles")
+			return
+		}
+		items := make([]kookOption, 0, len(roles))
+		for _, role := range roles {
+			items = append(items, kookOption{ID: strconv.FormatInt(role.RoleID, 10), Name: role.Name, Kind: "role"})
+		}
+		c.JSON(http.StatusOK, gin.H{"available": true, "dryRun": false, "items": items})
+		return
+	}
 	if s.Config.DryRun {
 		c.JSON(http.StatusOK, gin.H{
 			"available": true,
 			"dryRun":    true,
 			"items": []kookOption{
-				{ID: "1000000000000001", Name: "服主", Kind: "role"},
-				{ID: "1000000000000002", Name: "客服组", Kind: "role"},
-				{ID: "1000000000000003", Name: "实习客服", Kind: "role"},
+				{ID: "1001", Name: "服主", Kind: "role"},
+				{ID: "1002", Name: "客服组", Kind: "role"},
+				{ID: "1003", Name: "实习客服", Kind: "role"},
 			},
 		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"available": s.botConnected(),
+		"available": false,
 		"dryRun":    false,
 		"items":     []kookOption{},
 		"note":      "角色列表需要机器人连接 KOOK 后获取",
@@ -782,25 +827,60 @@ func (s *Server) handleGuildRoles(c *gin.Context) {
 
 // handleGuildChannels 返回可选频道/分组列表。
 func (s *Server) handleGuildChannels(c *gin.Context) {
+	if s.botConnected() {
+		channels, err := s.Bot.GuildChannels(c.Request.Context())
+		if err != nil {
+			s.failInternal(c, err, "meta.guild.channels")
+			return
+		}
+		items := make([]kookOption, 0, len(channels))
+		for _, channel := range channels {
+			kind := "text"
+			switch {
+			case channel.IsCategory:
+				kind = "category"
+			case channel.Type == kook.ChannelVoice:
+				kind = "voice"
+			}
+			items = append(items, kookOption{ID: channel.ID, Name: channel.Name, Kind: kind})
+		}
+		c.JSON(http.StatusOK, gin.H{"available": true, "dryRun": false, "items": items})
+		return
+	}
 	if s.Config.DryRun {
 		c.JSON(http.StatusOK, gin.H{
 			"available": true,
 			"dryRun":    true,
 			"items": []kookOption{
-				{ID: "2000000000000001", Name: "工单面板", Kind: "text"},
-				{ID: "2000000000000002", Name: "工单日志", Kind: "text"},
-				{ID: "2000000000000003", Name: "机器人调试", Kind: "text"},
-				{ID: "3000000000000001", Name: "隐藏工单分组", Kind: "category"},
+				{ID: "chan-panel", Name: "工单面板", Kind: "text"},
+				{ID: "chan-log", Name: "工单日志", Kind: "text"},
+				{ID: "chan-debug", Name: "机器人调试", Kind: "text"},
+				{ID: "cat-hidden", Name: "隐藏工单分组", Kind: "category"},
 			},
 		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"available": s.botConnected(),
+		"available": false,
 		"dryRun":    false,
 		"items":     []kookOption{},
 		"note":      "频道列表需要机器人连接 KOOK 后获取",
 	})
+}
+
+// handleBotRestart 使用最新配置重新建立 KOOK 连接（仅管理员）。
+func (s *Server) handleBotRestart(c *gin.Context) {
+	if s.Bot == nil {
+		s.fail(c, http.StatusServiceUnavailable, "bot_disabled", "机器人模块未启用")
+		return
+	}
+	if err := s.Bot.Restart(c.Request.Context()); err != nil {
+		s.audit(c, "bot.restart", "bot", "重启失败："+err.Error())
+		s.fail(c, http.StatusBadGateway, "bot_restart_failed", "连接 KOOK 失败："+err.Error())
+		return
+	}
+	s.audit(c, "bot.restart", "bot", "已按最新配置重新连接")
+	c.JSON(http.StatusOK, gin.H{"ok": true, "status": s.Bot.Status()})
 }
 
 // ---------------------------------------------------------------------------

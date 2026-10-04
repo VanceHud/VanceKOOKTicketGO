@@ -8,6 +8,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -19,12 +20,27 @@ import (
 	"gorm.io/gorm"
 
 	"vancekookticket/internal/auth"
+	"vancekookticket/internal/bot"
 	"vancekookticket/internal/config"
 	"vancekookticket/internal/eventbus"
+	"vancekookticket/internal/kook"
 	"vancekookticket/internal/store"
 	"vancekookticket/internal/ticket"
 	"vancekookticket/web"
 )
+
+// BotController 是 API 层对机器人的最小依赖（由 bot.Manager 实现）。
+//
+// 采用消费方定义接口的方式：api 只声明自己需要什么，
+// 便于在不启动真实连接的情况下测试 WebUI 接口。
+type BotController interface {
+	Status() bot.Status
+	GuildRoles(ctx context.Context) ([]kook.Role, error)
+	GuildChannels(ctx context.Context) ([]kook.Channel, error)
+	ResolveWebRole(ctx context.Context, kookUserID string) (string, bool, error)
+	Restart(ctx context.Context) error
+	NotifyConfigChanged()
+}
 
 // Deps 是 API 层的依赖集合。
 type Deps struct {
@@ -39,9 +55,8 @@ type Deps struct {
 	Log      *slog.Logger
 	Started  time.Time
 	Version  string
-
-	// BotConnected 返回 KOOK 连接是否在线；里程碑 3 起由 KOOK 客户端提供。
-	BotConnected func() bool
+	// Bot 为机器人管理器；未配置或未接入时为 nil，所有用法都必须 nil 安全。
+	Bot BotController
 }
 
 // Server 承载全部 HTTP handler。
@@ -57,11 +72,17 @@ func NewServer(d Deps) *Server {
 	return &Server{Deps: d}
 }
 
+// botConnected 判断机器人是否在线。
 func (s *Server) botConnected() bool {
-	if s.BotConnected == nil {
-		return false
+	return s.Bot != nil && s.Bot.Status().Connected
+}
+
+// botStatus 返回机器人状态；未接入时给出明确的未运行状态。
+func (s *Server) botStatus() bot.Status {
+	if s.Bot == nil {
+		return bot.Status{Running: false, LastError: "机器人模块未启用"}
 	}
-	return s.BotConnected()
+	return s.Bot.Status()
 }
 
 // apiError 是统一的错误响应体。

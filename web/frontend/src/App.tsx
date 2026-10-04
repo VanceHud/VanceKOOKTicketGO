@@ -15,6 +15,7 @@ const lazyPage = <T extends Record<string, unknown>>(loader: () => Promise<T>, k
     return { default: module[key] as React.ComponentType }
   })
 
+const AccountPage = lazyPage(() => import("@/routes/Account"), "AccountPage")
 const LoginPage = lazyPage(() => import("@/routes/Login"), "LoginPage")
 const ChangePasswordPage = lazyPage(() => import("@/routes/ChangePassword"), "ChangePasswordPage")
 const DashboardPage = lazyPage(() => import("@/routes/Dashboard"), "DashboardPage")
@@ -61,6 +62,7 @@ export function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/tickets" element={<TicketsPage />} />
             <Route path="/tickets/:no" element={<TicketDetailPage />} />
+            <Route path="/account" element={<AccountPage />} />
             <Route path="/panels" element={<PanelsPage />} />
             <Route path="/emoji-roles" element={<EmojiRolesPage />} />
             <Route path="/roles" element={<RoleMappingPage />} />

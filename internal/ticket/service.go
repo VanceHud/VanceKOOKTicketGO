@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"vancekookticket/internal/eventbus"
@@ -21,8 +22,14 @@ import (
 type Platform interface {
 	// SetUserSpeak 允许或禁止开单人在工单频道发言（锁定 / 重开使用）。
 	SetUserSpeak(ctx context.Context, channelID, userID string, allow bool) error
+	// NotifyLocked 在工单频道内发送“已锁定”提示卡片（含重新激活按钮）。
+	// 该通知属于尽力而为：失败只记录警告，不影响锁定结果。
+	NotifyLocked(ctx context.Context, t *store.Ticket, actor Actor, reason string) error
+	// NotifyReopened 在工单频道内发送“已重新激活”提示卡片。
+	NotifyReopened(ctx context.Context, t *store.Ticket, actor Actor) error
 	// NotifyClosed 通知工单已关闭：写日志频道 + 私聊开单人，返回两条消息 ID。
-	NotifyClosed(ctx context.Context, t *store.Ticket, note string) (logMsgID, userMsgID string, err error)
+	// actor 是关闭操作者，通知卡片需要展示“由谁关闭”。
+	NotifyClosed(ctx context.Context, t *store.Ticket, actor Actor, note string) (logMsgID, userMsgID string, err error)
 	// CloseTicketChannel 删除工单频道。
 	CloseTicketChannel(ctx context.Context, channelID string) error
 }
@@ -84,6 +91,70 @@ func (s *Service) platformOrErr() (Platform, error) {
 // Get 返回工单详情。
 func (s *Service) Get(no string) (*store.Ticket, error) { return s.store.Tickets.ByNo(no) }
 
+// CreatePending 分配工单编号并写入占位记录（状态 pending）。
+//
+// 由机器人在“点击按钮 → 建频道”流程的最前面调用，编号一旦分配即入库，
+// 保证频道名中的编号与数据库一致；建频道失败时用 DiscardPending 回收。
+func (s *Service) CreatePending(ctx context.Context, userID, userName, sourceChannelID string, panelID *uint) (*store.Ticket, error) {
+	now := store.Now()
+	t := &store.Ticket{
+		UserID:          userID,
+		UserName:        userName,
+		SourceChannelID: sourceChannelID,
+		PanelID:         panelID,
+		Status:          store.TicketPending,
+		StartedAt:       now,
+	}
+	if err := s.store.Tickets.CreateWithNo(t, now, s.loc); err != nil {
+		return nil, err
+	}
+	s.audit(Actor{ID: userID, Name: userName, Source: "kook"}, "ticket.open", t.No, "发起工单（等待创建频道）")
+	return t, nil
+}
+
+// Activate 在建频道与权限下发完成后把工单置为进行中。
+func (s *Service) Activate(ctx context.Context, no, channelID string) (*store.Ticket, error) {
+	if err := s.store.Tickets.UpdateFields(no, map[string]any{
+		"channel_id": channelID,
+		"status":     store.TicketOpen,
+		"started_at": store.Now(),
+	}); err != nil {
+		return nil, err
+	}
+	updated, err := s.store.Tickets.ByNo(no)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.Tickets.AddMessage(&store.TicketMessage{
+		TicketNo:  no,
+		ChannelID: channelID,
+		UserID:    "bot",
+		UserName:  "TicketBot",
+		Content:   "工单已创建，等待管理员处理",
+		MsgType:   store.MsgTypeSystem,
+		IsBot:     true,
+		CreatedAt: store.Now(),
+	}); err != nil {
+		s.logWarn("写入开单系统消息失败", no, err)
+	}
+	s.publish(eventbus.EventTicketCreated, no, updated)
+	return updated, nil
+}
+
+// DiscardPending 回收占号：仅在状态仍为 pending 时生效（编号尚未对外暴露）。
+func (s *Service) DiscardPending(ctx context.Context, no string) error {
+	if err := s.store.Tickets.Delete(no); err != nil {
+		return err
+	}
+	s.audit(Actor{ID: "bot", Name: "系统", Source: "system"}, "ticket.discard", no, "开单流程失败，回收工单编号")
+	return nil
+}
+
+// logWarn 输出带工单编号的警告。
+func (s *Service) logWarn(message, no string, err error) {
+	slog.Warn(message, "ticket_no", no, "err", err)
+}
+
 // Close 关闭工单：先通知，再删除频道，最后落库。
 //
 // 顺序说明：通知与删除失败会直接返回错误、不改数据库状态，
@@ -105,7 +176,7 @@ func (s *Service) Close(ctx context.Context, no string, actor Actor, note string
 		return nil, err
 	}
 
-	logMsgID, userMsgID, err := platform.NotifyClosed(ctx, t, note)
+	logMsgID, userMsgID, err := platform.NotifyClosed(ctx, t, actor, note)
 	if err != nil {
 		return nil, fmt.Errorf("发送关闭通知失败: %w", err)
 	}
@@ -171,6 +242,11 @@ func (s *Service) Lock(ctx context.Context, no string, actor Actor, reason strin
 		}
 	}
 
+	// 通知失败不回滚：权限位已生效，这里仅记录警告（见 Platform.NotifyLocked 注释）。
+	if err := platform.NotifyLocked(ctx, t, actor, reason); err != nil {
+		s.logWarn("发送锁定通知失败", no, err)
+	}
+
 	now := store.Now()
 	if err := s.store.Tickets.UpdateFields(no, map[string]any{
 		"status":      store.TicketLocked,
@@ -206,6 +282,10 @@ func (s *Service) Reopen(ctx context.Context, no string, actor Actor) (*store.Ti
 		if err := platform.SetUserSpeak(ctx, t.ChannelID, t.UserID, true); err != nil {
 			return nil, fmt.Errorf("恢复频道发言权限失败: %w", err)
 		}
+	}
+
+	if err := platform.NotifyReopened(ctx, t, actor); err != nil {
+		s.logWarn("发送重新激活通知失败", no, err)
 	}
 
 	if err := s.store.Tickets.UpdateFields(no, map[string]any{

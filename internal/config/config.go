@@ -51,6 +51,8 @@ type Config struct {
 	// KookTokenFromEnv 标记 token 来自环境变量（环境变量优先于数据库中的旧值）。
 	KookTokenFromEnv bool
 	KookGuildID      string
+	// KookAPIBase 可覆盖 KOOK API 地址（默认官方地址）。
+	KookAPIBase string
 
 	// AppSecret 用于加密存储敏感字段（KOOK token）与派生会话相关密钥。
 	AppSecret []byte
@@ -91,6 +93,7 @@ func Load() (*Config, error) {
 		AdminPassword:    os.Getenv("ADMIN_PASSWORD"),
 		KookToken:        strings.TrimSpace(os.Getenv("KOOK_TOKEN")),
 		KookGuildID:      strings.TrimSpace(os.Getenv("KOOK_GUILD_ID")),
+		KookAPIBase:      strings.TrimSpace(os.Getenv("KOOK_API_BASE")),
 		TicketTZ:         env("TICKET_TZ", "Asia/Shanghai"),
 	}
 

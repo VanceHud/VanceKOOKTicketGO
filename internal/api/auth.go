@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"vancekookticket/internal/auth"
 	"vancekookticket/internal/config"
+	"vancekookticket/internal/secure"
 	"vancekookticket/internal/store"
 )
 
@@ -249,14 +251,211 @@ func (s *Server) handleLogout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// handleLoginCode 是一次性登录码的接口占位。
-func (s *Server) handleLoginCode(c *gin.Context) {
-	s.fail(c, http.StatusNotImplemented, "not_implemented",
-		"一次性登录码将在后续里程碑开放：请在 KOOK 私聊机器人发送 /login 获取验证码")
+type loginCodeRequest struct {
+	Code string `json:"code"`
 }
 
-// handleBindCode 是绑定码的接口占位。
+// handleLoginCode 使用 KOOK 一次性登录码登录。
+//
+// 安全要点：
+//   - 验证码在数据库只存哈希，且一次性使用（MarkUsed 带 used_at IS NULL 条件，天然防并发重放）；
+//   - 按 IP 限流，避免暴力枚举；
+//   - 所有失败原因（不存在/已过期/已使用/用途不符）统一提示，不泄露细节；
+//   - 登录时的权限以**当前** KOOK 角色为准（机器人未连接时回退到签发时的角色快照）；
+//   - 未命中角色映射的账号一律拒绝，符合“未命中映射拒绝登录”的约定。
+func (s *Server) handleLoginCode(c *gin.Context) {
+	if !s.Codes.Allow("login-code:" + auth.ClientIPOf(c)) {
+		s.fail(c, http.StatusTooManyRequests, "too_many_attempts", "尝试过于频繁，请稍后再试")
+		return
+	}
+
+	var req loginCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		s.fail(c, http.StatusBadRequest, "invalid_request", "请求参数不合法")
+		return
+	}
+	code := strings.ToUpper(strings.TrimSpace(req.Code))
+	if code == "" {
+		s.fail(c, http.StatusBadRequest, "invalid_request", "请输入登录码")
+		return
+	}
+
+	record, err := s.Store.Codes.ByCodeHash(secure.HashToken(code))
+	if err != nil || record.Purpose != store.CodePurposeLogin || !record.IsUsable(store.Now()) {
+		s.audit(c, "auth.login.failed", "login-code", "一次性登录码校验失败")
+		s.fail(c, http.StatusUnauthorized, "invalid_code", "登录码无效或已过期")
+		return
+	}
+	if err := s.Store.Codes.MarkUsed(record.ID, store.Now(), auth.ClientIPOf(c)); err != nil {
+		// 并发下可能已被消费
+		s.audit(c, "auth.login.failed", "login-code", "一次性登录码已被使用")
+		s.fail(c, http.StatusUnauthorized, "invalid_code", "登录码无效或已过期")
+		return
+	}
+
+	// 角色以最新映射为准；机器人未连接时回退到签发快照
+	role := record.RoleHint
+	if s.Bot != nil {
+		if resolved, ok, err := s.Bot.ResolveWebRole(c.Request.Context(), record.KookUserID); err == nil && ok {
+			role = resolved
+		}
+	}
+	if !validRole(role) {
+		s.audit(c, "auth.login.failed", record.KookUserID, "KOOK 账号未命中角色映射")
+		s.fail(c, http.StatusForbidden, "no_role_mapping", "该 KOOK 账号没有控制台权限，请联系管理员配置角色映射")
+		return
+	}
+
+	user, err := s.Store.Users.ByKookID(record.KookUserID)
+	switch {
+	case err == nil:
+		// 已绑定账号：同步最新角色与显示名
+		updates := map[string]any{"role": role, "updated_at": store.Now()}
+		if record.KookUserName != "" && record.KookUserName != user.KookUserName {
+			updates["kook_user_name"] = record.KookUserName
+		}
+		if err := s.Store.Users.UpdateFields(user.ID, updates); err != nil {
+			s.failInternal(c, err, "auth.login_code.update")
+			return
+		}
+		if user.Disabled {
+			s.audit(c, "auth.login.failed", user.Username, "账号已被禁用")
+			s.fail(c, http.StatusForbidden, "account_disabled", "账号已被禁用，请联系管理员")
+			return
+		}
+		user.Role = role
+
+	case errors.Is(err, store.ErrNotFound):
+		// 首次登录：自动创建账号（随机密码，凭据仅用于会话，不对外暴露）
+		password, err := secure.RandomHex(24)
+		if err != nil {
+			s.failInternal(c, err, "auth.login_code.password")
+			return
+		}
+		hash, err := auth.HashPassword(password + "Aa1!")
+		if err != nil {
+			s.failInternal(c, err, "auth.login_code.hash")
+			return
+		}
+		kookID := record.KookUserID
+		created := &store.WebUser{
+			Username:     "kook_" + kookID,
+			DisplayName:  firstNonEmptyString(record.KookUserName, "KOOK 用户"),
+			PasswordHash: hash,
+			Role:         role,
+			KookUserID:   &kookID,
+			KookUserName: record.KookUserName,
+		}
+		if err := s.Store.Users.Create(created); err != nil {
+			s.failStore(c, err, "auth.login_code.create")
+			return
+		}
+		user = created
+		s.audit(c, "user.create", user.Username, "KOOK 账号首次登录，自动创建账号，角色："+role)
+
+	default:
+		s.failInternal(c, err, "auth.login_code.lookup")
+		return
+	}
+
+	session, err := s.Sessions.Create(user.ID, auth.ClientIPOf(c), c.Request.UserAgent())
+	if err != nil {
+		s.failInternal(c, err, "auth.login_code.session")
+		return
+	}
+	auth.SetSessionCookie(c, config.SessionCookieName, session.Token, s.Config.SessionMaxTTL)
+	auth.SetLoggedInMarker(c, s.Config.SessionMaxTTL)
+
+	now := store.Now()
+	if err := s.Store.Users.TouchLogin(user.ID, now); err != nil {
+		s.Log.Error("更新最近登录时间失败", "user", user.Username, "err", err)
+	}
+	user.LastLoginAt = &now
+
+	s.audit(c, "auth.login.success", user.Username, "使用 KOOK 一次性登录码登录")
+	c.JSON(http.StatusOK, s.buildMeResponse(c, user, s.Sessions.CSRFToken(session.Token)))
+}
+
+type bindCodeRequest struct {
+	Code string `json:"code"`
+}
+
+// handleBindCode 把 KOOK 身份绑定到当前登录的 WebUI 账号。
+//
+// 绑定本身不改变权限（权限仍由角色映射决定），因此这里只做身份关联与冲突校验。
 func (s *Server) handleBindCode(c *gin.Context) {
-	s.fail(c, http.StatusNotImplemented, "not_implemented",
-		"账号绑定将在后续里程碑开放：请在 KOOK 私聊机器人发送 /bind 获取绑定码")
+	if !s.Codes.Allow("bind-code:" + auth.ClientIPOf(c)) {
+		s.fail(c, http.StatusTooManyRequests, "too_many_attempts", "尝试过于频繁，请稍后再试")
+		return
+	}
+
+	var req bindCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		s.fail(c, http.StatusBadRequest, "invalid_request", "请求参数不合法")
+		return
+	}
+	code := strings.ToUpper(strings.TrimSpace(req.Code))
+	if code == "" {
+		s.fail(c, http.StatusBadRequest, "invalid_request", "请输入绑定码")
+		return
+	}
+
+	record, err := s.Store.Codes.ByCodeHash(secure.HashToken(code))
+	if err != nil || record.Purpose != store.CodePurposeBind || !record.IsUsable(store.Now()) {
+		s.audit(c, "auth.bind.failed", "bind-code", "绑定码校验失败")
+		s.fail(c, http.StatusUnauthorized, "invalid_code", "绑定码无效或已过期")
+		return
+	}
+
+	identity := auth.IdentityOf(c)
+	current, err := s.Store.Users.ByID(identity.UserID)
+	if err != nil {
+		s.failStore(c, err, "auth.bind.user")
+		return
+	}
+
+	// 该 KOOK 身份不能已绑定其它账号
+	if existing, err := s.Store.Users.ByKookID(record.KookUserID); err == nil && existing.ID != current.ID {
+		s.audit(c, "auth.bind.failed", current.Username, "该 KOOK 身份已绑定其它账号")
+		s.fail(c, http.StatusConflict, "already_bound", "该 KOOK 账号已绑定其它控制台账号")
+		return
+	}
+	// 当前账号不能同时绑定两个 KOOK 身份
+	if current.KookUserID != nil && *current.KookUserID != record.KookUserID {
+		s.fail(c, http.StatusConflict, "already_bound", "当前账号已绑定其它 KOOK 身份，请先解绑")
+		return
+	}
+
+	if err := s.Store.Codes.MarkUsed(record.ID, store.Now(), auth.ClientIPOf(c)); err != nil {
+		s.fail(c, http.StatusUnauthorized, "invalid_code", "绑定码无效或已过期")
+		return
+	}
+
+	kookID := record.KookUserID
+	if err := s.Store.Users.UpdateFields(current.ID, map[string]any{
+		"kook_user_id":   kookID,
+		"kook_user_name": record.KookUserName,
+		"updated_at":     store.Now(),
+	}); err != nil {
+		s.failStore(c, err, "auth.bind.update")
+		return
+	}
+
+	updated, err := s.Store.Users.ByID(current.ID)
+	if err != nil {
+		s.failStore(c, err, "auth.bind.reload")
+		return
+	}
+	s.audit(c, "auth.bind", updated.Username, "绑定 KOOK 身份："+firstNonEmptyString(record.KookUserName, record.KookUserID))
+	c.JSON(http.StatusOK, gin.H{"user": toMeUser(updated)})
+}
+
+// firstNonEmptyString 返回第一个非空字符串。
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

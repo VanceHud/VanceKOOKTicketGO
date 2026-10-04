@@ -318,7 +318,19 @@
       "category_id": "工单分组 ID",
       "log_channel_id": "日志频道 ID",
       "debug_channel_id": "调试频道 ID"
-    }
+    },
+    "restart": "重新连接",
+    "restarting": "连接中…",
+    "restartSuccess": "已按最新配置重新连接",
+    "restartFailed": "连接失败",
+    "eventsHandled": "已处理事件",
+    "sessionId": "会话 ID",
+    "lastEventAt": "最近事件",
+    "startedAt": "启动时间",
+    "notRunning": "未启动",
+    "liveTitle": "运行状态",
+    "noBot": "机器人模块未启用",
+    "startingAt": "连接于"
   },
   "settings": {
     "title": "系统设置",
@@ -406,5 +418,25 @@
     "conflict": "当前状态不允许该操作",
     "unknown": "出错了，请稍后重试",
     "requestId": "请求 ID：{{id}}"
+  },
+  "account": {
+    "title": "我的账号",
+    "description": "账号信息、KOOK 身份绑定与密码管理",
+    "profileTitle": "账号信息",
+    "username": "用户名",
+    "displayName": "显示名",
+    "role": "权限",
+    "kookBinding": "KOOK 绑定",
+    "bound": "已绑定",
+    "notBound": "未绑定",
+    "bindTitle": "绑定 KOOK 身份",
+    "bindDesc": "在 KOOK 私聊机器人发送 /bind 获取绑定码，输入后即可把 KOOK 身份关联到本账号。绑定后同样可以使用 /login 登录码登录。",
+    "bindPlaceholder": "请输入 6 位绑定码",
+    "bindSubmit": "绑定",
+    "bindSuccess": "绑定成功",
+    "bindHint": "绑定只做身份关联，权限仍由「角色与权限」中的映射决定。",
+    "passwordTitle": "修改密码",
+    "passwordDesc": "修改后其它设备的会话会立即失效",
+    "gotoPassword": "去修改密码"
   }
 }

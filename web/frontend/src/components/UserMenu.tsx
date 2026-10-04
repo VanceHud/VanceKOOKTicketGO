@@ -1,6 +1,6 @@
 /** 侧边栏底部的账号菜单：展示角色、跳转改密、登出。 */
 
-import { ChevronsUpDown, KeyRound, LogOut } from "lucide-react"
+import { ChevronsUpDown, KeyRound, LogOut, UserCircle2 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { useNavigate } from "react-router"
 
@@ -56,6 +56,10 @@ export function UserMenu() {
               </p>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => navigate("/account")}>
+              <UserCircle2 className="size-4" />
+              {t("account.title")}
+            </DropdownMenuItem>
             <DropdownMenuItem onClick={() => navigate("/change-password")}>
               <KeyRound className="size-4" />
               {t("nav.changePassword")}
