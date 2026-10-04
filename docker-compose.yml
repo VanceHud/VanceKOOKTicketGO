@@ -19,9 +19,15 @@ services:
     container_name: kook-ticket
     restart: unless-stopped
 
+    # 以宿主机用户身份运行：Linux 上 bind mount 的 ./data 属主与容器内 uid 不一致时，
+    # 容器会因无法写数据库而反复重启。deploy.sh 会自动写入 PUID/PGID；
+    # 手工部署时若出现 “unable to open database file”，可改为 10001:10001 并 chown data 目录。
+    user: "${PUID:-10001}:${PGID:-10001}"
+
     ports:
-      # 仅监听回环地址，由宿主机反向代理对外暴露；如需直接暴露改为 "${PORT:-8080}:8080"
-      - "127.0.0.1:${PORT:-8080}:8080"
+      # 默认仅监听回环地址（配合反向代理更安全）。
+      # 直接用 IP 访问请设置 BIND_ADDR=0.0.0.0（deploy.sh 支持 --bind 0.0.0.0）。
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8080}:8080"
 
     environment:
       PORT: 8080

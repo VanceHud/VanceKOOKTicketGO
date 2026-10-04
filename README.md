@@ -61,7 +61,18 @@ KOOK 工单（Ticket）机器人，带自托管 WebUI 与 SQLite 数据库，**�
 | 9 | 报表定时导出（CSV 邮件/Webhook 推送）、按客服的自定义工作量统计 |
 | 10 | 多服务器（多 guild）支持、账号解绑接口 |
 
-> 📘 **部署到服务器请直接看 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**：
+> 🚀 **一键部署**（推荐）：
+>
+> ```bash
+> git clone <仓库地址> kook-ticket && cd kook-ticket
+> ./deploy.sh up            # 自动生成 .env、构建镜像、启动、健康检查、打印初始密码
+> ```
+>
+> `./deploy.sh` 还提供 `upgrade`（备份 + 重建 + 健康检查）、`backup` / `restore`、
+> `reset-password`、`status` / `logs`、`doctor`（环境自检）与交互菜单（直接运行 `./deploy.sh`）。
+> 手工部署、反向代理与排错请看下方教程。
+>
+> 📘 **部署教程：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**：
 > 从 KOOK 应用申请、权限与事件订阅，到 Docker Compose / 二进制 + systemd 部署、
 > 反向代理与 HTTPS、首次配置顺序、备份恢复、忘记密码救援与排错速查表。
 
@@ -189,18 +200,18 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 
 * SQLite（WAL 模式）保存在 `DATA_DIR`：`ticket.db`、`ticket.db-wal`、`ticket.db-shm`、`app_secret`。
 * 所有时间戳以 UTC 存库（驱动的时间文本格式定宽，因此文本比较等价于时间比较），界面按浏览器本地时区渲染。
-* 备份（两种方式，详见 [部署教程](docs/DEPLOYMENT.md#36-备份与恢复)）：
+* 备份与恢复直接用脚本（备份内含数据库与密钥，恢复会校验密钥一致性）：
 
 ```bash
-# 方式一：停服后整目录打包（最稳，包含 WAL；容器内没有 sqlite3 命令，所以不要在容器里做）
-docker compose stop && tar czf backup-$(date +%F).tar.gz data/ && docker compose start
-
-# 方式二：宿主机装有 sqlite3 时在线备份（不中断服务）
-sqlite3 ./data/ticket.db ".backup './data/backup-$(date +%F).db'"
+./deploy.sh backup                 # 在线备份（有 sqlite3）或停服冷备，自动保留最近 10 份
+./deploy.sh restore                # 恢复最新备份（缺省），也可指定文件
+./deploy.sh restore backups/kook-ticket-20260105-120000.tar.gz
 ```
 
-* 别忘了备份 `data/app_secret`：它是加密 KOOK Token 的密钥。
-* 恢复：停止服务 → 删除 `ticket.db*` → 从备份恢复 → 启动。
+* 备份内容为 `data/` + `deploy-env`（即 `.env`，内含 `APP_SECRET`）。
+  **密钥必须与数据库一起保管**：只恢复数据库而没有密钥，数据库里加密的 KOOK Token 将无法解密。
+* 恢复时脚本只替换数据目录**里面的文件**，不会替换目录本身
+  （Docker 的 bind mount 在容器创建时绑定目录 inode，替换目录会导致容器继续写旧数据）。
 
 ---
 
@@ -243,8 +254,13 @@ make dist       # 交叉编译发布包（linux/amd64、linux/arm64、darwin/arm
 运维常用命令：
 
 ```bash
-./kook-ticket -version                       # 查看版本
-./kook-ticket -reset-password admin          # 忘记密码：随机生成新密码并打印
+./deploy.sh doctor                           # 环境自检（Docker/端口/磁盘）
+./deploy.sh status | logs | backup | restore # 状态、日志、备份、恢复
+./deploy.sh reset-password admin             # 忘记密码（自动停服后重置再起服）
+
+# 二进制部署时直接调用程序内置命令
+./kook-ticket -version
+./kook-ticket -reset-password admin
 ./kook-ticket -reset-password admin -password 'NewPass@2026x'
 ```
 

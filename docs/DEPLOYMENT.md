@@ -91,6 +91,37 @@
 
 ## 3. 方式 A：Docker Compose（推荐）
 
+### 3.0 一键脚本（最省事）
+
+仓库根目录提供了 `deploy.sh`，覆盖“生成 .env → 构建 → 启动 → 备份 → 升级 → 重置密码”的完整流程：
+
+```bash
+git clone <你的仓库地址> kook-ticket && cd kook-ticket
+./deploy.sh doctor          # 可选：环境自检（Docker、端口占用、磁盘、sqlite3）
+./deploy.sh up              # 自动生成 .env、构建镜像、启动、健康检查，并打印初始密码
+./deploy.sh                 # 不带参数 = 交互菜单
+```
+
+| 命令 | 作用 |
+|---|---|
+| `init` | 只生成 `.env`（随机 `APP_SECRET`；`ADMIN_PASSWORD` 默认留空 → 程序生成并强制首登改密） |
+| `up` | 构建镜像并启动（首次会自动 init），支持 `--port` / `--bind` / `--tz` / `--dry-run` |
+| `upgrade` | 备份 → 可选 `git pull` → 重建镜像 → 重启 → 健康检查 → 打印版本变化 |
+| `backup` / `restore [文件]` | 备份（含 `.env` 里的密钥）与恢复；自动保留最近 10 份 |
+| `reset-password [用户名]` | 忘记密码时的救援（自动停服 → 一次性容器重置 → 起服） |
+| `status` / `logs` / `config` | 状态与访问地址 / 跟踪日志 / 查看配置（敏感值打码） |
+| `doctor` | 环境自检 |
+| `stop` / `down` / `restart` | 停止 / 删除容器 / 重启 |
+
+脚本已经处理了几个容易踩的坑：
+
+* **数据目录属主**：Linux 上会把 `PUID/PGID` 写入 `.env` 并交给容器，避免 bind mount 权限导致“unable to open database file”重启循环；
+* **恢复不换目录**：只替换 `data/` 里的文件（Docker 的 bind mount 绑定目录 inode，换目录会让容器继续读写旧数据）；
+* **重置密码先停服**：避免两个进程同时写同一个 WAL 数据库（Docker Desktop 下会报 `disk I/O error`）；
+* **备份包含密钥**：恢复时若 `APP_SECRET` 与备份不一致会明确告警，并把备份内的 `.env` 留在 `data/previous-*/deploy-env`。
+
+如果想手工部署或了解每一步在做什么，继续看下面的分步说明。
+
 ### 3.1 准备代码与配置
 
 ```bash
@@ -516,7 +547,11 @@ data/
 | `login-code` 提示无效或已过期 | 一次性码只能用一次、有效期 5 分钟 | 重新在 KOOK 私聊发 `/login` 获取 |
 | 忘记管理员密码 | —— | 见 3.7 / 4.6 的 `-reset-password` |
 | 数据库自检失败/写入报错 | 磁盘满、文件权限被改、WAL 损坏 | 检查磁盘与 `data/` 权限（0700/0600）；从备份恢复 |
-| 容器启动即退出 | `.env` 校验失败（如 `APP_SECRET` 过短、`TICKET_TZ` 非法） | `docker compose logs` 里会给出明确原因 |
+| 容器启动即退出 | `.env` 校验失败（如 `APP_SECRET` 过短、`TICKET_TZ` 非法、`PORT` 非数字） | `docker compose logs` 里会给出明确原因 |
+| 容器反复重启，日志报 `unable to open database file` / 权限不足 | bind mount 的 `data/` 属主与容器运行身份不一致（Linux 常见） | 用 `./deploy.sh up`（会自动写入 `PUID/PGID`）；或 `sudo chown -R 10001:10001 data` |
+| `docker compose exec ... -reset-password` 报 `disk I/O error (522)` | 两个进程同时访问 bind mount 上的 WAL 库（Docker Desktop/virtiofs） | 用 `./deploy.sh reset-password`（会先停服再执行）；不要直接 exec |
+| 恢复后数据看起来没变 | 手工 `mv data` 换目录会保留旧的挂载 inode | 用 `./deploy.sh restore`（只替换目录内文件）；或手工删除 `data/ticket.db*` 后再解压覆盖 |
+| 备份恢复到新机器后 KOOK Token 失效 | 新机器的 `APP_SECRET` 与备份不同（Token 是加密存储的） | 备份内含 `.env`（`deploy-env`），从中取回 `APP_SECRET` 写入 `.env` 后重启 |
 
 ---
 
