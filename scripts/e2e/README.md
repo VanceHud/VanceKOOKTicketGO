@@ -53,6 +53,15 @@ LOGIN_CODE='XYZ789' ADMIN_PASSWORD='SmokeTest@2026kt' node scripts/e2e/02-kook-a
 | `LOGIN_CODE` | `XYZ789` | 第二步使用的登录码（需与服务端库中一致） |
 | `OUT_DIR` | `/tmp/kook-ticket-e2e` | 截图输出目录 |
 
+另外还有 `03-manage-and-stats.mjs`：验收统计看板、面板管理、表情规则增删改与北京时间标注，
+不需要登录码，直接用管理员密码运行即可：
+
+```bash
+ADMIN_PASSWORD='SmokeTest@2026kt' node scripts/e2e/03-manage-and-stats.mjs
+```
+
 脚本退出码非 0 表示存在断言失败、控制台错误或失败请求。
+每次运行 `02` 脚本都要**重新写入一个登录码**（一次性码第一次登录后即作废，
+重复运行同一个码会看到“登录码无效或已过期”，这是预期行为）。
 注意：`02` 脚本会**故意**触发一次“机器人重连失败”（DryRun 模式未配置 Token），
 因此浏览器控制台会出现一条 502 记录，这是预期行为。

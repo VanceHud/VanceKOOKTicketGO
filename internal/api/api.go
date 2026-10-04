@@ -40,6 +40,14 @@ type BotController interface {
 	ResolveWebRole(ctx context.Context, kookUserID string) (string, bool, error)
 	Restart(ctx context.Context) error
 	NotifyConfigChanged()
+	// CreatePanel 让机器人在指定频道发送面板卡片并返回消息 ID。
+	CreatePanel(ctx context.Context, channelID, title, buttonText string) (string, error)
+	// DeleteMessage 尽力删除一条消息（面板重建时清理旧卡片）。
+	DeleteMessage(ctx context.Context, msgID string) error
+	// ChannelInfo 返回频道信息（用于校验频道存在并记录名称）。
+	ChannelInfo(ctx context.Context, channelID string) (*kook.Channel, error)
+	// RoleName 返回角色名（未知时返回空串）。
+	RoleName(ctx context.Context, roleID string) string
 }
 
 // Deps 是 API 层的依赖集合。

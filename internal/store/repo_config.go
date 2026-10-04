@@ -165,6 +165,15 @@ func (r *EmojiRepo) ListRules() ([]EmojiRule, error) {
 	return rules, err
 }
 
+// RuleByID 按主键查询规则。
+func (r *EmojiRepo) RuleByID(id uint) (*EmojiRule, error) {
+	var rule EmojiRule
+	if err := r.db.First(&rule, id).Error; err != nil {
+		return nil, mapNotFound(err)
+	}
+	return &rule, nil
+}
+
 // CreateRule 新增规则。
 func (r *EmojiRepo) CreateRule(rule *EmojiRule) error {
 	now := Now()

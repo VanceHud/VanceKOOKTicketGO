@@ -11,6 +11,7 @@ import { createContext, useCallback, useContext, useMemo, type ReactNode } from 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { ApiError, api, setCsrfToken } from "@/lib/api"
+import { setDisplayTimezone } from "@/lib/timezone"
 import type { MeResponse } from "@/lib/types"
 
 interface AuthContextValue {
@@ -55,6 +56,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const me = await api.get<MeResponse>("/auth/me")
         setCsrfToken(me.csrfToken)
+        // 时间统一按后端业务时区渲染（默认 Asia/Shanghai）
+        setDisplayTimezone(me.server.ticketTimezone)
         return me
       } catch (error) {
         if (error instanceof ApiError && error.isUnauthenticated) {
@@ -73,6 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     mutationFn: (variables) => api.post<MeResponse>("/auth/login", variables),
     onSuccess: (me) => {
       setCsrfToken(me.csrfToken)
+      setDisplayTimezone(me.server.ticketTimezone)
       queryClient.setQueryData(ME_QUERY_KEY, me)
     },
   })

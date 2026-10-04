@@ -44,6 +44,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { api, downloadExport } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { formatDateTime, formatRelative, roleAtLeast } from "@/lib/format"
+import { timezoneLabel } from "@/lib/timezone"
 import { queryKeys, useTicket, useTicketMessages, useTicketNotes } from "@/lib/queries"
 import { toastError, toastSuccess } from "@/lib/toast"
 import type { Ticket } from "@/lib/types"
@@ -291,6 +292,7 @@ export function TicketDetailPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">{t("ticket.overview")}</CardTitle>
+              <CardDescription>{timezoneLabel(i18n.language)}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
               <InfoRow label={t("tickets.colUser")} value={`${ticket.userName}（${ticket.userId}）`} />

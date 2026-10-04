@@ -1,13 +1,15 @@
 /**
  * 展示层格式化工具：时间、时长、文件大小。
  *
- * 后端统一存 UTC，这里按浏览器本地时区渲染；
- * 图表/表格中的日期刻度按当前语言选择 date-fns locale。
+ * 时间一律按**业务时区**（默认 Asia/Shanghai）渲染，而不是浏览器本地时区，
+ * 保证界面时间与 KOOK 群内时间、与后端统计口径（按北京时间分日/分时）一致。
+ * 时长等无时区概念的量按语言本地化。
  */
 
-import { format, formatDistanceToNowStrict, type Locale } from "date-fns"
+import { formatDistanceToNowStrict, type Locale } from "date-fns"
 import { enUS, zhCN } from "date-fns/locale"
 
+import { formatInDisplayTimezone } from "@/lib/timezone"
 import type { TicketStatus } from "@/lib/types"
 
 const localeMap: Record<string, Locale> = {
@@ -33,19 +35,19 @@ function isValidDate(value?: string | null): value is string {
   return date.getFullYear() >= 1970
 }
 
-/** 完整日期时间，例如 2026-01-05 14:03:11。 */
+/** 完整日期时间（业务时区），例如 2026-01-05 14:03:11。 */
 export function formatDateTime(value?: string | null, language = "zh-CN"): string {
   if (!isValidDate(value)) return "—"
-  return format(new Date(value), "yyyy-MM-dd HH:mm:ss", { locale: dateLocale(language) })
+  return formatInDisplayTimezone(value, "yyyy-MM-dd HH:mm:ss", { locale: dateLocale(language) })
 }
 
-/** 仅日期，例如 2026-01-05。 */
+/** 仅日期（业务时区），例如 2026-01-05。 */
 export function formatDate(value?: string | null, language = "zh-CN"): string {
   if (!isValidDate(value)) return "—"
-  return format(new Date(value), "yyyy-MM-dd", { locale: dateLocale(language) })
+  return formatInDisplayTimezone(value, "yyyy-MM-dd", { locale: dateLocale(language) })
 }
 
-/** 相对时间，例如 “3 分钟前”。 */
+/** 相对时间，例如 “3 分钟前”（与本地时区无关，按真实时间差计算）。 */
 export function formatRelative(value?: string | null, language = "zh-CN"): string {
   if (!isValidDate(value)) return "—"
   return formatDistanceToNowStrict(new Date(value), { addSuffix: true, locale: dateLocale(language) })

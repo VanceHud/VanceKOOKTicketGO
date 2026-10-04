@@ -140,6 +140,42 @@ func (m *Manager) ResolveWebRole(ctx context.Context, kookUserID string) (string
 	return role, ok, nil
 }
 
+// CreatePanel 让机器人在指定频道创建面板卡片。
+func (m *Manager) CreatePanel(ctx context.Context, channelID, title, buttonText string) (string, error) {
+	instance := m.current()
+	if instance == nil {
+		return "", errors.New("机器人尚未连接 KOOK，无法发送面板卡片")
+	}
+	return instance.CreatePanel(ctx, channelID, title, buttonText)
+}
+
+// DeleteMessage 尽力删除一条消息。
+func (m *Manager) DeleteMessage(ctx context.Context, msgID string) error {
+	instance := m.current()
+	if instance == nil {
+		return errors.New("机器人尚未连接 KOOK")
+	}
+	return instance.DeleteMessage(ctx, msgID)
+}
+
+// ChannelInfo 返回频道信息。
+func (m *Manager) ChannelInfo(ctx context.Context, channelID string) (*kook.Channel, error) {
+	instance := m.current()
+	if instance == nil {
+		return nil, errors.New("机器人尚未连接 KOOK")
+	}
+	return instance.ChannelInfo(ctx, channelID)
+}
+
+// RoleName 返回角色名（未知返回空串）。
+func (m *Manager) RoleName(ctx context.Context, roleID string) string {
+	instance := m.current()
+	if instance == nil {
+		return ""
+	}
+	return instance.RoleInfo(ctx, roleID)
+}
+
 // NotifyConfigChanged 在 WebUI 修改面板等配置后清缓存。
 func (m *Manager) NotifyConfigChanged() {
 	if instance := m.current(); instance != nil {

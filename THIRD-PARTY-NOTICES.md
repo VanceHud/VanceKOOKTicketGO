@@ -23,6 +23,7 @@ sidebar、skeleton、sonner、switch、table、tabs、textarea、tooltip。
 | [Sonner](https://github.com/emilkowalski/sonner) | MIT |
 | [Recharts](https://github.com/recharts/recharts) | MIT |
 | [date-fns](https://github.com/date-fns/date-fns) | MIT |
+| [date-fns-tz](https://github.com/marnusw/date-fns-tz) | MIT | 按业务时区（默认北京时间）渲染时间 |
 | [lucide](https://github.com/lucide-icons/lucide) | ISC |
 | [Tailwind CSS](https://github.com/tailwindlabs/tailwindcss) | MIT |
 | [Geist 字体](https://github.com/vercel/geist-font)（经 `@fontsource-variable/geist` 自托管） | SIL OFL 1.1 |

@@ -24,7 +24,7 @@ try {
   // 1) 登录码登录
   await page.goto(`${BASE}/login`, { waitUntil: "networkidle" })
   await page.getByRole("tab", { name: "登录码" }).click()
-  await page.fill("#login-code", "xyz789")
+  await page.fill("#login-code", (process.env.LOGIN_CODE ?? "XYZ789").toLowerCase())
   await page.getByRole("button", { name: "使用登录码登录" }).click()
   await page.waitForURL((u) => !u.pathname.startsWith("/login"), { timeout: 15000 })
   ok("登录码登录成功", `跳转到 ${new URL(page.url()).pathname}`)

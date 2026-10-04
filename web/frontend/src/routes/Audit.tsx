@@ -1,7 +1,7 @@
 /** 审计日志（仅管理员）：登录、配置变更与工单操作的时间线。 */
 
 import { useState } from "react"
-import { ScrollText } from "lucide-react"
+import { Clock, ScrollText } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import { PageHeader } from "@/components/PageHeader"
@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatDateTime } from "@/lib/format"
+import { timezoneLabel } from "@/lib/timezone"
 import { useAuditLogs } from "@/lib/queries"
 import { cn } from "@/lib/utils"
 
@@ -62,6 +63,11 @@ export function AuditPage() {
   return (
     <div className="space-y-4">
       <PageHeader title={t("audit.title")} description={t("audit.description")} />
+
+      <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+        <Clock className="size-3.5" />
+        {t("stats.timezoneNote", { timezone: timezoneLabel(i18n.language) })}
+      </p>
 
       <Card>
         <CardContent className="grid gap-3 pt-6 sm:grid-cols-3">

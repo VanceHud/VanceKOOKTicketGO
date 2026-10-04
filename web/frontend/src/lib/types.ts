@@ -102,6 +102,52 @@ export interface MeUser {
   createdAt: string
 }
 
+export interface DurationStats {
+  count: number
+  avgSeconds: number
+  p50Seconds: number
+  p90Seconds: number
+}
+
+export interface HourBucket {
+  hour: number
+  opened: number
+  closed: number
+}
+
+export interface CloserStat {
+  name: string
+  closed: number
+  avgResolutionSeconds: number
+}
+
+export interface SourceStat {
+  /** 形如 "频道ID|频道名"（服务端已附带可读名称）。 */
+  channelId: string
+  opened: number
+  closed: number
+  closedRate: number
+}
+
+export interface StatsAnalytics {
+  generatedAt: string
+  rangeDays: number
+  total: number
+  closed: number
+  closedRate: number
+  firstReply: DurationStats
+  resolution: DurationStats
+  hourly: HourBucket[]
+  closers: CloserStat[]
+  sources: SourceStat[]
+  archivedMessages: number
+  avgMessagesPerTicket: number
+  openedToday: number
+  openedYesterday: number
+  closedToday: number
+  closedYesterday: number
+}
+
 export interface MeResponse {
   user: MeUser
   csrfToken: string
@@ -110,6 +156,8 @@ export interface MeResponse {
     dryRun: boolean
     botConnected: boolean
     idleTimeoutSeconds: number
+    /** 业务时区（默认 Asia/Shanghai），前端据此渲染所有时间。 */
+    ticketTimezone: string
   }
 }
 

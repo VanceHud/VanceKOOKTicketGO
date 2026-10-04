@@ -5,6 +5,7 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query"
 
 import { api, buildQuery } from "@/lib/api"
+import { setDisplayTimezone } from "@/lib/timezone"
 import type {
   AdminRole,
   AuditLog,
@@ -17,6 +18,7 @@ import type {
   RoleMapping,
   RuntimeInfo,
   SettingsResponse,
+  StatsAnalytics,
   StatsOverview,
   Ticket,
   TicketListParams,
@@ -32,6 +34,7 @@ export const queryKeys = {
   messages: (no: string) => ["messages", no] as const,
   notes: (no: string) => ["notes", no] as const,
   stats: (days: number) => ["stats", days] as const,
+  analytics: (days: number) => ["analytics", days] as const,
   settings: ["settings"] as const,
   runtime: ["runtime"] as const,
   users: ["users"] as const,
@@ -84,12 +87,26 @@ export function useStats(days: number): UseQueryResult<StatsOverview> {
   })
 }
 
+export function useAnalytics(days: number): UseQueryResult<StatsAnalytics> {
+  return useQuery({
+    queryKey: queryKeys.analytics(days),
+    queryFn: () => api.get<StatsAnalytics>(`/stats/analytics?days=${days}`),
+  })
+}
+
 export function useSettings(): UseQueryResult<SettingsResponse> {
   return useQuery({ queryKey: queryKeys.settings, queryFn: () => api.get<SettingsResponse>("/settings") })
 }
 
 export function useRuntimeInfo(): UseQueryResult<RuntimeInfo> {
-  return useQuery({ queryKey: queryKeys.runtime, queryFn: () => api.get<RuntimeInfo>("/meta/runtime") })
+  return useQuery({
+    queryKey: queryKeys.runtime,
+    queryFn: async () => {
+      const info = await api.get<RuntimeInfo>("/meta/runtime")
+      setDisplayTimezone(info.ticketTimezone)
+      return info
+    },
+  })
 }
 
 export function useUsers(): UseQueryResult<ListResponse<WebUserAccount>> {

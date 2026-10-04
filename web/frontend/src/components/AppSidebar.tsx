@@ -6,6 +6,7 @@
  */
 
 import {
+  BarChart3,
   Bot,
   LayoutDashboard,
   LayoutPanelLeft,
@@ -52,6 +53,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: "/", labelKey: "nav.dashboard", icon: LayoutDashboard, end: true },
       { to: "/tickets", labelKey: "nav.tickets", icon: Ticket },
+      { to: "/stats", labelKey: "nav.stats", icon: BarChart3 },
     ],
   },
   {

@@ -19,6 +19,7 @@ const AccountPage = lazyPage(() => import("@/routes/Account"), "AccountPage")
 const LoginPage = lazyPage(() => import("@/routes/Login"), "LoginPage")
 const ChangePasswordPage = lazyPage(() => import("@/routes/ChangePassword"), "ChangePasswordPage")
 const DashboardPage = lazyPage(() => import("@/routes/Dashboard"), "DashboardPage")
+const StatsPage = lazyPage(() => import("@/routes/Stats"), "StatsPage")
 const TicketsPage = lazyPage(() => import("@/routes/Tickets"), "TicketsPage")
 const TicketDetailPage = lazyPage(() => import("@/routes/TicketDetail"), "TicketDetailPage")
 const PanelsPage = lazyPage(() => import("@/routes/Panels"), "PanelsPage")
@@ -61,6 +62,7 @@ export function App() {
           <Route element={<AppShell />}>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/tickets" element={<TicketsPage />} />
+            <Route path="/stats" element={<StatsPage />} />
             <Route path="/tickets/:no" element={<TicketDetailPage />} />
             <Route path="/account" element={<AccountPage />} />
             <Route path="/panels" element={<PanelsPage />} />

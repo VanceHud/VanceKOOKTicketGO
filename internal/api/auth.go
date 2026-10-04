@@ -43,6 +43,8 @@ type meResponse struct {
 		DryRun       bool   `json:"dryRun"`
 		BotConnected bool   `json:"botConnected"`
 		IdleTimeout  int    `json:"idleTimeoutSeconds"`
+		// TicketTimezone 是业务时区（默认 Asia/Shanghai），前端据此展示所有时间。
+		TicketTimezone string `json:"ticketTimezone"`
 	} `json:"server"`
 }
 
@@ -65,6 +67,7 @@ func (s *Server) buildMeResponse(c *gin.Context, user *store.WebUser, csrf strin
 	resp.Server.DryRun = s.Config.DryRun
 	resp.Server.BotConnected = s.botConnected()
 	resp.Server.IdleTimeout = int(s.Config.SessionIdleTTL.Seconds())
+	resp.Server.TicketTimezone = s.Config.TicketTZ
 	return resp
 }
 

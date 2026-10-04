@@ -30,6 +30,8 @@ type testEnv struct {
 	store   *store.Store
 	config  *config.Config
 	tickets *ticket.Service
+	// deps 保留原始依赖，便于在测试中替换机器人实现后重建路由
+	deps Deps
 }
 
 const (
@@ -82,7 +84,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	// 测试期间静默日志，保持输出可读
 	silentLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	engine := NewRouter(Deps{
+	deps := Deps{
 		Log:      silentLog,
 		Config:   cfg,
 		Store:    st,
@@ -94,9 +96,10 @@ func newTestEnv(t *testing.T) *testEnv {
 		Web:      webHandler,
 		Started:  store.Now(),
 		Version:  "test",
-	})
+	}
+	engine := NewRouter(deps)
 
-	return &testEnv{engine: engine, store: st, config: cfg, tickets: svc}
+	return &testEnv{engine: engine, store: st, config: cfg, tickets: svc, deps: deps}
 }
 
 func (e *testEnv) seedUser(t *testing.T, username, password, role string, mustChange bool) *store.WebUser {

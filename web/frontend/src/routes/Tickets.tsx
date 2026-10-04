@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react"
-import { FilterX, Search } from "lucide-react"
+import { Clock, FilterX, Search } from "lucide-react"
 import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table"
 import { useTranslation } from "react-i18next"
 import { Link, useNavigate, useSearchParams } from "react-router"
@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatDateTime } from "@/lib/format"
+import { timezoneLabel } from "@/lib/timezone"
 import { useTickets } from "@/lib/queries"
 import type { Ticket } from "@/lib/types"
 
@@ -138,6 +139,11 @@ export function TicketsPage() {
   return (
     <div className="space-y-4">
       <PageHeader title={t("tickets.title")} description={t("tickets.description")} />
+
+      <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+        <Clock className="size-3.5" />
+        {t("stats.timezoneNote", { timezone: timezoneLabel(i18n.language) })}
+      </p>
 
       {/* 筛选区 */}
       <Card>

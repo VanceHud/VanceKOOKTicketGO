@@ -222,6 +222,11 @@ func (c *Client) observeRateHeaders(header http.Header) {
 	c.limiter.observeRemaining(remaining, limit, window)
 }
 
+// asAPIError 是 errors.As 的薄封装，便于在包内直接判断错误类别。
+func asAPIError(err error, target **APIError) bool {
+	return errors.As(err, target)
+}
+
 // nonNilMap 保证 POST 时序列化出 {} 而不是 null。
 func nonNilMap(params map[string]any) map[string]any {
 	if params == nil {
