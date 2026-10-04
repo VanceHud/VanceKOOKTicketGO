@@ -104,7 +104,7 @@ try {
   await shot(page, "ticket-detail")
 } catch (error) {
   fatal = error
-  await page.screenshot({ path: "${OUT_DIR}/m4-failure.png" }).catch(() => {})
+  await shot(page, "failure").catch(() => {})
 }
 
 await browser.close()

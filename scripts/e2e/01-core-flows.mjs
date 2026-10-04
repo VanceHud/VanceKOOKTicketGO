@@ -17,6 +17,8 @@ function ok(name, detail = "") {
   results.push(`  ✓ ${name}${detail ? ` — ${detail}` : ""}`)
 }
 
+// 截图统一走这里：失败路径也要用模板字符串拼接 OUT_DIR，
+// 写成 "${OUT_DIR}/xx.png" 会在当前目录建出字面量名为 ${OUT_DIR} 的文件夹。
 async function shot(page, name) {
   await page.screenshot({ path: `${OUT_DIR}/shot-${name}.png`, fullPage: false })
 }
@@ -144,7 +146,7 @@ ok("清理浏览器状态", "完成")
 
 } catch (error) {
   fatal = error
-  await page.screenshot({ path: "${OUT_DIR}/shot-failure.png" }).catch(() => {})
+  await shot(page, "failure").catch(() => {})
 }
 
 await browser.close()
