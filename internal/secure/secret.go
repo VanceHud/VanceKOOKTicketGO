@@ -75,7 +75,12 @@ func HashToken(token string) string {
 }
 
 // ConstantTimeEqual 在长度不等时也保持时间无关比较。
+//
+// 默认拒绝空值（fail closed）：即使调用方漏做空值检查，"两个空字符串" 也不会被误判为匹配成功。
 func ConstantTimeEqual(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
 	if len(a) != len(b) {
 		subtle.ConstantTimeCompare([]byte(a), []byte(a))
 		return false

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"log/slog"
+
 	"github.com/gin-gonic/gin"
 
 	"vancekookticket/internal/auth"
@@ -15,6 +17,10 @@ import (
 //	请求 ID → 客户端 IP 解析 → 访问日志 → panic 恢复 → 安全响应头 → HSTS
 //	→ 会话装载（可选）→ 认证 → CSRF → 强制改密 → 角色校验
 func NewRouter(d Deps) *gin.Engine {
+	// 兵底：任何调用方即使漏传 logger 也不应导致空指针 panic（访问日志/panic 恢复都依赖它）。
+	if d.Log == nil {
+		d.Log = slog.Default()
+	}
 	gin.SetMode(gin.ReleaseMode)
 	server := NewServer(d)
 

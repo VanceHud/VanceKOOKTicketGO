@@ -1,0 +1,27 @@
+# 构建上下文排除项：只允许源码进入镜像构建，避免把本地产物、密钥与依赖目录带进去
+.git
+.gitignore
+.github
+
+# 运行时数据与密钥（绝不能进镜像）
+data
+*.db
+*.db-wal
+*.db-shm
+app_secret
+
+# 构建产物
+bin
+web/dist
+web/frontend/dist
+web/frontend/node_modules
+web/frontend/.vite
+
+# 文档与本地文件
+*.md
+!README.md
+.DS_Store
+.env
+.env.local
+.vscode
+.idea

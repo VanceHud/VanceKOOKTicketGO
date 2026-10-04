@@ -122,6 +122,9 @@ func (s *Server) handleLogin(c *gin.Context) {
 		s.Login.Success(key)
 	}
 	auth.SetSessionCookie(c, config.SessionCookieName, created.Token, s.Config.SessionMaxTTL)
+	// 写入“可能已登录”提示 Cookie，让前端在未登录时跳过 /auth/me（避免无意义的 401 噪音）。
+	auth.SetLoggedInMarker(c, s.Config.SessionMaxTTL)
+
 	now := store.Now()
 	if err := s.Store.Users.TouchLogin(user.ID, now); err != nil {
 		s.Log.Error("更新最近登录时间失败", "user", user.Username, "err", err)
@@ -226,6 +229,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		return
 	}
 	auth.SetSessionCookie(c, config.SessionCookieName, created.Token, s.Config.SessionMaxTTL)
+	auth.SetLoggedInMarker(c, s.Config.SessionMaxTTL)
 
 	user.PasswordHash = hash
 	user.MustChangePassword = false
@@ -240,6 +244,7 @@ func (s *Server) handleLogout(c *gin.Context) {
 		s.Log.Error("注销会话失败", "err", err)
 	}
 	auth.ClearSessionCookie(c, config.SessionCookieName)
+	auth.ClearLoggedInMarker(c)
 	s.audit(c, "auth.logout", actorName(c), "登出")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }

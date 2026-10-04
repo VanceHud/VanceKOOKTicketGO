@@ -1,122 +1,78 @@
-import { useState } from 'react'
-import heroImg from './assets/hero.png'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import './App.css'
+/** 路由与访问控制。 */
 
-function App() {
-  const [count, setCount] = useState(0)
+import { Suspense, lazy } from "react"
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router"
 
-  return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+import { AppShell } from "@/components/AppShell"
+import { FullScreenLoader } from "@/components/StateViews"
+import { TooltipProvider } from "@/components/ui/tooltip"
+import { useAuth } from "@/lib/auth"
 
-      <div className="ticks"></div>
+// 路由级懒加载：首屏只加载登录/外壳所需代码，图表等重依赖随页面按需加载。
+const lazyPage = <T extends Record<string, unknown>>(loader: () => Promise<T>, key: keyof T) =>
+  lazy(async () => {
+    const module = await loader()
+    return { default: module[key] as React.ComponentType }
+  })
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+const LoginPage = lazyPage(() => import("@/routes/Login"), "LoginPage")
+const ChangePasswordPage = lazyPage(() => import("@/routes/ChangePassword"), "ChangePasswordPage")
+const DashboardPage = lazyPage(() => import("@/routes/Dashboard"), "DashboardPage")
+const TicketsPage = lazyPage(() => import("@/routes/Tickets"), "TicketsPage")
+const TicketDetailPage = lazyPage(() => import("@/routes/TicketDetail"), "TicketDetailPage")
+const PanelsPage = lazyPage(() => import("@/routes/Panels"), "PanelsPage")
+const EmojiRolesPage = lazyPage(() => import("@/routes/EmojiRoles"), "EmojiRolesPage")
+const RoleMappingPage = lazyPage(() => import("@/routes/RoleMapping"), "RoleMappingPage")
+const UsersPage = lazyPage(() => import("@/routes/Users"), "UsersPage")
+const BotStatusPage = lazyPage(() => import("@/routes/BotStatus"), "BotStatusPage")
+const SettingsPage = lazyPage(() => import("@/routes/Settings"), "SettingsPage")
+const AuditPage = lazyPage(() => import("@/routes/Audit"), "AuditPage")
+const NotFoundPage = lazyPage(() => import("@/routes/NotFound"), "NotFoundPage")
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+/** 需要登录的路由：未登录跳登录页，未改密跳改密页。 */
+function RequireAuth() {
+  const { isAuthenticated, isLoading, mustChangePassword } = useAuth()
+  const location = useLocation()
+
+  if (isLoading) {
+    return <FullScreenLoader />
+  }
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />
+  }
+  if (mustChangePassword && location.pathname !== "/change-password") {
+    return <Navigate to="/change-password" replace />
+  }
+  return <Outlet />
 }
 
-export default App
+export function App() {
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Suspense fallback={<FullScreenLoader />}>
+        <Routes>
+        <Route path="/login" element={<LoginPage />} />
+
+        <Route element={<RequireAuth />}>
+          {/* 强制改密页：不套用侧边栏，避免在受限状态下暴露导航 */}
+          <Route path="/change-password" element={<ChangePasswordPage />} />
+
+          <Route element={<AppShell />}>
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/tickets" element={<TicketsPage />} />
+            <Route path="/tickets/:no" element={<TicketDetailPage />} />
+            <Route path="/panels" element={<PanelsPage />} />
+            <Route path="/emoji-roles" element={<EmojiRolesPage />} />
+            <Route path="/roles" element={<RoleMappingPage />} />
+            <Route path="/users" element={<UsersPage />} />
+            <Route path="/bot" element={<BotStatusPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/audit" element={<AuditPage />} />
+            <Route path="*" element={<NotFoundPage />} />
+          </Route>
+          </Route>
+        </Routes>
+      </Suspense>
+    </TooltipProvider>
+  )
+}

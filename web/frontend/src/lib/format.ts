@@ -1,0 +1,106 @@
+/**
+ * 展示层格式化工具：时间、时长、文件大小。
+ *
+ * 后端统一存 UTC，这里按浏览器本地时区渲染；
+ * 图表/表格中的日期刻度按当前语言选择 date-fns locale。
+ */
+
+import { format, formatDistanceToNowStrict, type Locale } from "date-fns"
+import { enUS, zhCN } from "date-fns/locale"
+
+import type { TicketStatus } from "@/lib/types"
+
+const localeMap: Record<string, Locale> = {
+  "zh-CN": zhCN,
+  "en-US": enUS,
+}
+
+export function dateLocale(language: string): Locale {
+  return localeMap[language] ?? enUS
+}
+
+/** 完整日期时间，例如 2026-01-05 14:03:11。 */
+export function formatDateTime(value?: string | null, language = "zh-CN"): string {
+  if (!value) return "—"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "—"
+  return format(date, "yyyy-MM-dd HH:mm:ss", { locale: dateLocale(language) })
+}
+
+/** 仅日期，例如 2026-01-05。 */
+export function formatDate(value?: string | null, language = "zh-CN"): string {
+  if (!value) return "—"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "—"
+  return format(date, "yyyy-MM-dd", { locale: dateLocale(language) })
+}
+
+/** 相对时间，例如 “3 分钟前”。 */
+export function formatRelative(value?: string | null, language = "zh-CN"): string {
+  if (!value) return "—"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "—"
+  return formatDistanceToNowStrict(date, { addSuffix: true, locale: dateLocale(language) })
+}
+
+/** 秒 → 可读时长（1h 20m / 45s）。 */
+export function formatDuration(seconds?: number | null): string {
+  if (seconds === undefined || seconds === null || Number.isNaN(seconds) || seconds < 0) return "—"
+  const total = Math.round(seconds)
+  if (total < 60) return `${total}s`
+  const minutes = Math.floor(total / 60)
+  if (minutes < 60) return `${minutes}m ${total % 60}s`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ${minutes % 60}m`
+  const days = Math.floor(hours / 24)
+  return `${days}d ${hours % 24}h`
+}
+
+/** 字节 → 人类可读大小。 */
+export function formatBytes(bytes?: number | null): string {
+  if (!bytes || bytes <= 0) return "—"
+  const units = ["B", "KB", "MB", "GB"]
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
+/** 工单状态对应的语义色类名（与 index.css 中的 --status-* 变量一致）。 */
+export function statusColorClass(status: TicketStatus): string {
+  switch (status) {
+    case "open":
+      return "text-status-open bg-status-open/12 border-status-open/25"
+    case "locked":
+      return "text-status-locked bg-status-locked/15 border-status-locked/30"
+    case "closed":
+      return "text-status-closed bg-status-closed/12 border-status-closed/20"
+    case "failed":
+      return "text-status-failed bg-status-failed/12 border-status-failed/25"
+    case "pending":
+    default:
+      return "text-status-pending bg-status-pending/12 border-status-pending/25"
+  }
+}
+
+/** 角色对应的徽标色。 */
+export function roleColorClass(role: string): string {
+  switch (role) {
+    case "admin":
+      return "text-primary bg-primary/12 border-primary/25"
+    case "staff":
+      return "text-status-open bg-status-open/12 border-status-open/25"
+    case "readonly":
+    default:
+      return "text-muted-foreground bg-muted border-border"
+  }
+}
+
+/** 角色等级，用于前端判断是否显示操作按钮（服务端仍会强制校验）。 */
+export function roleAtLeast(role: string | undefined, required: string): boolean {
+  const rank: Record<string, number> = { admin: 3, staff: 2, readonly: 1 }
+  return (rank[role ?? ""] ?? 0) >= (rank[required] ?? 0)
+}

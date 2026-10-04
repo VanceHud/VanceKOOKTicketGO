@@ -6,8 +6,7 @@
     "module": "esnext",
     "types": ["vite/client"],
 
-    /* 路径别名 */
-    "baseUrl": ".",
+    /* 路径别名（TS 6 起不再需要 baseUrl，paths 相对本文件解析） */
     "paths": { "@/*": ["./src/*"] },
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,

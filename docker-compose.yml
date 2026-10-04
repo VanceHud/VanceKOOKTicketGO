@@ -1,0 +1,79 @@
+# KOOK Ticket 单容器部署。
+#
+# 首次启动：
+#   1. cp .env.example .env 并按需填写（至少设置 APP_SECRET）
+#   2. docker compose up -d --build
+#   3. 若未设置 ADMIN_PASSWORD，初始密码会打印在日志中：
+#        docker compose logs -f kook-ticket | grep initial_password
+#
+# 想让 WebUI 跑在公网，请在容器前加一层反向代理（Nginx/Caddy）并启用 HTTPS，
+# 同时把代理地址加入 TRUSTED_PROXIES，这样限流与审计才能拿到真实客户端 IP。
+
+services:
+  kook-ticket:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    image: kook-ticket:local
+    container_name: kook-ticket
+    restart: unless-stopped
+
+    ports:
+      # 仅监听回环地址，由宿主机反向代理对外暴露；如需直接暴露改为 "${PORT:-8080}:8080"
+      - "127.0.0.1:${PORT:-8080}:8080"
+
+    environment:
+      PORT: 8080
+      DATA_DIR: /app/data
+
+      # 业务时区：影响工单编号中的日期段与仪表盘的自然日统计
+      TICKET_TZ: ${TICKET_TZ:-Asia/Shanghai}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # 离线演示模式：1 = 不连接 KOOK，使用演示数据（用于本地验收界面）
+      KOOK_DRYRUN: ${KOOK_DRYRUN:-0}
+
+      # KOOK 接入（可留空，稍后在 WebUI 设置页填写；Token 会以 AES-GCM 加密入库）
+      KOOK_TOKEN: ${KOOK_TOKEN:-}
+      KOOK_GUILD_ID: ${KOOK_GUILD_ID:-}
+
+      # 安全相关
+      APP_SECRET: ${APP_SECRET:-}          # 加密密钥；留空则自动生成到数据目录（0600）
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto} # auto/always/never
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-} # 例如 172.18.0.0/16,127.0.0.1
+
+      # 初始管理员（仅在数据库中没有账号时生效）
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
+      # 会话与登录保护
+      SESSION_IDLE_HOURS: ${SESSION_IDLE_HOURS:-12}
+      SESSION_MAX_DAYS: ${SESSION_MAX_DAYS:-7}
+      LOGIN_MAX_FAILS: ${LOGIN_MAX_FAILS:-5}
+      LOGIN_WINDOW_MINUTES: ${LOGIN_WINDOW_MINUTES:-15}
+      LOGIN_LOCK_MINUTES: ${LOGIN_LOCK_MINUTES:-15}
+
+    volumes:
+      # 唯一需要持久化的目录：SQLite 数据库、WAL 文件与自动生成的密钥
+      - ./data:/app/data
+
+    # 加固：禁止提权、只读根文件系统（数据卷仍可写）
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

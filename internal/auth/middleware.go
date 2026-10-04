@@ -295,8 +295,9 @@ func (m *SessionManager) Load(cookieName string) gin.HandlerFunc {
 		}
 		session, user, err := m.Authenticate(token)
 		if err != nil {
-			// 失效会话直接清 Cookie，界面会回到登录页。
+			// 失效会话直接清 Cookie 与登录标记，界面会回到登录页。
 			clearSessionCookie(c, cookieName)
+			ClearLoggedInMarker(c)
 			c.Next()
 			return
 		}
@@ -402,6 +403,39 @@ func RequireRole(minRole string) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// LoggedInMarkerCookie 是“是否可能已登录”的提示 Cookie。
+//
+// 安全说明：它**不是凭据**，值恒为 "1"，且刻意不带 HttpOnly，
+// 只为让前端在未登录时跳过 /auth/me 请求，避免浏览器控制台出现无意义的 401。
+// 是否真的已认证始终以服务端会话校验结果为准。
+const LoggedInMarkerCookie = "kt_logged_in"
+
+// SetLoggedInMarker 写入登录提示 Cookie（与前端读取保持同样的属性）。
+func SetLoggedInMarker(c *gin.Context, maxAge time.Duration) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     LoggedInMarkerCookie,
+		Value:    "1",
+		Path:     "/",
+		MaxAge:   int(maxAge.Seconds()),
+		HttpOnly: false,
+		Secure:   IsHTTPS(c),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// ClearLoggedInMarker 清除登录提示 Cookie。
+func ClearLoggedInMarker(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     LoggedInMarkerCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: false,
+		Secure:   IsHTTPS(c),
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // SetSessionCookie 写入会话 Cookie。
