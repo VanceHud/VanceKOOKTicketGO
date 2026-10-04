@@ -1,0 +1,219 @@
+package store
+
+import (
+	"fmt"
+	"strconv"
+	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+
+	"vancekookticket/internal/secure"
+)
+
+// settings 表中的键名。
+const (
+	// SettingKookToken 保存 AES-GCM 加密后的 KOOK token，明文不落库。
+	SettingKookToken = "kook_token_enc"
+	// SettingGuildID 是机器人服务的服务器 ID（单 guild）。
+	SettingGuildID = "guild_id"
+	// SettingCategoryID 是放置工单频道的隐藏分组 ID。
+	SettingCategoryID = "category_id"
+	// SettingLogChannelID 是工单日志频道 ID。
+	SettingLogChannelID = "log_channel_id"
+	// SettingDebugChannelID 是错误与调试信息频道 ID。
+	SettingDebugChannelID = "debug_channel_id"
+	// SettingOutdateHours 是工单空闲锁定阈值（小时）。
+	SettingOutdateHours = "outdate_hours"
+	// SettingInitializedAt 记录首次初始化时间。
+	SettingInitializedAt = "initialized_at"
+	// SettingGuildName / SettingCategoryName 等仅用于界面展示，避免每次都请求 KOOK。
+	SettingGuildName      = "guild_name"
+	SettingCategoryName   = "category_name"
+	SettingLogChannelName = "log_channel_name"
+	SettingDebugChName    = "debug_channel_name"
+)
+
+// DefaultOutdateHours 是工单空闲锁定的默认阈值。
+const DefaultOutdateHours = 48
+
+// SettingsRepo 负责键值配置读写。
+type SettingsRepo struct {
+	db *gorm.DB
+}
+
+// Get 读取配置；第二个返回值表示是否存在。
+func (r *SettingsRepo) Get(key string) (string, bool, error) {
+	var s Setting
+	err := r.db.Where("key = ?", key).First(&s).Error
+	if err != nil {
+		if mapped := mapNotFound(err); mapped == ErrNotFound {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return s.Value, true, nil
+}
+
+// GetDefault 读取配置，不存在时返回默认值。
+func (r *SettingsRepo) GetDefault(key, def string) (string, error) {
+	value, ok, err := r.Get(key)
+	if err != nil || !ok {
+		return def, err
+	}
+	return value, nil
+}
+
+// Set 写入（或覆盖）配置。
+func (r *SettingsRepo) Set(key, value string) error {
+	item := Setting{Key: key, Value: value, UpdatedAt: Now()}
+	return r.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
+	}).Create(&item).Error
+}
+
+// Delete 删除配置项。
+func (r *SettingsRepo) Delete(key string) error {
+	return r.db.Where("key = ?", key).Delete(&Setting{}).Error
+}
+
+// All 返回全部配置项。
+func (r *SettingsRepo) All() (map[string]string, error) {
+	var items []Setting
+	if err := r.db.Find(&items).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(items))
+	for _, item := range items {
+		out[item.Key] = item.Value
+	}
+	return out, nil
+}
+
+// GetInt 读取整型配置，缺失或非法时返回默认值。
+func (r *SettingsRepo) GetInt(key string, def int) int {
+	value, ok, err := r.Get(key)
+	if err != nil || !ok || value == "" {
+		return def
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return def
+	}
+	return parsed
+}
+
+// SetInt 写入整型配置。
+func (r *SettingsRepo) SetInt(key string, value int) error {
+	return r.Set(key, strconv.Itoa(value))
+}
+
+// SetString 写入字符串指针（空指针视为清空）。
+func (r *SettingsRepo) SetString(key string, value *string) error {
+	if value == nil {
+		return r.Delete(key)
+	}
+	return r.Set(key, *value)
+}
+
+// SetSecret 使用 AES-GCM 加密后写入敏感配置。
+func (r *SettingsRepo) SetSecret(key, plaintext string, appSecret []byte) error {
+	if plaintext == "" {
+		return r.Delete(key)
+	}
+	encrypted, err := secure.Encrypt(appSecret, plaintext)
+	if err != nil {
+		return fmt.Errorf("加密配置 %s 失败: %w", key, err)
+	}
+	return r.Set(key, encrypted)
+}
+
+// GetSecret 读取并解密敏感配置。
+// 密钥变更或数据被篡改时返回 secure.ErrDecrypt，调用方应提示重新录入。
+func (r *SettingsRepo) GetSecret(key string, appSecret []byte) (string, bool, error) {
+	encrypted, ok, err := r.Get(key)
+	if err != nil || !ok || encrypted == "" {
+		return "", false, err
+	}
+	plaintext, err := secure.Decrypt(appSecret, encrypted)
+	if err != nil {
+		return "", true, err
+	}
+	return plaintext, true, nil
+}
+
+// OutdateHours 返回工单空闲锁定阈值（小时）。
+func (r *SettingsRepo) OutdateHours() int {
+	hours := r.GetInt(SettingOutdateHours, DefaultOutdateHours)
+	if hours <= 0 {
+		return DefaultOutdateHours
+	}
+	return hours
+}
+
+// RuntimeConfig 是机器人运行所需的业务配置快照。
+type RuntimeConfig struct {
+	GuildID         string
+	CategoryID      string
+	LogChannelID    string
+	DebugChannelID  string
+	OutdateHours    int
+	HasKookToken    bool
+	TokenMasked     string
+	InitializedAt   time.Time
+	MissingRequired []string
+}
+
+// Runtime 汇总当前业务配置，并标记缺失的必填项（供 WebUI 显示引导）。
+func (r *SettingsRepo) Runtime(appSecret []byte) (*RuntimeConfig, error) {
+	all, err := r.All()
+	if err != nil {
+		return nil, err
+	}
+	cfg := &RuntimeConfig{
+		GuildID:        all[SettingGuildID],
+		CategoryID:     all[SettingCategoryID],
+		LogChannelID:   all[SettingLogChannelID],
+		DebugChannelID: all[SettingDebugChannelID],
+		OutdateHours:   r.OutdateHours(),
+	}
+	if raw, ok := all[SettingInitializedAt]; ok && raw != "" {
+		if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+			cfg.InitializedAt = ts
+		}
+	}
+	if encrypted, ok := all[SettingKookToken]; ok && encrypted != "" {
+		cfg.HasKookToken = true
+		if token, err := secure.Decrypt(appSecret, encrypted); err == nil {
+			cfg.TokenMasked = secure.MaskTail(token)
+		} else {
+			// 解密失败通常意味着 APP_SECRET 变更，界面需要提示重新录入。
+			cfg.TokenMasked = "(无法解密，请重新填写)"
+		}
+	}
+
+	for key, value := range map[string]string{
+		"guild_id":         cfg.GuildID,
+		"category_id":      cfg.CategoryID,
+		"log_channel_id":   cfg.LogChannelID,
+		"debug_channel_id": cfg.DebugChannelID,
+	} {
+		if value == "" {
+			cfg.MissingRequired = append(cfg.MissingRequired, key)
+		}
+	}
+	if !cfg.HasKookToken {
+		cfg.MissingRequired = append(cfg.MissingRequired, "kook_token")
+	}
+	return cfg, nil
+}
+
+// MarkInitialized 记录首次初始化时间（幂等）。
+func (r *SettingsRepo) MarkInitialized() error {
+	_, ok, err := r.Get(SettingInitializedAt)
+	if err != nil || ok {
+		return err
+	}
+	return r.Set(SettingInitializedAt, Now().Format(time.RFC3339))
+}

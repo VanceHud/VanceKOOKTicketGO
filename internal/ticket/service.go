@@ -1,0 +1,318 @@
+// Package ticket 实现工单业务：开单、关闭、锁定、重开、超时扫描与备注。
+//
+// 与 KOOK 交互的部分通过 Platform 接口隔离：
+//   - 里程碑 3 注入真实 KOOK 客户端实现；
+//   - KOOK_DRYRUN=1 时注入 NoopPlatform，使业务逻辑与 WebUI 可以脱离 KOOK 完整跑通。
+//
+// 所有操作都会写审计日志并广播 SSE 事件（工单状态与仪表盘数据实时刷新）。
+package ticket
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"vancekookticket/internal/eventbus"
+	"vancekookticket/internal/store"
+)
+
+// Platform 抽象工单流程需要机器人执行的 KOOK 侧动作。
+type Platform interface {
+	// SetUserSpeak 允许或禁止开单人在工单频道发言（锁定 / 重开使用）。
+	SetUserSpeak(ctx context.Context, channelID, userID string, allow bool) error
+	// NotifyClosed 通知工单已关闭：写日志频道 + 私聊开单人，返回两条消息 ID。
+	NotifyClosed(ctx context.Context, t *store.Ticket, note string) (logMsgID, userMsgID string, err error)
+	// CloseTicketChannel 删除工单频道。
+	CloseTicketChannel(ctx context.Context, channelID string) error
+}
+
+// 业务错误。
+var (
+	// ErrInvalidState 表示工单当前状态不允许该操作。
+	ErrInvalidState = errors.New("工单当前状态不允许该操作")
+	// ErrNoPlatform 表示没有可用的平台实现（KOOK 未连接且非 DryRun）。
+	ErrNoPlatform = errors.New("机器人未连接到 KOOK，操作已拒绝")
+)
+
+// Actor 是操作发起者。
+//
+// IP 与 RequestID 会一并写入审计日志，便于把界面操作与访问日志对应起来。
+type Actor struct {
+	ID        string
+	Name      string
+	Role      string
+	Source    string // web | kook | system
+	IP        string
+	RequestID string
+}
+
+// SystemActor 返回系统操作者（超时自动锁定等）。
+func SystemActor() Actor {
+	return Actor{ID: "system", Name: "系统", Role: store.RoleAdmin, Source: "system"}
+}
+
+// Service 是工单业务服务。
+type Service struct {
+	store    *store.Store
+	bus      *eventbus.Bus
+	platform Platform
+	loc      *time.Location
+	// outdateHours 返回工单空闲锁定阈值（小时），从配置实时读取。
+	outdateHours func() int
+}
+
+// NewService 创建工单服务。
+func NewService(st *store.Store, bus *eventbus.Bus, platform Platform, loc *time.Location, outdateHours func() int) *Service {
+	if outdateHours == nil {
+		outdateHours = func() int { return store.DefaultOutdateHours }
+	}
+	return &Service{store: st, bus: bus, platform: platform, loc: loc, outdateHours: outdateHours}
+}
+
+// SetPlatform 在 KOOK 连接建立后注入真实平台实现。
+func (s *Service) SetPlatform(p Platform) { s.platform = p }
+
+// WithPlatform 在给定平台实现下执行 fn，用于“本地事务 + 远端调用”的清晰边界。
+func (s *Service) platformOrErr() (Platform, error) {
+	if s.platform == nil {
+		return nil, ErrNoPlatform
+	}
+	return s.platform, nil
+}
+
+// Get 返回工单详情。
+func (s *Service) Get(no string) (*store.Ticket, error) { return s.store.Tickets.ByNo(no) }
+
+// Close 关闭工单：先通知，再删除频道，最后落库。
+//
+// 顺序说明：通知与删除失败会直接返回错误、不改数据库状态，
+// 避免出现“记录已关闭但频道仍在”的不一致；重复点击关闭会被状态校验拦下。
+func (s *Service) Close(ctx context.Context, no string, actor Actor, note string) (*store.Ticket, error) {
+	t, err := s.store.Tickets.ByNo(no)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status == store.TicketClosed {
+		return nil, fmt.Errorf("%w：工单已关闭", ErrInvalidState)
+	}
+	if t.Status == store.TicketPending {
+		return nil, fmt.Errorf("%w：工单频道尚未创建完成", ErrInvalidState)
+	}
+
+	platform, err := s.platformOrErr()
+	if err != nil {
+		return nil, err
+	}
+
+	logMsgID, userMsgID, err := platform.NotifyClosed(ctx, t, note)
+	if err != nil {
+		return nil, fmt.Errorf("发送关闭通知失败: %w", err)
+	}
+	if t.ChannelID != "" {
+		if err := platform.CloseTicketChannel(ctx, t.ChannelID); err != nil {
+			return nil, fmt.Errorf("删除工单频道失败: %w", err)
+		}
+	}
+
+	now := store.Now()
+	fields := map[string]any{
+		"status":         store.TicketClosed,
+		"closed_at":      now,
+		"closed_by":      actor.ID,
+		"closed_by_name": actor.Name,
+		"locked_at":      nil,
+		"lock_reason":    "",
+	}
+	if logMsgID != "" {
+		fields["log_channel_msg_id"] = logMsgID
+	}
+	if userMsgID != "" {
+		fields["log_user_msg_id"] = userMsgID
+	}
+	if err := s.store.Tickets.UpdateFields(no, fields); err != nil {
+		return nil, err
+	}
+
+	updated, err := s.store.Tickets.ByNo(no)
+	if err != nil {
+		return nil, err
+	}
+	s.after(updated, actor, "ticket.close", fmt.Sprintf("关闭工单 %s", no))
+	return updated, nil
+}
+
+// Lock 锁定工单：开单人不可发言，工单仍可见。
+// reason 取 store.LockReasonManual 或 store.LockReasonTimeout。
+func (s *Service) Lock(ctx context.Context, no string, actor Actor, reason string) (*store.Ticket, error) {
+	if reason == "" {
+		reason = store.LockReasonManual
+	}
+	t, err := s.store.Tickets.ByNo(no)
+	if err != nil {
+		return nil, err
+	}
+	switch t.Status {
+	case store.TicketLocked:
+		return nil, fmt.Errorf("%w：工单已是锁定状态", ErrInvalidState)
+	case store.TicketClosed:
+		return nil, fmt.Errorf("%w：工单已关闭", ErrInvalidState)
+	case store.TicketPending:
+		return nil, fmt.Errorf("%w：工单频道尚未创建完成", ErrInvalidState)
+	}
+
+	platform, err := s.platformOrErr()
+	if err != nil {
+		return nil, err
+	}
+	if t.ChannelID != "" {
+		if err := platform.SetUserSpeak(ctx, t.ChannelID, t.UserID, false); err != nil {
+			return nil, fmt.Errorf("设置频道发言权限失败: %w", err)
+		}
+	}
+
+	now := store.Now()
+	if err := s.store.Tickets.UpdateFields(no, map[string]any{
+		"status":      store.TicketLocked,
+		"locked_at":   now,
+		"lock_reason": reason,
+	}); err != nil {
+		return nil, err
+	}
+
+	updated, err := s.store.Tickets.ByNo(no)
+	if err != nil {
+		return nil, err
+	}
+	s.after(updated, actor, "ticket.lock", fmt.Sprintf("锁定工单 %s（原因：%s）", no, reason))
+	return updated, nil
+}
+
+// Reopen 重新激活已锁定的工单。
+func (s *Service) Reopen(ctx context.Context, no string, actor Actor) (*store.Ticket, error) {
+	t, err := s.store.Tickets.ByNo(no)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status != store.TicketLocked {
+		return nil, fmt.Errorf("%w：只有已锁定的工单可以重新激活", ErrInvalidState)
+	}
+
+	platform, err := s.platformOrErr()
+	if err != nil {
+		return nil, err
+	}
+	if t.ChannelID != "" {
+		if err := platform.SetUserSpeak(ctx, t.ChannelID, t.UserID, true); err != nil {
+			return nil, fmt.Errorf("恢复频道发言权限失败: %w", err)
+		}
+	}
+
+	if err := s.store.Tickets.UpdateFields(no, map[string]any{
+		"status":      store.TicketOpen,
+		"locked_at":   nil,
+		"lock_reason": "",
+	}); err != nil {
+		return nil, err
+	}
+
+	updated, err := s.store.Tickets.ByNo(no)
+	if err != nil {
+		return nil, err
+	}
+	s.after(updated, actor, "ticket.reopen", fmt.Sprintf("重新激活工单 %s", no))
+	return updated, nil
+}
+
+// AddNote 为工单添加备注。
+func (s *Service) AddNote(no string, actor Actor, content string) (*store.TicketNote, error) {
+	if _, err := s.store.Tickets.ByNo(no); err != nil {
+		return nil, err
+	}
+	note := &store.TicketNote{
+		TicketNo:   no,
+		AuthorID:   actor.ID,
+		AuthorName: actor.Name,
+		Source:     actor.Source,
+		Content:    content,
+		CreatedAt:  store.Now(),
+	}
+	if err := s.store.Tickets.AddNote(note); err != nil {
+		return nil, err
+	}
+	s.publish(eventbus.EventTicketNote, no, nil)
+	s.audit(actor, "ticket.note", no, "新增备注")
+	return note, nil
+}
+
+// Notes 返回工单备注。
+func (s *Service) Notes(no string) ([]store.TicketNote, error) { return s.store.Tickets.Notes(no) }
+
+// Messages 返回工单消息。
+func (s *Service) Messages(no string, limit, offset int) ([]store.TicketMessage, error) {
+	return s.store.Tickets.Messages(no, limit, offset)
+}
+
+// ScanTimeout 扫描并锁定超时未活动的工单，返回被锁定的工单列表。
+//
+// 判定依据是工单的 updated_at：写入消息时会刷新该字段，
+// 因此“从未发言”的工单也会从开单时间开始计时。
+func (s *Service) ScanTimeout(ctx context.Context) ([]string, error) {
+	hours := s.outdateHours()
+	if hours <= 0 {
+		return nil, nil
+	}
+	cutoff := store.Now().Add(-time.Duration(hours) * time.Hour)
+
+	var candidates []store.Ticket
+	if err := s.store.DB().
+		Where("status = ? AND updated_at < ?", store.TicketOpen, cutoff).
+		Order("updated_at ASC").
+		Limit(200).
+		Find(&candidates).Error; err != nil {
+		return nil, err
+	}
+
+	locked := make([]string, 0, len(candidates))
+	for i := range candidates {
+		no := candidates[i].No
+		if _, err := s.Lock(ctx, no, SystemActor(), store.LockReasonTimeout); err != nil {
+			// 单个工单失败不影响其余工单；状态可能已被人工改变。
+			if errors.Is(err, ErrInvalidState) || errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return locked, fmt.Errorf("锁定工单 %s 失败: %w", no, err)
+		}
+		locked = append(locked, no)
+	}
+	return locked, nil
+}
+
+// after 在状态变更后广播事件并记录审计。
+func (s *Service) after(t *store.Ticket, actor Actor, action, detail string) {
+	s.publish(eventbus.EventTicketUpdated, t.No, t)
+	s.audit(actor, action, t.No, detail)
+}
+
+func (s *Service) publish(eventType, ticketNo string, data any) {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Publish(eventbus.Event{Type: eventType, TicketNo: ticketNo, Data: data, At: store.Now()})
+}
+
+func (s *Service) audit(actor Actor, action, target, detail string) {
+	if s.store == nil {
+		return
+	}
+	_ = s.store.Audit.Write(&store.AuditLog{
+		Actor:     actor.Name,
+		ActorType: actor.Source,
+		Action:    action,
+		Target:    target,
+		Detail:    detail,
+		IP:        actor.IP,
+		RequestID: actor.RequestID,
+		CreatedAt: store.Now(),
+	})
+}

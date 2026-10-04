@@ -1,0 +1,4 @@
+# 该文件仅用于占位，保证 go:embed all:dist 在未构建前端时也能匹配到文件。
+#
+# 前端构建产物（index.html、assets/ 等）由以下命令生成，且不入库：
+#   cd web/frontend && npm ci && npm run build

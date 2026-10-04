@@ -1,0 +1,22 @@
+# 构建产物与运行时数据
+/data/
+/bin/
+*.exe
+kook-ticket
+
+# 前端
+web/frontend/node_modules/
+web/frontend/dist/
+web/frontend/.vite/
+web/dist/*
+!web/dist/.gitkeep
+
+# 本地环境与密钥
+.env
+.env.local
+app_secret
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
