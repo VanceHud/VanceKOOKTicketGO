@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"vancekookticket/internal/kook"
+	"vancekookticket/internal/store"
 )
 
 // Manager 管理机器人实例的生命周期。
@@ -131,13 +132,13 @@ func (m *Manager) ResolveWebRole(ctx context.Context, kookUserID string) (string
 	return role, ok, nil
 }
 
-// CreatePanel 让机器人在指定频道创建面板卡片。
-func (m *Manager) CreatePanel(ctx context.Context, channelID, title, buttonText string) (string, error) {
+// SendPanelCard 让机器人发送/重发某个面板的卡片。
+func (m *Manager) SendPanelCard(ctx context.Context, panel *store.Panel, buttonText string) (string, error) {
 	instance := m.current()
 	if instance == nil {
 		return "", errors.New("机器人尚未连接 KOOK，无法发送面板卡片")
 	}
-	return instance.CreatePanel(ctx, channelID, title, buttonText)
+	return instance.SendPanelCard(ctx, panel, buttonText)
 }
 
 // DeleteMessage 尽力删除一条消息。

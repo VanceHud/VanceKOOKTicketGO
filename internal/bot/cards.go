@@ -148,7 +148,7 @@ func (b *Bot) ticketLogCard(t *store.Ticket, notes []store.TicketNote) string {
 // helpCard 生成帮助卡片。
 func (b *Bot) helpCard() string {
 	text := strings.Join([]string{
-		"`/ticket` 在当前频道创建/刷新工单按钮",
+		"`/ticket` 在当前频道新建一张工单按钮卡片（同一频道可多张）",
 		"`/tkcm 工单编号 备注` 为已关闭的工单添加备注",
 		"`/aar @角色` 把角色设为当前面板的管理员角色；加 `-g` 设为全局管理员角色",
 		"`/gaming 游戏ID` 让机器人开始玩游戏（游戏需先在开发者后台创建）",

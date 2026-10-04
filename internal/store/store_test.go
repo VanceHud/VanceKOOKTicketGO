@@ -369,3 +369,64 @@ func TestAuditLogIsAppendOnly(t *testing.T) {
 		t.Fatalf("审计查询的通配符未被转义: total=%d err=%v", total, err)
 	}
 }
+
+func TestPanelsAllowMultiplePerChannel(t *testing.T) {
+	st := newTestStore(t)
+
+	first := &Panel{ChannelID: "30001", ChannelName: "工单面板", Title: "第一张", Enabled: true}
+	if err := st.Panels.Create(first); err != nil {
+		t.Fatalf("创建第一张面板失败: %v", err)
+	}
+	second := &Panel{ChannelID: "30001", ChannelName: "工单面板", Title: "第二张", Enabled: true}
+	if err := st.Panels.Create(second); err != nil {
+		t.Fatalf("同一频道应允许创建第二张面板: %v", err)
+	}
+
+	panels, err := st.Panels.ListByChannel("30001")
+	if err != nil {
+		t.Fatalf("查询频道面板失败: %v", err)
+	}
+	if len(panels) != 2 {
+		t.Fatalf("应返回 2 张面板，实际 %d 张", len(panels))
+	}
+	if panels[0].ID >= panels[1].ID {
+		t.Fatalf("面板应按创建顺序返回: %+v", panels)
+	}
+
+	// ByChannel 作为旧卡片回退路径，返回最早创建的一张。
+	oldest, err := st.Panels.ByChannel("30001")
+	if err != nil {
+		t.Fatalf("ByChannel 查询失败: %v", err)
+	}
+	if oldest.ID != first.ID {
+		t.Fatalf("ByChannel 应返回最早创建的面板，实际 %d", oldest.ID)
+	}
+}
+
+// TestMigrateDowngradesLegacyPanelChannelIndex 验证历史库中的唯一索引会被降级，
+// 否则升级后同一频道仍然只能保留一张面板卡片。
+func TestMigrateDowngradesLegacyPanelChannelIndex(t *testing.T) {
+	st := newTestStore(t)
+
+	// 模拟旧版本：channel_id 上是唯一索引。
+	if err := st.db.Exec("DROP INDEX IF EXISTS idx_panels_channel_id").Error; err != nil {
+		t.Fatalf("删除索引失败: %v", err)
+	}
+	if err := st.db.Exec("CREATE UNIQUE INDEX idx_panels_channel_id ON panels(channel_id)").Error; err != nil {
+		t.Fatalf("创建旧唯一索引失败: %v", err)
+	}
+	if err := st.Panels.Create(&Panel{ChannelID: "30001", Title: "第一张", Enabled: true}); err != nil {
+		t.Fatalf("创建面板失败: %v", err)
+	}
+	if err := st.Panels.Create(&Panel{ChannelID: "30001", Title: "第二张", Enabled: true}); err == nil {
+		t.Fatal("唯一索引下不应允许同频道第二张面板")
+	}
+
+	// 重新迁移后应可写入第二张。
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("再次迁移失败: %v", err)
+	}
+	if err := st.Panels.Create(&Panel{ChannelID: "30001", Title: "第二张", Enabled: true}); err != nil {
+		t.Fatalf("迁移后应允许同频道第二张面板: %v", err)
+	}
+}

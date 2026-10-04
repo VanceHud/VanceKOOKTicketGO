@@ -247,6 +247,7 @@ export interface Panel {
   channelName: string
   msgId: string
   title: string
+  buttonText: string
   enabled: boolean
   createdAt: string
   updatedAt: string

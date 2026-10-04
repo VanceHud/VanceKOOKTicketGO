@@ -1,15 +1,19 @@
 /**
- * 工单面板管理：新建、重建卡片、启停、删除，以及面板级管理员角色的增删。
+ * 工单面板管理：新建、重建卡片、编辑文案、启停、删除，以及面板级管理员角色的增删。
  *
- * 说明：面板卡片必须由机器人发送（按钮 value 需要机器人签名），
- * 因此新建/重建需要机器人在线；不在线时界面给出明确提示而不是静默失败。
+ * 说明：
+ * - 同一频道允许存在多张工单按钮卡片，每张卡片各自携带独立的文案与面板管理员角色；
+ * - 面板卡片必须由机器人发送（按钮 value 需要机器人签名并内嵌面板 ID），
+ *   因此新建/重建需要机器人在线；不在线时界面给出明确提示而不是静默失败；
+ * - 面板文案按 KMarkdown 渲染并支持多行，编辑时提供实时预览。
  */
 
 import { useState } from "react"
-import { LayoutPanelLeft, Plus, RefreshCw, Trash2, UserPlus, X } from "lucide-react"
+import { LayoutPanelLeft, Pencil, Plus, RefreshCw, Trash2, UserPlus, X } from "lucide-react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { useTranslation } from "react-i18next"
 
+import { KMarkdownPreview } from "@/components/KMarkdownPreview"
 import { PageHeader } from "@/components/PageHeader"
 import { EmptyState, ErrorState, InlineLoader } from "@/components/StateViews"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -30,12 +34,16 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/api"
 import { useRuntimeInfo } from "@/lib/queries"
 import { formatDateTime } from "@/lib/format"
 import { queryKeys, useKookChannels, useKookRoles, usePanels } from "@/lib/queries"
 import { toastError, toastSuccess } from "@/lib/toast"
 import type { Panel } from "@/lib/types"
+
+/** 与后端 maxPanelTitleLength 保持一致。 */
+const maxPanelTitleLength = 2000
 
 export function PanelsPage() {
   const { t, i18n } = useTranslation()
@@ -47,6 +55,7 @@ export function PanelsPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [deleting, setDeleting] = useState<Panel | null>(null)
+  const [editing, setEditing] = useState<Panel | null>(null)
   const [rolePanel, setRolePanel] = useState<Panel | null>(null)
 
   const botConnected = runtimeQuery.data?.botConnected ?? false
@@ -71,6 +80,26 @@ export function PanelsPage() {
     mutationFn: (id: number) => api.post<Panel>(`/panels/${id}/refresh`),
     onSuccess: () => {
       toastSuccess(t("panels.refreshSuccess"))
+      invalidate()
+    },
+    onError: (error) => toastError(error),
+  })
+
+  // 编辑文案：先保存文案与按钮文字；若机器人在线则同时重建卡片，让修改立即生效。
+  const editMutation = useMutation({
+    mutationFn: async (payload: { id: number; title: string; buttonText: string; rebuild: boolean }) => {
+      await api.patch<Panel>(`/panels/${payload.id}`, {
+        title: payload.title,
+        buttonText: payload.buttonText,
+      })
+      if (payload.rebuild) {
+        await api.post<Panel>(`/panels/${payload.id}/refresh`)
+      }
+      return payload.rebuild
+    },
+    onSuccess: (rebuilt) => {
+      toastSuccess(rebuilt ? t("panels.editSuccess") : t("panels.editSaved"))
+      setEditing(null)
       invalidate()
     },
     onError: (error) => toastError(error),
@@ -217,6 +246,14 @@ export function PanelsPage() {
                         <Button
                           variant="ghost"
                           size="icon"
+                          title={t("panels.edit")}
+                          onClick={() => setEditing(panel)}
+                        >
+                          <Pencil className="size-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
                           title={t("panels.refresh")}
                           disabled={!botConnected || refreshMutation.isPending}
                           onClick={() => refreshMutation.mutate(panel.id)}
@@ -238,7 +275,7 @@ export function PanelsPage() {
 
       {/* 新建面板 */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>{t("panels.createTitle")}</DialogTitle>
             <DialogDescription>{t("panels.createDesc")}</DialogDescription>
@@ -248,6 +285,27 @@ export function PanelsPage() {
             channels={channelsQuery.data?.items ?? []}
             onSubmit={(payload) => createMutation.mutate(payload)}
           />
+        </DialogContent>
+      </Dialog>
+
+      {/* 编辑文案 */}
+      <Dialog open={Boolean(editing)} onOpenChange={(open) => !open && setEditing(null)}>
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>{t("panels.editTitle")}</DialogTitle>
+            <DialogDescription>{t("panels.editDesc")}</DialogDescription>
+          </DialogHeader>
+          {editing ? (
+            <EditPanelForm
+              pending={editMutation.isPending}
+              initialTitle={editing.title}
+              initialButtonText={editing.buttonText}
+              rebuild={botConnected}
+              onSubmit={(title, buttonText) =>
+                editMutation.mutate({ id: editing.id, title, buttonText, rebuild: botConnected })
+              }
+            />
+          ) : null}
         </DialogContent>
       </Dialog>
 
@@ -335,16 +393,7 @@ function CreatePanelForm({
             onChange={(event) => setChannelId(event.target.value)}
           />
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="panel-title">{t("panels.titleLabel")}</Label>
-          <Input
-            id="panel-title"
-            maxLength={128}
-            value={title}
-            placeholder="请点击右侧按钮发起工单"
-            onChange={(event) => setTitle(event.target.value)}
-          />
-        </div>
+        <PanelTextEditor value={title} onChange={setTitle} idPrefix="panel-create" />
         <div className="space-y-2">
           <Label htmlFor="panel-button">{t("panels.buttonLabel")}</Label>
           <Input
@@ -367,6 +416,90 @@ function CreatePanelForm({
         </Button>
       </DialogFooter>
     </>
+  )
+}
+
+/** 编辑面板文案：保存后按需重建卡片。 */
+function EditPanelForm({
+  pending,
+  initialTitle,
+  initialButtonText,
+  rebuild,
+  onSubmit,
+}: {
+  pending: boolean
+  initialTitle: string
+  initialButtonText: string
+  rebuild: boolean
+  onSubmit: (title: string, buttonText: string) => void
+}) {
+  const { t } = useTranslation()
+  const [title, setTitle] = useState(initialTitle)
+  const [buttonText, setButtonText] = useState(initialButtonText)
+
+  return (
+    <>
+      <div className="space-y-4">
+        <PanelTextEditor value={title} onChange={setTitle} idPrefix="panel-edit" />
+        <div className="space-y-2">
+          <Label htmlFor="panel-edit-button">{t("panels.buttonLabel")}</Label>
+          <Input
+            id="panel-edit-button"
+            maxLength={32}
+            value={buttonText}
+            placeholder="ticket"
+            onChange={(event) => setButtonText(event.target.value)}
+          />
+        </div>
+      </div>
+      <DialogFooter>
+        <Button disabled={pending} onClick={() => onSubmit(title.trim(), buttonText.trim())}>
+          {pending ? t("common.saving") : rebuild ? t("panels.saveAndRefresh") : t("common.save")}
+        </Button>
+      </DialogFooter>
+    </>
+  )
+}
+
+/** 面板文案编辑器：左侧多行输入，右侧 KMarkdown 实时预览。 */
+function PanelTextEditor({
+  value,
+  onChange,
+  idPrefix,
+}: {
+  value: string
+  onChange: (value: string) => void
+  idPrefix: string
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <Label htmlFor={`${idPrefix}-title`}>{t("panels.titleLabel")}</Label>
+        <span className="text-muted-foreground text-xs">
+          {value.length}/{maxPanelTitleLength}
+        </span>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        <Textarea
+          id={`${idPrefix}-title`}
+          rows={8}
+          maxLength={maxPanelTitleLength}
+          value={value}
+          className="max-h-64 min-h-40 font-mono text-sm"
+          placeholder={"请点击右侧按钮发起工单\n\n**处理范围**\n- 账号问题\n- 充值问题"}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <div className="rounded-lg border bg-muted/30 p-3">
+          <p className="text-muted-foreground mb-2 text-xs font-medium">{t("panels.preview")}</p>
+          <div className="max-h-56 overflow-y-auto">
+            <KMarkdownPreview source={value} emptyText={t("panels.previewEmpty")} />
+          </div>
+        </div>
+      </div>
+      <p className="text-muted-foreground text-xs">{t("panels.titleHint")}</p>
+    </div>
   )
 }
 

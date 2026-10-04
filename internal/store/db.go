@@ -108,7 +108,39 @@ func (s *Store) Migrate() error {
 	if err := s.db.AutoMigrate(AllModels()...); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
+	if err := s.migratePanelChannelIndex(); err != nil {
+		return fmt.Errorf("数据库迁移失败: %w", err)
+	}
 	hardenSQLiteFiles(s.db.Name())
+	return nil
+}
+
+// migratePanelChannelIndex 去掉历史版本在 panels.channel_id 上的唯一索引。
+//
+// 早期实现限制“每个频道最多一条工单按钮卡片”，该列带唯一约束；
+// 现在同一频道允许多张卡片，AutoMigrate 不会主动把唯一索引降级为普通索引，
+// 因此这里显式检测并重建。
+func (s *Store) migratePanelChannelIndex() error {
+	type indexInfo struct {
+		Name   string `gorm:"column:name"`
+		Unique int    `gorm:"column:unique"`
+	}
+	var indexes []indexInfo
+	if err := s.db.Raw("PRAGMA index_list('panels')").Scan(&indexes).Error; err != nil {
+		return err
+	}
+	for _, idx := range indexes {
+		if idx.Name != "idx_panels_channel_id" || idx.Unique == 0 {
+			continue
+		}
+		if err := s.db.Exec("DROP INDEX IF EXISTS idx_panels_channel_id").Error; err != nil {
+			return err
+		}
+		if err := s.db.Exec("CREATE INDEX IF NOT EXISTS idx_panels_channel_id ON panels(channel_id)").Error; err != nil {
+			return err
+		}
+		return nil
+	}
 	return nil
 }
 

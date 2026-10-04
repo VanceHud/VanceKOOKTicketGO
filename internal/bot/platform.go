@@ -55,7 +55,7 @@ func (p *platform) NotifyLocked(ctx context.Context, t *store.Ticket, actor tick
 		reasonText = fmt.Sprintf("超过 %d 小时无活动，已自动锁定", hours)
 	}
 
-	reopenValue := p.b.encodeButton(actionReopen, t.No, t.ChannelID)
+	reopenValue := p.b.encodeButton(actionReopen, t.No, t.ChannelID, 0)
 	card := p.b.lockCard(t, actor, reopenValue, reasonText)
 	_, err = client.SendChannelMessage(ctx, t.ChannelID, kook.MsgTypeCard, card, kook.MessageOptions{})
 	return err

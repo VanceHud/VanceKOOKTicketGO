@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -17,6 +18,12 @@ var (
 	// messageIDPattern 校验 KOOK 消息 ID（十六进制串，长度较固定，但放宽以兼容平台变化）。
 	messageIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{16,64}$`)
 )
+
+// maxPanelTitleLength 是面板文案的长度上限（按字符计）。
+//
+// 面板正文按 KMarkdown 渲染且允许多行，因此上限比普通输入框宽松得多；
+// 仍保留一个上限，避免超出 KOOK 卡片内容限制。
+const maxPanelTitleLength = 2000
 
 // ---------------------------------------------------------------------------
 // 工单面板
@@ -50,8 +57,8 @@ func (s *Server) handlePanelCreate(c *gin.Context) {
 	}
 
 	title := strings.TrimSpace(req.Title)
-	if len([]rune(title)) > 128 {
-		s.fail(c, http.StatusBadRequest, "invalid_request", "面板文案不能超过 128 个字符")
+	if len([]rune(title)) > maxPanelTitleLength {
+		s.fail(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("面板文案不能超过 %d 个字符", maxPanelTitleLength))
 		return
 	}
 	buttonText := strings.TrimSpace(req.ButtonText)
@@ -70,31 +77,41 @@ func (s *Server) handlePanelCreate(c *gin.Context) {
 		return
 	}
 
-	msgID, err := s.Bot.CreatePanel(c.Request.Context(), channelID, title, buttonText)
-	if err != nil {
-		s.failInternal(c, err, "panel.create")
-		return
-	}
-
+	// 先落库拿到面板 ID，再发送卡片：按钮 value 会内嵌该 ID，
+	// 使同一频道内的多张卡片能各自携带独立的角色配置。
 	panel := &store.Panel{
 		ChannelID:   channelID,
 		ChannelName: channel.Name,
-		MsgID:       msgID,
 		Title:       firstNonEmptyString(title, "请点击右侧按钮发起工单"),
+		ButtonText:  firstNonEmptyString(buttonText, "ticket"),
 		Enabled:     true,
 	}
-	if err := s.Store.Panels.Upsert(panel); err != nil {
+	if err := s.Store.Panels.Create(panel); err != nil {
+		s.failStore(c, err, "panel.create.save")
+		return
+	}
+
+	msgID, err := s.Bot.SendPanelCard(c.Request.Context(), panel, buttonText)
+	if err != nil {
+		// 卡片未能发出时回滚记录，避免留下“看不到卡片但配置存在”的脏数据。
+		if delErr := s.Store.Panels.Delete(panel.ID); delErr != nil {
+			s.Log.Warn("回滚面板记录失败", "panel_id", panel.ID, "err", delErr)
+		}
+		s.failInternal(c, err, "panel.create")
+		return
+	}
+	if err := s.Store.Panels.UpdateFields(panel.ID, map[string]any{"msg_id": msgID}); err != nil {
 		s.failStore(c, err, "panel.create.save")
 		return
 	}
 	s.Bot.NotifyConfigChanged()
 
-	stored, err := s.Store.Panels.ByChannel(channelID)
+	stored, err := s.Store.Panels.ByID(panel.ID)
 	if err != nil {
 		s.failStore(c, err, "panel.create.reload")
 		return
 	}
-	s.audit(c, "panel.upsert", channelID, "创建或更新面板，频道："+channel.Name)
+	s.audit(c, "panel.create", channelID, "创建面板，频道："+channel.Name+"，消息："+msgID)
 	c.JSON(http.StatusCreated, stored)
 }
 
@@ -106,8 +123,8 @@ type panelUpdateRequest struct {
 
 // handlePanelUpdate 更新面板的可编辑字段。
 //
-// 说明：按钮文字变更需要重建卡片才会生效，因此这里只更新数据库中的标题，
-// 需要新卡片时请调用 refresh。
+// 说明：文案与按钮文字的变更需要重建卡片才会生效（调用 refresh），
+// 这里只更新数据库记录，重建时会按记录内容恢复。
 func (s *Server) handlePanelUpdate(c *gin.Context) {
 	id := uint(atoiDefault(c.Param("id"), 0))
 	if id == 0 {
@@ -132,11 +149,19 @@ func (s *Server) handlePanelUpdate(c *gin.Context) {
 	}
 	if req.Title != nil {
 		title := strings.TrimSpace(*req.Title)
-		if len([]rune(title)) > 128 {
-			s.fail(c, http.StatusBadRequest, "invalid_request", "面板文案不能超过 128 个字符")
+		if len([]rune(title)) > maxPanelTitleLength {
+			s.fail(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("面板文案不能超过 %d 个字符", maxPanelTitleLength))
 			return
 		}
 		updates["title"] = title
+	}
+	if req.ButtonText != nil {
+		buttonText := strings.TrimSpace(*req.ButtonText)
+		if len([]rune(buttonText)) > 32 {
+			s.fail(c, http.StatusBadRequest, "invalid_request", "按钮文字不能超过 32 个字符")
+			return
+		}
+		updates["button_text"] = firstNonEmptyString(buttonText, "ticket")
 	}
 	if len(updates) == 0 {
 		c.JSON(http.StatusOK, panel)
@@ -173,7 +198,7 @@ func (s *Server) handlePanelRefresh(c *gin.Context) {
 		return
 	}
 
-	msgID, err := s.Bot.CreatePanel(c.Request.Context(), panel.ChannelID, panel.Title, "")
+	msgID, err := s.Bot.SendPanelCard(c.Request.Context(), panel, panel.ButtonText)
 	if err != nil {
 		s.failInternal(c, err, "panel.refresh")
 		return

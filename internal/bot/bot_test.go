@@ -37,14 +37,15 @@ const (
 )
 
 type botEnv struct {
-	t      *testing.T
-	store  *store.Store
-	bus    *eventbus.Bus
-	svc    *ticket.Service
-	bot    *Bot
-	mock   *kooktest.Server
-	loc    *time.Location
-	stopCh atomic.Bool
+	t       *testing.T
+	store   *store.Store
+	bus     *eventbus.Bus
+	svc     *ticket.Service
+	bot     *Bot
+	mock    *kooktest.Server
+	loc     *time.Location
+	stopCh  atomic.Bool
+	panelID uint
 }
 
 func newBotEnv(t *testing.T) *botEnv {
@@ -87,16 +88,13 @@ func newBotEnv(t *testing.T) *botEnv {
 	}
 
 	// 面板（含面板级管理员角色）
-	if err := st.Panels.Upsert(&store.Panel{
+	seededPanel := &store.Panel{
 		ChannelID: testPanelChan, ChannelName: "工单面板", MsgID: "msg-panel", Title: "点击按钮发起工单", Enabled: true,
-	}); err != nil {
+	}
+	if err := st.Panels.Create(seededPanel); err != nil {
 		t.Fatalf("写入面板失败: %v", err)
 	}
-	panel, err := st.Panels.ByChannel(testPanelChan)
-	if err != nil {
-		t.Fatalf("读取面板失败: %v", err)
-	}
-	if err := st.Panels.AddRole(panel.ID, fmt.Sprint(rolePanel), "实习客服"); err != nil {
+	if err := st.Panels.AddRole(seededPanel.ID, fmt.Sprint(rolePanel), "实习客服"); err != nil {
 		t.Fatalf("写入面板角色失败: %v", err)
 	}
 
@@ -106,7 +104,7 @@ func newBotEnv(t *testing.T) *botEnv {
 	bus := eventbus.New()
 	svc := ticket.NewService(st, bus, ticket.NewNoopPlatform(nil), loc, st.Settings.OutdateHours)
 
-	env := &botEnv{t: t, store: st, bus: bus, svc: svc, mock: mock, loc: loc}
+	env := &botEnv{t: t, store: st, bus: bus, svc: svc, mock: mock, loc: loc, panelID: seededPanel.ID}
 
 	b, err := New(Deps{
 		Store:     st,
@@ -180,12 +178,12 @@ func (e *botEnv) mockUser(id string) kook.User {
 
 // openValue 生成合法签名的开单按钮值。
 func (e *botEnv) openValue() string {
-	return e.bot.encodeButton(actionOpen, "", testPanelChan)
+	return e.bot.encodeButton(actionOpen, "", testPanelChan, e.panelID)
 }
 
 // ticketValue 生成指定动作的按钮值。
 func (e *botEnv) ticketValue(action, ticketNo, channelID string) string {
-	return e.bot.encodeButton(action, ticketNo, channelID)
+	return e.bot.encodeButton(action, ticketNo, channelID, 0)
 }
 
 // ticketChannel 返回当前唯一工单的频道 ID。
@@ -295,6 +293,64 @@ func TestOpenTicketCreatesChannelPermissionsAndCard(t *testing.T) {
 	count, err := env.store.Audit.Count()
 	if err != nil || count == 0 {
 		t.Fatalf("应有审计记录: %v", err)
+	}
+}
+
+// TestOpenTicketFromSecondPanelUsesItsOwnRoles 验证同一频道内多张面板卡片各自携带角色：
+// 点击第二张卡片的按钮时，只应下发第二张面板的管理员角色。
+func TestOpenTicketFromSecondPanelUsesItsOwnRoles(t *testing.T) {
+	env := newBotEnv(t)
+
+	const secondRole = "3003"
+	second := &store.Panel{ChannelID: testPanelChan, ChannelName: "工单面板", Title: "第二张", Enabled: true}
+	if err := env.store.Panels.Create(second); err != nil {
+		t.Fatalf("创建第二张面板失败: %v", err)
+	}
+	if err := env.store.Panels.AddRole(second.ID, secondRole, "二线客服"); err != nil {
+		t.Fatalf("写入第二张面板角色失败: %v", err)
+	}
+
+	value := env.bot.encodeButton(actionOpen, "", testPanelChan, second.ID)
+	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, value, env.user(userAsker)))
+
+	env.waitFor("工单创建完成", func() bool {
+		ticket := env.firstTicket()
+		return ticket != nil && ticket.Status == store.TicketOpen
+	})
+
+	subjects := map[string]bool{}
+	for _, call := range env.mock.CallsOf("channel-role/update") {
+		subjects[fmt.Sprint(call.Params["type"])+":"+fmt.Sprint(call.Params["value"])] = true
+	}
+	if !subjects["role_id:"+secondRole] {
+		t.Fatalf("应下发第二张面板的角色 %s，实际 %v", secondRole, subjects)
+	}
+	if subjects["role_id:"+fmt.Sprint(rolePanel)] {
+		t.Fatalf("不应下发第一张面板的角色，实际 %v", subjects)
+	}
+
+	opened := env.firstTicket()
+	if opened.PanelID == nil || *opened.PanelID != second.ID {
+		t.Fatalf("工单应关联第二张面板 %d，实际 %v", second.ID, opened.PanelID)
+	}
+}
+
+// TestLegacyOpenButtonStillWorks 验证升级前发出的按钮（不含面板 ID、旧签名）仍可开单。
+func TestLegacyOpenButtonStillWorks(t *testing.T) {
+	env := newBotEnv(t)
+
+	legacy := fmt.Sprintf(`{"a":%q,"s":%q}`, actionOpen, env.bot.legacySignature(actionOpen, "", testPanelChan))
+	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, legacy, env.user(userAsker)))
+
+	env.waitFor("工单创建完成", func() bool {
+		ticket := env.firstTicket()
+		return ticket != nil && ticket.Status == store.TicketOpen
+	})
+
+	// 回退路径下应关联频道内最早创建的面板。
+	opened := env.firstTicket()
+	if opened.PanelID == nil || *opened.PanelID != env.panelID {
+		t.Fatalf("旧按钮应回退到频道首个面板 %d，实际 %v", env.panelID, opened.PanelID)
 	}
 }
 
@@ -437,6 +493,50 @@ func TestMessagesFromOtherGuildAreIgnored(t *testing.T) {
 	messages, _ := env.store.Tickets.Messages(ticket.No, 20, 0)
 	if len(messages) != 1 {
 		t.Fatalf("非配置服务器的消息不应入库，当前 %d 条", len(messages))
+	}
+}
+
+// TestRealPlatformMessageShapeIsArchived 是回归测试：
+//
+// 真实平台的普通消息事件中，extra.type 是数字、用户对象位于 extra.author
+// 且没有顶层 author。早期实现按字符串解析 extra.type 会让整条事件解析失败，
+// 从而所有聊天记录都不入库。
+func TestRealPlatformMessageShapeIsArchived(t *testing.T) {
+	env := newBotEnv(t)
+	channelID := env.openTicketForTest()
+
+	env.mock.Push(kook.EventTypeText, map[string]any{
+		"channel_type":  kook.ChannelTypeGroup,
+		"type":          kook.EventTypeText,
+		"target_id":     channelID,
+		"author_id":     userAsker,
+		"content":       "真实平台结构消息",
+		"msg_id":        "msg-real-shape-1",
+		"msg_timestamp": time.Now().UnixMilli(),
+		"extra": map[string]any{
+			"type":         1, // 数字：普通消息事件
+			"guild_id":     testGuildID,
+			"channel_name": "工单频道",
+			"author": map[string]any{
+				"id": userAsker, "username": "asker", "nickname": "提问用户", "identify_num": "0001",
+			},
+		},
+	})
+
+	ticket := env.firstTicket()
+	env.waitFor("真实结构消息归档", func() bool {
+		messages, err := env.store.Tickets.Messages(ticket.No, 20, 0)
+		return err == nil && len(messages) == 2
+	})
+
+	messages, _ := env.store.Tickets.Messages(ticket.No, 20, 0)
+	archived := messages[1]
+	if archived.Content != "真实平台结构消息" || archived.MsgType != store.MsgTypeText {
+		t.Fatalf("消息内容归档异常: %+v", archived)
+	}
+	// 顶层没有 author，昵称必须从 extra.author 回退得到。
+	if archived.UserName != "提问用户#0001" {
+		t.Fatalf("归档用户名异常（extra.author 回退失败）: %q", archived.UserName)
 	}
 }
 
@@ -695,6 +795,61 @@ func TestPanelCommandCreatesPanel(t *testing.T) {
 	if !panelCardSent {
 		t.Fatal("应在频道内发送面板卡片")
 	}
+
+	// 再次执行 /ticket：同一频道应新增一张卡片，而不是覆盖上一张。
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(newChannel, userStaff, "/ticket", env.user(userStaff)))
+	env.waitFor("第二张面板创建", func() bool {
+		panels, err := env.store.Panels.ListByChannel(newChannel)
+		return err == nil && len(panels) == 2
+	})
+	panels, err := env.store.Panels.ListByChannel(newChannel)
+	if err != nil {
+		t.Fatalf("读取频道面板失败: %v", err)
+	}
+	if panels[0].MsgID == "" || panels[1].MsgID == "" {
+		t.Fatalf("两张面板都应记录消息 ID: %+v", panels)
+	}
+	if panels[0].MsgID == panels[1].MsgID {
+		t.Fatal("两次 /ticket 应发送不同的卡片消息")
+	}
+
+	cards := 0
+	for _, call := range env.mock.CallsOf("message/create") {
+		if fmt.Sprint(call.Params["target_id"]) == newChannel &&
+			strings.Contains(fmt.Sprint(call.Params["content"]), actionOpen) {
+			cards++
+		}
+	}
+	if cards != 2 {
+		t.Fatalf("应在频道内发送 2 张面板卡片，实际 %d 张", cards)
+	}
+}
+
+// TestSendPanelCardKeepsStoredButtonText 验证重建卡片时沿用面板记录里的按钮文字，
+// 不会因为调用方没传而回退成默认的 "ticket"。
+func TestSendPanelCardKeepsStoredButtonText(t *testing.T) {
+	env := newBotEnv(t)
+	panel := &store.Panel{ChannelID: "chan-btn", Title: "请联系我们", ButtonText: "联系客服", Enabled: true}
+	if err := env.store.Panels.Create(panel); err != nil {
+		t.Fatalf("创建面板失败: %v", err)
+	}
+
+	if _, err := env.bot.SendPanelCard(context.Background(), panel, ""); err != nil {
+		t.Fatalf("发送面板卡片失败: %v", err)
+	}
+
+	var content string
+	for _, call := range env.mock.CallsOf("message/create") {
+		if fmt.Sprint(call.Params["target_id"]) == "chan-btn" {
+			content = fmt.Sprint(call.Params["content"])
+		}
+	}
+	if !strings.Contains(content, "联系客服") {
+		t.Fatalf("卡片应使用面板记录中的按钮文字，实际: %s", content)
+	}
+	if !strings.Contains(content, actionOpen) {
+		t.Fatalf("卡片应包含开单按钮: %s", content)
+	}
 }
 
 func TestAdminRoleCommandAddsPanelAndGlobalRoles(t *testing.T) {
@@ -940,4 +1095,46 @@ func toFloat(value any) float64 {
 	default:
 		return 0
 	}
+}
+
+// TestHelpCommandRepliesWithCard 是回归测试：
+//
+// 帮助内容是卡片 JSON，必须用 type=10（卡片）发送。早期实现复用了纯文本
+// 回复通道（type=9 KMarkdown），KOOK 会直接把整段 JSON 当文本显示出来。
+func TestHelpCommandRepliesWithCard(t *testing.T) {
+	env := newBotEnv(t)
+
+	// 频道内 /help
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(testPanelChan, userAsker, "/help", env.user(userAsker)))
+	env.waitFor("频道内帮助卡片", func() bool {
+		for _, call := range env.mock.CallsOf("message/create") {
+			if fmt.Sprint(call.Params["target_id"]) != testPanelChan {
+				continue
+			}
+			if int(toFloat(call.Params["type"])) != kook.MsgTypeCard {
+				continue
+			}
+			if content := fmt.Sprint(call.Params["content"]); strings.Contains(content, "命令面板") && strings.HasPrefix(content, "[") {
+				return true
+			}
+		}
+		return false
+	})
+
+	// 私聊 /tkhelp
+	env.mock.Push(kook.EventTypeText, kooktest.DirectMessageEvent(userAsker, "/tkhelp", env.user(userAsker)))
+	env.waitFor("私聊帮助卡片", func() bool {
+		for _, call := range env.mock.CallsOf("direct-message/create") {
+			if fmt.Sprint(call.Params["target_id"]) != userAsker {
+				continue
+			}
+			if int(toFloat(call.Params["type"])) != kook.MsgTypeCard {
+				continue
+			}
+			if content := fmt.Sprint(call.Params["content"]); strings.Contains(content, "命令面板") && strings.HasPrefix(content, "[") {
+				return true
+			}
+		}
+		return false
+	})
 }

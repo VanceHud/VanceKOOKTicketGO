@@ -26,26 +26,35 @@ func (r *PanelsRepo) ByID(id uint) (*Panel, error) {
 	return &p, nil
 }
 
-// ByChannel 按频道查询面板（开单事件需要判断按钮所属面板）。
+// ByChannel 按频道查询面板，返回该频道最早创建的一条记录。
+//
+// 主要供无法携带面板 ID 的旧卡片事件与统计用途；新流程应优先使用 ByID。
 func (r *PanelsRepo) ByChannel(channelID string) (*Panel, error) {
 	if channelID == "" {
 		return nil, ErrNotFound
 	}
 	var p Panel
-	if err := r.db.Preload("Roles").Where("channel_id = ?", channelID).First(&p).Error; err != nil {
+	if err := r.db.Preload("Roles").Where("channel_id = ?", channelID).Order("id ASC").First(&p).Error; err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &p, nil
 }
 
-// Upsert 以频道 ID 为唯一键写入或更新面板。
-func (r *PanelsRepo) Upsert(p *Panel) error {
+// ListByChannel 返回频道内全部面板（含面板级角色），按创建顺序排列。
+func (r *PanelsRepo) ListByChannel(channelID string) ([]Panel, error) {
+	if channelID == "" {
+		return nil, nil
+	}
+	var panels []Panel
+	err := r.db.Preload("Roles").Where("channel_id = ?", channelID).Order("id ASC").Find(&panels).Error
+	return panels, err
+}
+
+// Create 新增一条面板记录（同一频道允许多条）。
+func (r *PanelsRepo) Create(p *Panel) error {
 	now := Now()
 	p.CreatedAt, p.UpdatedAt = now, now
-	return r.db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "channel_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"channel_name", "msg_id", "title", "enabled", "updated_at"}),
-	}).Create(p).Error
+	return r.db.Create(p).Error
 }
 
 // UpdateFields 局部更新面板。
@@ -54,10 +63,14 @@ func (r *PanelsRepo) UpdateFields(id uint, fields map[string]any) error {
 	return r.db.Model(&Panel{}).Where("id = ?", id).Updates(fields).Error
 }
 
-// Delete 删除面板及其角色绑定。
+// Delete 删除面板及其角色绑定，并把引用它的工单解绑（保留历史记录）。
 func (r *PanelsRepo) Delete(id uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("panel_id = ?", id).Delete(&PanelRole{}).Error; err != nil {
+			return err
+		}
+		// 面板 ID 可能被后续新建的面板复用，直接清空引用避免工单被错误归属。
+		if err := tx.Model(&Ticket{}).Where("panel_id = ?", id).Update("panel_id", nil).Error; err != nil {
 			return err
 		}
 		return tx.Delete(&Panel{}, id).Error

@@ -11,6 +11,11 @@
 //   - 所有错误都带 HTTP 状态与平台错误码，便于上层区分“无权限/不存在/被限流”。
 package kook
 
+import (
+	"bytes"
+	"encoding/json"
+)
+
 // 平台的 API 基础地址。
 const DefaultBaseURL = "https://www.kookapp.cn"
 
@@ -160,10 +165,45 @@ type Emoji struct {
 	Name string `json:"name"`
 }
 
+// ExtraType 兼容 extra.type 的两种平台形态：
+//
+//   - 普通消息事件（type=1/2/3/…）：数字，取值与事件主类型一致；
+//   - 系统事件（type=255）：字符串，如 message_btn_click、added_reaction。
+//
+// 注意：该字段若只声明为 string，普通消息事件会在 json.Unmarshal 时因
+// 类型不匹配报错，整条事件被网关丢弃（表现为「聊天记录没有记录」）。
+type ExtraType string
+
+// String 返回底层字符串，便于日志输出与比较。
+func (t ExtraType) String() string { return string(t) }
+
+// UnmarshalJSON 同时接受数字与字符串形态。
+//
+// 无法识别的字面量按原文保存而不是返回错误：归档聊天记录不应因为
+// 平台新增了一种 extra.type 取值就整条事件解析失败。
+func (t *ExtraType) UnmarshalJSON(data []byte) error {
+	raw := bytes.TrimSpace(data)
+	if len(raw) == 0 || string(raw) == "null" {
+		*t = ""
+		return nil
+	}
+	if raw[0] == '"' {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return err
+		}
+		*t = ExtraType(text)
+		return nil
+	}
+	*t = ExtraType(string(raw))
+	return nil
+}
+
 // Extra 是事件的可变部分。
 type Extra struct {
-	// Type 是系统事件的子类型（如 message_btn_click、added_reaction）。
-	Type string `json:"type"`
+	// Type 在系统事件中是子类型（message_btn_click、added_reaction），
+	// 在普通消息事件中是数字（与事件主类型一致）。
+	Type ExtraType `json:"type"`
 	// GuildID 是消息所属服务器（服务器内消息事件会带上，用于单服务器白名单校验）。
 	GuildID string `json:"guild_id"`
 	// ChannelName 是消息所在频道名（用于面板展示）。
@@ -208,6 +248,31 @@ type Event struct {
 	MsgTimestamp int64 `json:"msg_timestamp"`
 	// Extra 承载系统事件的子类型与数据。
 	Extra Extra `json:"extra"`
+}
+
+// UnmarshalJSON 在标准反序列化之后修正平台的字段布局差异：
+//
+// 普通消息事件并不带顶层 author，用户对象只出现在 extra.author；
+// 若直接使用零值 event.Author，归档出来的用户名会是空串。
+//
+// 同时把 extra.author.id 回填到 AuthorID：私聊消息事件里平台偶尔只给出
+// extra.author，缺少顶层 author_id，而命令分发完全依赖 AuthorID
+// （表现为「私聊机器人没有反应」）。
+func (e *Event) UnmarshalJSON(data []byte) error {
+	// 借助别名类型避免递归调用本方法。
+	type plain Event
+	var parsed plain
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*e = Event(parsed)
+	if e.Author.ID == "" && e.Extra.Author.ID != "" {
+		e.Author = e.Extra.Author
+	}
+	if e.AuthorID == "" {
+		e.AuthorID = e.Author.ID
+	}
+	return nil
 }
 
 // IsSystem 判断是否为系统事件。

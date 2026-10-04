@@ -82,7 +82,7 @@ func (b *Bot) handleButtonClick(ctx context.Context, event kook.Event) {
 
 	switch value.Action {
 	case actionOpen:
-		b.openTicket(ctx, channelID, userID, body.UserInfo)
+		b.openTicket(ctx, channelID, userID, body.UserInfo, value.PanelID)
 	case actionClose:
 		b.closeTicket(ctx, channelID, userID, value.TicketNo)
 	case actionLock:
@@ -110,7 +110,9 @@ const maxChannelNameLength = 20
 //  4. 在配置的隐藏分组下创建工单频道
 //  5. 下发频道权限：全局管理员角色、面板管理员角色、开单人
 //  6. 发送含「关闭 / 锁定」按钮的卡片，并把工单置为进行中
-func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, userInfo kook.User) {
+//
+// panelID 来自按钮签名（旧卡片为 0），用于在同一频道的多张面板卡片中定位实际点击的那一张。
+func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, userInfo kook.User, panelID uint) {
 	// 同一时间只处理一个开单，避免并发建频道导致编号/状态错乱。
 	b.openLock.Lock()
 	defer b.openLock.Unlock()
@@ -121,7 +123,7 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		return
 	}
 
-	panel, err := b.deps.Store.Panels.ByChannel(panelChannelID)
+	panel, err := b.panelForOpen(panelChannelID, panelID)
 	if err != nil || !panel.Enabled {
 		b.sendEphemeral(ctx, panelChannelID, userID, "该频道没有可用的工单面板")
 		return
@@ -191,8 +193,8 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		b.notifyDebug(ctx, "下发开单人频道权限失败："+err.Error())
 	}
 
-	closeValue := b.encodeButton(actionClose, pending.No, channel.ID)
-	lockValue := b.encodeButton(actionLock, pending.No, channel.ID)
+	closeValue := b.encodeButton(actionClose, pending.No, channel.ID, 0)
+	lockValue := b.encodeButton(actionLock, pending.No, channel.ID, 0)
 	card := b.ticketCard(pending, roleIDs, closeValue, lockValue)
 	if _, err := client.SendChannelMessage(ctx, channel.ID, kook.MsgTypeCard, card, kook.MessageOptions{}); err != nil {
 		b.deps.Logger.Warn("发送工单卡片失败", "ticket_no", pending.No, "err", err)
@@ -214,6 +216,24 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		CreatedAt: store.Now(),
 	})
 	b.deps.Logger.Info("工单已创建", "ticket_no", activated.No, "channel_id", channel.ID, "user", userInfo.FullName())
+}
+
+// panelForOpen 定位开单按钮所属的面板。
+//
+// panelID 非 0 时按主键查询，并校验其确实属于按钮所在频道；
+// 否则（升级前的旧卡片）回退到频道内第一条面板。
+func (b *Bot) panelForOpen(channelID string, panelID uint) (*store.Panel, error) {
+	if panelID == 0 {
+		return b.deps.Store.Panels.ByChannel(channelID)
+	}
+	panel, err := b.deps.Store.Panels.ByID(panelID)
+	if err != nil {
+		return nil, err
+	}
+	if panel.ChannelID != channelID {
+		return nil, fmt.Errorf("面板 %d 不属于频道 %s", panelID, channelID)
+	}
+	return panel, nil
 }
 
 // grantChannelAccess 为频道内的角色/用户下发“可看可发”权限。

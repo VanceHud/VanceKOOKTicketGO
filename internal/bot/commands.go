@@ -39,7 +39,7 @@ func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
 		case "bind":
 			b.cmdBind(ctx, event)
 		case "tkhelp", "help":
-			b.replyDirect(ctx, event.AuthorID, b.helpCard())
+			b.replyDirectCard(ctx, event.AuthorID, b.helpCard())
 		default:
 			b.replyDirect(ctx, event.AuthorID, "私聊仅支持 `/login`、`/bind` 与 `/tkhelp`")
 		}
@@ -50,7 +50,7 @@ func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
 	case "hello":
 		b.replyEphemeral(ctx, event, "world!")
 	case "tkhelp", "help":
-		b.replyEphemeral(ctx, event, b.helpCard())
+		b.replyEphemeralCard(ctx, event, b.helpCard())
 	case "ticket":
 		b.cmdTicketPanel(ctx, event)
 	case "tkcm":
@@ -74,7 +74,10 @@ func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
 // 面板与备注
 // ---------------------------------------------------------------------------
 
-// cmdTicketPanel 在当前频道创建/刷新工单面板。
+// cmdTicketPanel 在当前频道新建一张工单面板卡片。
+//
+// 同一频道允许存在多张卡片：每次执行都会新建一条面板记录并发送一张新卡片，
+// 各自携带独立的文案与面板管理员角色。
 func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event) {
 	channelID := event.TargetID
 	if channelID == "" {
@@ -84,45 +87,47 @@ func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event) {
 		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
 		return
 	}
-	client, _, err := b.ready()
-	if err != nil {
+	if _, _, err := b.ready(); err != nil {
 		b.replyEphemeral(ctx, event, "机器人尚未连接 KOOK")
-		return
-	}
-
-	const title = "请点击右侧按钮发起工单"
-	openValue := b.encodeButton(actionOpen, "", channelID)
-	content := b.panelCard(title, "ticket", openValue)
-
-	message, err := client.SendChannelMessage(ctx, channelID, kook.MsgTypeCard, content, kook.MessageOptions{})
-	if err != nil {
-		b.deps.Logger.Error("发送工单面板失败", "channel_id", channelID, "err", err)
-		b.replyEphemeral(ctx, event, "发送工单面板失败，请确认机器人拥有发送消息权限")
 		return
 	}
 
 	panel := &store.Panel{
 		ChannelID:   channelID,
 		ChannelName: event.Extra.ChannelName,
-		MsgID:       message.ID,
-		Title:       title,
+		Title:       panelDefaultTitle,
+		ButtonText:  panelDefaultButton,
 		Enabled:     true,
 	}
-	if err := b.deps.Store.Panels.Upsert(panel); err != nil {
+	if err := b.deps.Store.Panels.Create(panel); err != nil {
 		b.deps.Logger.Error("保存面板配置失败", "channel_id", channelID, "err", err)
-		b.replyEphemeral(ctx, event, "面板已发送，但保存配置失败")
+		b.replyEphemeral(ctx, event, "创建工单面板失败，请稍后重试")
 		return
+	}
+
+	msgID, err := b.SendPanelCard(ctx, panel, panelDefaultButton)
+	if err != nil {
+		b.deps.Logger.Error("发送工单面板失败", "channel_id", channelID, "err", err)
+		// 卡片未能发出时回滚记录，避免留下无法点击的空面板。
+		if delErr := b.deps.Store.Panels.Delete(panel.ID); delErr != nil {
+			b.deps.Logger.Error("回滚面板记录失败", "panel_id", panel.ID, "err", delErr)
+		}
+		b.replyEphemeral(ctx, event, "发送工单面板失败，请确认机器人拥有发送消息权限")
+		return
+	}
+	if err := b.deps.Store.Panels.UpdateFields(panel.ID, map[string]any{"msg_id": msgID}); err != nil {
+		b.deps.Logger.Error("回写面板消息 ID 失败", "panel_id", panel.ID, "err", err)
 	}
 
 	b.deps.Store.Audit.Write(&store.AuditLog{
 		Actor:     event.Author.FullName(),
 		ActorType: store.ActorTypeKook,
-		Action:    "panel.upsert",
+		Action:    "panel.create",
 		Target:    channelID,
-		Detail:    "创建或刷新工单面板",
+		Detail:    "创建工单面板，消息 " + msgID,
 		CreatedAt: store.Now(),
 	})
-	b.replyEphemeral(ctx, event, "工单面板已创建/刷新，成员点击按钮即可开单")
+	b.replyEphemeral(ctx, event, "工单面板已创建，成员点击按钮即可开单")
 }
 
 // cmdTicketComment 为已关闭的工单添加备注（对应 /tkcm）。
@@ -203,21 +208,24 @@ func (b *Bot) cmdAddAdminRole(ctx context.Context, event kook.Event, args []stri
 		return
 	}
 
-	panel, err := b.deps.Store.Panels.ByChannel(event.TargetID)
-	if err != nil {
+	// 同一频道可能有多张面板卡片，/aar 对它们全部生效。
+	panels, err := b.deps.Store.Panels.ListByChannel(event.TargetID)
+	if err != nil || len(panels) == 0 {
 		b.replyEphemeral(ctx, event, "当前频道还没有工单面板，无法设置面板管理员；若需全局管理员请在命令末尾加 `-g`")
 		return
 	}
-	if err := b.deps.Store.Panels.AddRole(panel.ID, roleID, roleName); err != nil {
-		b.replyEphemeral(ctx, event, "添加面板管理员角色失败："+friendlyError(err))
-		return
+	for _, panel := range panels {
+		if err := b.deps.Store.Panels.AddRole(panel.ID, roleID, roleName); err != nil {
+			b.replyEphemeral(ctx, event, "添加面板管理员角色失败："+friendlyError(err))
+			return
+		}
 	}
 	b.deps.Store.Audit.Write(&store.AuditLog{
 		Actor: event.Author.FullName(), ActorType: store.ActorTypeKook,
 		Action: "role.panel.add", Target: roleID, Detail: "新增面板管理员角色：" + event.TargetID,
 		CreatedAt: store.Now(),
 	})
-	b.replyEphemeral(ctx, event, fmt.Sprintf("已把「%s」设为当前频道的面板管理员角色", roleName))
+	b.replyEphemeral(ctx, event, fmt.Sprintf("已把「%s」设为当前频道 %d 张面板的管理员角色", roleName, len(panels)))
 }
 
 // lookupRoleName 按 ID 查角色名（失败时退化为 ID）。
@@ -564,6 +572,22 @@ func (b *Bot) replyEphemeral(ctx context.Context, event kook.Event, content stri
 	}
 }
 
+// replyEphemeralCard 在频道内以“仅本人可见”的方式回复卡片。
+//
+// 卡片 JSON 必须用 MsgTypeCard 发送：用 KMarkdown（type 9）发送时平台不会
+// 渲染卡片，而是把整段 JSON 当纯文本原样显示给用户。
+func (b *Bot) replyEphemeralCard(ctx context.Context, event kook.Event, content string) {
+	client, _, err := b.ready()
+	if err != nil {
+		return
+	}
+	if _, err := client.SendChannelMessage(ctx, event.TargetID, kook.MsgTypeCard, content, kook.MessageOptions{
+		TempTargetID: event.AuthorID,
+	}); err != nil {
+		b.deps.Logger.Debug("回复卡片失败", "channel_id", event.TargetID, "err", err)
+	}
+}
+
 // replyDirect 私聊回复。
 func (b *Bot) replyDirect(ctx context.Context, userID, content string) {
 	client, _, err := b.ready()
@@ -572,6 +596,17 @@ func (b *Bot) replyDirect(ctx context.Context, userID, content string) {
 	}
 	if _, err := client.SendDirectMessage(ctx, userID, kook.MsgTypeKMarkdown, content, kook.MessageOptions{}); err != nil {
 		b.deps.Logger.Warn("私聊回复失败", "user_id", userID, "err", err)
+	}
+}
+
+// replyDirectCard 私聊回复卡片（同样必须用 MsgTypeCard，理由见 replyEphemeralCard）。
+func (b *Bot) replyDirectCard(ctx context.Context, userID, content string) {
+	client, _, err := b.ready()
+	if err != nil {
+		return
+	}
+	if _, err := client.SendDirectMessage(ctx, userID, kook.MsgTypeCard, content, kook.MessageOptions{}); err != nil {
+		b.deps.Logger.Warn("私聊卡片回复失败", "user_id", userID, "err", err)
 	}
 }
 

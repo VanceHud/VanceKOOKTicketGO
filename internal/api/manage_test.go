@@ -21,6 +21,7 @@ import (
 type fakeBot struct {
 	status        bot.Status
 	panels        []string
+	buttonTexts   []string
 	deleted       []string
 	createErr     error
 	channels      map[string]kook.Channel
@@ -43,11 +44,12 @@ func (f *fakeBot) Status() bot.Status { return f.status }
 
 func (f *fakeBot) GuildRoles(_ any) ([]kook.Role, error) { return nil, nil }
 
-func (f *fakeBot) CreatePanel(_ any, channelID, _, _ string) (string, error) {
+func (f *fakeBot) SendPanelCard(_ any, panel *store.Panel, buttonText string) (string, error) {
 	if f.createErr != nil {
 		return "", f.createErr
 	}
-	f.panels = append(f.panels, channelID)
+	f.panels = append(f.panels, panel.ChannelID)
+	f.buttonTexts = append(f.buttonTexts, buttonText)
 	return fmt.Sprintf("msg-%d", len(f.panels)), nil
 }
 
@@ -96,8 +98,8 @@ func (a botAdapter) Restart(ctx context.Context) error { return a.inner.Restart(
 
 func (a botAdapter) NotifyConfigChanged() { a.inner.NotifyConfigChanged() }
 
-func (a botAdapter) CreatePanel(ctx context.Context, channelID, title, buttonText string) (string, error) {
-	return a.inner.CreatePanel(ctx, channelID, title, buttonText)
+func (a botAdapter) SendPanelCard(ctx context.Context, panel *store.Panel, buttonText string) (string, error) {
+	return a.inner.SendPanelCard(ctx, panel, buttonText)
 }
 
 func (a botAdapter) DeleteMessage(ctx context.Context, msgID string) error {
@@ -185,13 +187,16 @@ func TestPanelCRUDWithBotOnline(t *testing.T) {
 		t.Fatalf("不存在的频道应被拒绝，得到 %d", res.status)
 	}
 
-	// 更新（禁用）
+	// 更新（禁用并改文案与按钮文字）
 	disabled := false
 	res = env.do(t, http.MethodPatch, fmt.Sprintf("/api/v1/panels/%d", panelID), map[string]any{
-		"enabled": disabled, "title": "新文案",
+		"enabled": disabled, "title": "新文案", "buttonText": "联系客服",
 	}, withCookie(cookie), withCSRF(csrf))
 	if res.status != http.StatusOK || res.body["enabled"] != false {
 		t.Fatalf("更新面板失败: %d %s", res.status, res.raw)
+	}
+	if res.body["buttonText"] != "联系客服" {
+		t.Fatalf("按钮文字应被保存，得到 %v", res.body["buttonText"])
 	}
 
 	// 面板角色：真实角色应被接受并补全名称
@@ -225,6 +230,10 @@ func TestPanelCRUDWithBotOnline(t *testing.T) {
 	if len(fake.panels) != 2 {
 		t.Fatalf("重建应再发送一次卡片，实际 %v", fake.panels)
 	}
+	// 重建时必须沿用面板记录里的按钮文字，不能回退成默认的 ticket。
+	if len(fake.buttonTexts) != 2 || fake.buttonTexts[1] != "联系客服" {
+		t.Fatalf("重建应保留自定义按钮文字，实际 %v", fake.buttonTexts)
+	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "msg-1" {
 		t.Fatalf("重建应删除旧卡片，实际 %v", fake.deleted)
 	}
@@ -251,6 +260,32 @@ func TestPanelCRUDWithBotOnline(t *testing.T) {
 	}
 	if env.auditCount(t, "panel.delete") == 0 {
 		t.Fatal("面板删除应写入审计")
+	}
+}
+
+func TestPanelCreateAllowsMultiplePerChannel(t *testing.T) {
+	env := newTestEnv(t)
+	env.seedUser(t, "admin", adminPassword, store.RoleAdmin, false)
+	cookie, csrf := env.login(t, "admin", adminPassword)
+	fake := env.withFakeBot(t)
+
+	for i := 0; i < 2; i++ {
+		res := env.do(t, http.MethodPost, "/api/v1/panels", map[string]any{
+			"channelId": "30001", "title": fmt.Sprintf("面板 %d", i+1), "buttonText": "开单",
+		}, withCookie(cookie), withCSRF(csrf))
+		if res.status != http.StatusCreated {
+			t.Fatalf("创建第 %d 张面板失败: %d %s", i+1, res.status, res.raw)
+		}
+	}
+	if len(fake.panels) != 2 {
+		t.Fatalf("应在同一频道发送 2 张卡片，实际 %v", fake.panels)
+	}
+	panels, err := env.store.Panels.ListByChannel("30001")
+	if err != nil {
+		t.Fatalf("查询面板失败: %v", err)
+	}
+	if len(panels) != 2 {
+		t.Fatalf("同一频道应保留 2 条面板记录，实际 %d 条", len(panels))
 	}
 }
 

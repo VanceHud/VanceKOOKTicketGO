@@ -56,8 +56,18 @@ type Server struct {
 	upgrader websocket.Upgrader
 	conns    map[*websocket.Conn]bool
 	connMu   sync.Mutex
+	// writeMu 串行化所有向客户端的写入。gorilla/websocket 不允许并发写，
+	// 推送事件（Push）与心跳 PONG、HELLO 可能同时在写，需要加锁。
+	writeMu  sync.Mutex
 	sn       int64
 	sessions int64
+}
+
+// write 在写锁保护下向连接发送一条消息。
+func (s *Server) write(conn *websocket.Conn, messageType int, payload []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return conn.WriteMessage(messageType, payload)
 }
 
 // New 启动模拟平台。
@@ -163,11 +173,11 @@ func (s *Server) Push(eventType int, body any) {
 	for conn := range s.conns {
 		if s.Compress {
 			if compressed, err := compressPayload(payload); err == nil {
-				_ = conn.WriteMessage(websocket.BinaryMessage, compressed)
+				_ = s.write(conn, websocket.BinaryMessage, compressed)
 				continue
 			}
 		}
-		_ = conn.WriteMessage(websocket.TextMessage, payload)
+		_ = s.write(conn, websocket.TextMessage, payload)
 	}
 }
 
@@ -337,7 +347,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		"code":       0,
 		"session_id": sessionID,
 	}})
-	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
+	if err := s.write(conn, websocket.TextMessage, hello); err != nil {
 		return
 	}
 
@@ -363,10 +373,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		switch frame.Signal {
 		case kook.SignalPing:
 			pong, _ := json.Marshal(map[string]any{"s": kook.SignalPong, "sn": frame.SN})
-			_ = conn.WriteMessage(websocket.TextMessage, pong)
+			_ = s.write(conn, websocket.TextMessage, pong)
 		case kook.SignalResume:
 			resumeAck, _ := json.Marshal(map[string]any{"s": kook.SignalResumeAck, "d": map[string]any{"session_id": sessionID}})
-			_ = conn.WriteMessage(websocket.TextMessage, resumeAck)
+			_ = s.write(conn, websocket.TextMessage, resumeAck)
 		}
 	}
 
@@ -401,20 +411,23 @@ func ButtonClickEvent(channelID, userID, value string, user kook.User) map[strin
 }
 
 // TextMessageEvent 构造频道文本消息事件。
+//
+// 与真实平台保持一致：extra.type 是数字（等于事件主类型），用户对象放在
+// extra.author，顶层不重复给出完整 author（平台只给 author_id）。
 func TextMessageEvent(channelID, userID, content string, user kook.User) map[string]any {
 	return map[string]any{
 		"channel_type":  kook.ChannelTypeGroup,
 		"type":          kook.EventTypeText,
 		"target_id":     channelID,
 		"author_id":     userID,
-		"author":        user,
 		"content":       content,
 		"msg_id":        fmt.Sprintf("msg-%d", time.Now().UnixNano()),
 		"msg_timestamp": time.Now().UnixMilli(),
 		"extra": map[string]any{
-			"type":         "kmarkdown",
+			"type":         kook.EventTypeText,
 			"guild_id":     "5000",
 			"channel_name": "工单频道",
+			"author":       user,
 		},
 	}
 }
@@ -423,6 +436,9 @@ func TextMessageEvent(channelID, userID, content string, user kook.User) map[str
 func ImageMessageEvent(channelID, userID, url string, user kook.User) map[string]any {
 	event := TextMessageEvent(channelID, userID, url, user)
 	event["type"] = kook.EventTypeImage
+	if extra, ok := event["extra"].(map[string]any); ok {
+		extra["type"] = kook.EventTypeImage
+	}
 	return event
 }
 
@@ -433,11 +449,13 @@ func DirectMessageEvent(userID, content string, user kook.User) map[string]any {
 		"type":          kook.EventTypeText,
 		"target_id":     userID,
 		"author_id":     userID,
-		"author":        user,
 		"content":       content,
 		"msg_id":        fmt.Sprintf("dm-%d", time.Now().UnixNano()),
 		"msg_timestamp": time.Now().UnixMilli(),
-		"extra":         map[string]any{"type": "kmarkdown"},
+		"extra": map[string]any{
+			"type":   kook.EventTypeText,
+			"author": user,
+		},
 	}
 }
 

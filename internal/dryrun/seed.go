@@ -79,17 +79,15 @@ func Seed(st *store.Store, loc *time.Location, log *slog.Logger) error {
 
 func seedPanelsAndRoles(st *store.Store, log *slog.Logger) error {
 	panelChannel := demoUserID(2)
-	if err := st.Panels.Upsert(&store.Panel{
+	panel := &store.Panel{
 		ChannelID:   panelChannel,
 		ChannelName: "工单面板",
 		MsgID:       demoUserID(3),
 		Title:       "点击按钮发起工单",
+		ButtonText:  "ticket",
 		Enabled:     true,
-	}); err != nil {
-		return err
 	}
-	panel, err := st.Panels.ByChannel(panelChannel)
-	if err != nil {
+	if err := st.Panels.Create(panel); err != nil {
 		return err
 	}
 	if err := st.Panels.AddRole(panel.ID, demoUserID(11), "客服组"); err != nil {

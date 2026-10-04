@@ -153,17 +153,26 @@ type TicketNote struct {
 	CreatedAt time.Time `gorm:"index" json:"createdAt"`
 }
 
-// Panel 是某个频道里的工单按钮卡片（对应原项目 TicketConf 的 channel_id 段）。
+// Panel 是某个频道里的一条工单按钮卡片（对应原项目 TicketConf 的 channel_id 段）。
+//
+// 同一频道允许存在多条记录：每一张卡片对应一条 Panel，卡片按钮内嵌自己的 ID，
+// 因此点击不同卡片可以携带不同的面板管理员角色。
 type Panel struct {
 	ID          uint   `gorm:"primaryKey" json:"id"`
-	ChannelID   string `gorm:"uniqueIndex;size:64;not null" json:"channelId"`
+	ChannelID   string `gorm:"index;size:64;not null" json:"channelId"`
 	ChannelName string `gorm:"size:128" json:"channelName"`
 	// MsgID 是当前生效的面板卡片消息 ID，重新生成面板时更新。
-	MsgID     string    `gorm:"size:64" json:"msgId"`
-	Title     string    `gorm:"size:128" json:"title"`
-	Enabled   bool      `gorm:"default:true" json:"enabled"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	MsgID string `gorm:"size:64" json:"msgId"`
+	// Title 是卡片正文，按 KMarkdown 渲染，允许多行。
+	Title string `gorm:"type:text" json:"title"`
+	// ButtonText 是开单按钮上的文字；为空时使用默认值。
+	//
+	// 必须持久化：重建卡片（refresh）或编辑文案后需要原样恢复按钮文字，
+	// 否则会把自定义按钮文字冲成默认的 "ticket"。
+	ButtonText string    `gorm:"size:32" json:"buttonText"`
+	Enabled    bool      `gorm:"default:true" json:"enabled"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 
 	Roles []PanelRole `gorm:"foreignKey:PanelID" json:"roles,omitempty"`
 }

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -381,13 +382,15 @@ func (b *Bot) markEvent() {
 // buttonValue 是按钮携带的数据。
 //
 // 设计原则：按钮的 value 来自客户端回传，**不可信**。
-// 因此这里只放“动作类型 + 工单编号”，其余一律以服务端记录为准，
-// 并用 HMAC 签名防止伪造（签名参与频道 ID，换频道即失效）。
+// 因此这里只放“动作类型 + 工单编号 + 面板 ID”，其余一律以服务端记录为准，
+// 并用 HMAC 签名防止伪造（签名参与频道 ID 与面板 ID，串改即失效）。
 type buttonValue struct {
 	// Action 是动作类型：tk_open / tk_close / tk_lock / tk_reopen。
 	Action string `json:"a"`
 	// TicketNo 是工单编号（开单时为空，开单按钮与面板频道绑定）。
 	TicketNo string `json:"n,omitempty"`
+	// PanelID 是开单按钮所属的面板记录 ID（旧卡片为空，回退到频道内第一条面板）。
+	PanelID uint `json:"p,omitempty"`
 	// Signature 是 HMAC 签名。
 	Signature string `json:"s"`
 }
@@ -400,23 +403,32 @@ const (
 	actionReopen = "tk_reopen"
 )
 
-// signButton 为按钮值签名。
-func (b *Bot) signButton(action, ticketNo, channelID string) string {
-	return b.signature(action, ticketNo, channelID)
+// signature 对“动作 + 工单编号 + 频道 + 面板 ID”做 HMAC 签名。
+//
+// panelID 为 0 时与 legacySignature 不同（多一段分隔符），这是有意为之：
+// 新旧签名不会互相伪造，兼容逻辑见 decodeButton。
+func (b *Bot) signature(action, ticketNo, channelID string, panelID uint) string {
+	return b.macHex(action, ticketNo, channelID, strconv.FormatUint(uint64(panelID), 10))
 }
 
-func (b *Bot) signature(action, ticketNo, channelID string) string {
+// legacySignature 是旧版本（不含面板 ID）的签名算法，仅用于验证升级前发出的卡片。
+func (b *Bot) legacySignature(action, ticketNo, channelID string) string {
+	return b.macHex(action, ticketNo, channelID)
+}
+
+func (b *Bot) macHex(parts ...string) string {
 	mac := hmac.New(sha256.New, b.secret)
-	mac.Write([]byte(strings.Join([]string{action, ticketNo, channelID}, "|")))
+	mac.Write([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(mac.Sum(nil))[:32]
 }
 
-// encodeButton 生成按钮 value 字符串。
-func (b *Bot) encodeButton(action, ticketNo, channelID string) string {
+// encodeButton 生成按钮 value 字符串。panelID 仅开单按钮使用，其它动作传 0。
+func (b *Bot) encodeButton(action, ticketNo, channelID string, panelID uint) string {
 	value := buttonValue{
 		Action:    action,
 		TicketNo:  ticketNo,
-		Signature: b.signButton(action, ticketNo, channelID),
+		PanelID:   panelID,
+		Signature: b.signature(action, ticketNo, channelID, panelID),
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
@@ -426,6 +438,10 @@ func (b *Bot) encodeButton(action, ticketNo, channelID string) string {
 }
 
 // decodeButton 解析并校验按钮 value。
+//
+// 兼容性：升级前发出的卡片不含面板 ID，签名也采用旧算法。
+// 此时回退到旧签名验证，并把 PanelID 清零，由调用方按频道解析面板，
+// 避免伪造的 panelID 绕过签名。
 func (b *Bot) decodeButton(raw, channelID string) (*buttonValue, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, errors.New("按钮数据为空")
@@ -437,11 +453,14 @@ func (b *Bot) decodeButton(raw, channelID string) (*buttonValue, error) {
 	if value.Action == "" {
 		return nil, errors.New("按钮数据缺少动作类型")
 	}
-	expected := b.signature(value.Action, value.TicketNo, channelID)
-	if !hmac.Equal([]byte(expected), []byte(value.Signature)) {
-		return nil, errors.New("按钮签名校验失败（可能来自伪造的客户端）")
+	if hmac.Equal([]byte(b.signature(value.Action, value.TicketNo, channelID, value.PanelID)), []byte(value.Signature)) {
+		return &value, nil
 	}
-	return &value, nil
+	if hmac.Equal([]byte(b.legacySignature(value.Action, value.TicketNo, channelID)), []byte(value.Signature)) {
+		value.PanelID = 0
+		return &value, nil
+	}
+	return nil, errors.New("按钮签名校验失败（可能来自伪造的客户端）")
 }
 
 // ---------------------------------------------------------------------------
@@ -494,12 +513,15 @@ func (b *Bot) isAdmin(ctx context.Context, userID, panelChannelID string) bool {
 	}
 
 	if panelChannelID != "" {
-		panel, err := b.deps.Store.Panels.ByChannel(panelChannelID)
+		panels, err := b.deps.Store.Panels.ListByChannel(panelChannelID)
 		if err == nil {
-			for _, panelRole := range panel.Roles {
-				for _, roleID := range roles {
-					if panelRole.RoleID == fmt.Sprint(roleID) {
-						return true
+			// 频道内可能有多张面板卡片，命中任意一张的面板角色即视为管理员。
+			for _, panel := range panels {
+				for _, panelRole := range panel.Roles {
+					for _, roleID := range roles {
+						if panelRole.RoleID == fmt.Sprint(roleID) {
+							return true
+						}
 					}
 				}
 			}
