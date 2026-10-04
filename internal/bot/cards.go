@@ -98,12 +98,14 @@ func (b *Bot) closedCard(t *store.Ticket, actor ticket.Actor, note string) strin
 		closer = "system"
 	}
 
+	// 关闭用户可能是 WebUI 账号（actor.ID 是账号名而非 KOOK ID），
+	// 用 DisplayUser 回退到昵称，避免 KOOK 渲染成「@用户不存在」。
 	text := fmt.Sprintf(
 		"开启时间：%s\n发起用户：%s\n关闭时间：%s\n关闭用户：%s",
 		b.formatTime(t.StartedAt),
 		kook.MentionUser(t.UserID),
 		b.formatTime(store.Now()),
-		kook.MentionUser(closer),
+		kook.DisplayUser(closer, actor.Name),
 	)
 	if strings.TrimSpace(note) != "" {
 		// 备注来自管理员输入，转义其中的提及语法，避免伪造 @全体成员。
@@ -133,7 +135,7 @@ func (b *Bot) lockCard(t *store.Ticket, actor ticket.Actor, reopenValue, reasonT
 		kook.EscapeMentionText(reasonText),
 		b.formatTime(store.Now()),
 		kook.MentionUser(t.UserID),
-		kook.MentionUser(operator),
+		kook.DisplayUser(operator, actor.Name),
 	)
 
 	card := kook.NewCard(kook.CardThemeWarning).
@@ -155,12 +157,13 @@ func (b *Bot) ticketLogCard(t *store.Ticket, notes []store.TicketNote) string {
 		b.formatTime(t.StartedAt),
 		kook.MentionUser(t.UserID),
 		b.formatTime(derefTime(t.ClosedAt, store.Now())),
-		kook.MentionUser(firstNonEmpty(t.ClosedBy, "system")),
+		// closed_by 可能是 WebUI 账号名，优先用落库时的昵称展示。
+		kook.DisplayUser(t.ClosedBy, firstNonEmpty(t.ClosedByName, t.ClosedBy)),
 	)
 
 	for _, note := range notes {
 		text += fmt.Sprintf("\n\n来自 %s 的备注：\n> %s",
-			kook.MentionUser(firstNonEmpty(note.AuthorID, "system")),
+			kook.DisplayUser(note.AuthorID, note.AuthorName),
 			kook.EscapeMentionText(note.Content),
 		)
 	}

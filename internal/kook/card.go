@@ -88,6 +88,44 @@ func MentionRole(roleID string) string { return fmt.Sprintf("(rol)%s(rol)", role
 // MentionChannel 生成频道提及语法。
 func MentionChannel(channelID string) string { return fmt.Sprintf("(chn)%s(chn)", channelID) }
 
+// IsUserID 判断字符串是否形如 KOOK 用户 ID。
+//
+// KOOK 的 ID 是雪花 ID（纯十进制数字，见 internal/api 的同名校验规则）。
+// WebUI 账号名（如 admin）、"system" 这类标识不是 ID，
+// 套进提及语法后客户端只能显示「@用户不存在」这样的占位文案。
+func IsUserID(id string) bool {
+	if len(id) < 5 || len(id) > 32 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// DisplayUser 生成卡片里展示用户的文本：
+//   - id 是 KOOK 用户 ID 时返回提及语法，客户端会渲染成 @昵称；
+//   - 否则退回纯文本名字——WebUI 操作者的 id 是账号名、系统任务用 "system"，
+//     这些都不是 KOOK ID，直接拼 (met)…(met) 会显示成「@用户不存在」。
+//
+// 名字来自数据库或用户输入，同样需要做提及转义。
+func DisplayUser(id, name string) string {
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
+	if IsUserID(id) {
+		return MentionUser(id)
+	}
+	if name != "" {
+		return EscapeMentionText(name)
+	}
+	if id == "" || id == "system" || id == "bot" {
+		return "系统"
+	}
+	return EscapeMentionText(id)
+}
+
 // EscapeMentionText 转义用户内容中的提及语法，避免开单人伪造 @全体成员。
 //
 // 说明：KMarkdown 的提及写法是 (met)…(met)，如果直接把用户输入拼进卡片，

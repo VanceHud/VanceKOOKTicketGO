@@ -1238,6 +1238,64 @@ func TestTicketCommentUpdatesLogCard(t *testing.T) {
 	env.waitFor("刷新日志卡片", func() bool { return len(env.mock.CallsOf("message/update")) > 0 })
 }
 
+// TestWebUICloseCardShowsActorName 是回归测试：
+//
+// WebUI 关闭工单时 actor.ID 是账号名（如 admin）而不是 KOOK 用户 ID。
+// 早期实现直接把它拼成 (met)admin(met)，KOOK 客户端渲染为「@用户不存在」。
+func TestWebUICloseCardShowsActorName(t *testing.T) {
+	env := newBotEnv(t)
+	env.openTicketForTest()
+	opened := env.firstTicket()
+
+	actor := ticket.Actor{ID: "admin", Name: "客服小林", Role: store.RoleStaff, Source: "web"}
+	if _, err := env.svc.Close(context.Background(), opened.No, actor, "已处理完毕"); err != nil {
+		t.Fatalf("关闭工单失败: %v", err)
+	}
+
+	closed, err := env.store.Tickets.ByNo(opened.No)
+	if err != nil || closed.Status != store.TicketClosed {
+		t.Fatalf("工单状态应为 closed: %+v err=%v", closed, err)
+	}
+	if closed.ClosedByName != "客服小林" {
+		t.Fatalf("应记录关闭人昵称: %+v", closed)
+	}
+
+	content := logCardContent(t, env)
+	if strings.Contains(content, "(met)admin(met)") {
+		t.Fatalf("WebUI 账号名不应当作 KOOK 用户提及: %s", content)
+	}
+	if !strings.Contains(content, "关闭用户：客服小林") {
+		t.Fatalf("关闭用户应展示昵称: %s", content)
+	}
+
+	// /tkcm 刷新日志卡片时同样不能把账号名当提及。
+	if _, err := env.svc.AddNote(opened.No, actor, "补充说明"); err != nil {
+		t.Fatalf("添加备注失败: %v", err)
+	}
+	card := env.bot.ticketLogCard(closed, []store.TicketNote{{AuthorID: "admin", AuthorName: "客服小林", Content: "补充说明"}})
+	if strings.Contains(card, "(met)admin(met)") {
+		t.Fatalf("备注作者不应当作 KOOK 用户提及: %s", card)
+	}
+	if !strings.Contains(card, "来自 客服小林 的备注") {
+		t.Fatalf("备注作者应展示昵称: %s", card)
+	}
+}
+
+// logCardContent 返回发往日志频道的最后一条卡片内容。
+func logCardContent(t *testing.T, env *botEnv) string {
+	t.Helper()
+	content := ""
+	for _, call := range env.mock.CallsOf("message/create") {
+		if fmt.Sprint(call.Params["target_id"]) == testLogChan {
+			content = fmt.Sprint(call.Params["content"])
+		}
+	}
+	if content == "" {
+		t.Fatal("日志频道没有收到卡片")
+	}
+	return content
+}
+
 func TestHelloCommandReplies(t *testing.T) {
 	env := newBotEnv(t)
 	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(testPanelChan, userAsker, "/hello", env.user(userAsker)))

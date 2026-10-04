@@ -70,7 +70,7 @@ func (p *platform) NotifyReopened(ctx context.Context, t *store.Ticket, actor ti
 	content := kook.NoticeCard(kook.CardThemeSuccess,
 		fmt.Sprintf("工单「%s」已重新激活", t.No),
 		fmt.Sprintf("操作人：%s\n时间：%s\n%s 恢复发言权限",
-			kook.MentionUser(firstNonEmpty(actor.ID, "system")),
+			kook.DisplayUser(actor.ID, actor.Name),
 			p.b.formatTime(store.Now()),
 			kook.MentionUser(t.UserID),
 		))

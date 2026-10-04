@@ -123,3 +123,49 @@ func TestCardSummaryAndAttachments(t *testing.T) {
 		t.Fatalf("空内容应返回错误")
 	}
 }
+
+// TestDisplayUserFallback 是回归测试：
+//
+// WebUI 操作者的 id 是账号名（如 admin）、系统任务是 "system"，都不是 KOOK 用户 ID。
+// 早期实现统一拼 (met)…(met)，KOOK 客户端会渲染成「@用户不存在」，
+// 关闭工单的日志卡片因此显示错误的“关闭用户”。
+func TestDisplayUserFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		id   string
+		nick string
+		want string
+	}{
+		{"KOOK ID 用提及", "1000012345", "提问用户", "(met)1000012345(met)"},
+		{"WebUI 账号用昵称", "admin", "客服小林", "客服小林"},
+		{"昵称为空时退回账号名", "admin", "", "admin"},
+		{"系统账号", "system", "系统", "系统"},
+		{"空操作者", "", "", "系统"},
+		{"昵称中的提及语法被转义", "admin", "(met)all(met)", "( met )all( met )"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DisplayUser(tc.id, tc.nick); got != tc.want {
+				t.Fatalf("DisplayUser(%q, %q) = %q，期望 %q", tc.id, tc.nick, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsUserID 覆盖雪花 ID 判定边界。
+func TestIsUserID(t *testing.T) {
+	cases := map[string]bool{
+		"1000012345": true,
+		"1234567890": true,
+		"admin":      false,
+		"system":     false,
+		"12345a":     false,
+		"":           false,
+		"9001":       false, // 少于 5 位
+	}
+	for input, want := range cases {
+		if got := IsUserID(input); got != want {
+			t.Fatalf("IsUserID(%q) = %v，期望 %v", input, got, want)
+		}
+	}
+}
