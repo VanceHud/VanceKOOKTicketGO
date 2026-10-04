@@ -289,7 +289,7 @@ export function PanelsPage() {
 
       {/* 新建面板 */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="sm:max-w-3xl">
+        <DialogContent className="grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>{t("panels.createTitle")}</DialogTitle>
             <DialogDescription>{t("panels.createDesc")}</DialogDescription>
@@ -304,7 +304,7 @@ export function PanelsPage() {
 
       {/* 编辑文案 */}
       <Dialog open={Boolean(editing)} onOpenChange={(open) => !open && setEditing(null)}>
-        <DialogContent className="sm:max-w-3xl">
+        <DialogContent className="grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>{t("panels.editTitle")}</DialogTitle>
             <DialogDescription>{t("panels.editDesc")}</DialogDescription>
@@ -386,7 +386,7 @@ function CreatePanelForm({
 
   return (
     <>
-      <div className="space-y-4">
+      <div className="-mx-1 min-h-0 space-y-4 overflow-y-auto px-1">
         {playable.length > 0 ? (
           <div className="space-y-2">
             <Label>{t("panels.channelLabel")}</Label>
@@ -484,7 +484,7 @@ function EditPanelForm({
 
   return (
     <>
-      <div className="space-y-4">
+      <div className="-mx-1 min-h-0 space-y-4 overflow-y-auto px-1">
         <PanelTextEditor
           value={title}
           onChange={setTitle}
