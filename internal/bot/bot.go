@@ -135,6 +135,14 @@ func New(deps Deps) (*Bot, error) {
 // Start 建立连接并开始处理事件。
 //
 // 返回错误表示启动失败（例如 Token 无效）；调用方可以稍后重试。
+//
+// ctx 只约束本次建连的准备工作（读配置、校验 Token、拉取服务器信息）：
+// 调用方取消或超时会让 Start 立刻失败。连接建立后网关在后台独立运行，
+// 直到 Stop 被调用 —— 这一点非常关键：WebUI 的「配置变更后重连 / 重新连接」
+// 传入的是 HTTP 请求上下文，请求处理结束时它就会被取消；
+// 若网关直接继承该上下文，建连过程中就会收到 context canceled
+// （表现为“获取网关地址失败: 请求 KOOK 接口失败: ... context canceled”）
+// 并且连接永久停止，直到管理员再次点击重连。
 func (b *Bot) Start(ctx context.Context) error {
 	cfg, err := b.deps.Config(ctx)
 	if err != nil {
@@ -198,7 +206,9 @@ func (b *Bot) Start(ctx context.Context) error {
 		return err
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
+	// 建连准备工作已完成，从调用方上下文中“解绑”取消信号（保留其取值）：
+	// 连接的存活只由 Stop 决定，不再随触发启动的请求结束而中断。
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	b.mu.Lock()
 	b.client = client

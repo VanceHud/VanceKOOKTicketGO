@@ -130,11 +130,12 @@ func (g *Gateway) Run(ctx context.Context) error {
 		}
 
 		err := g.serve(ctx)
-		g.setDisconnected(errorText(err))
-
 		if ctx.Err() != nil {
+			// 主动停止：关闭 socket 引发的错误不属于故障，不写入 LastError
+			g.setDisconnected("客户端已停止")
 			return ctx.Err()
 		}
+		g.setDisconnected(errorText(err))
 
 		g.attempt.Add(1)
 		backoff := g.backoff()
@@ -196,6 +197,12 @@ func (g *Gateway) serve(ctx context.Context) error {
 		return fmt.Errorf("连接网关失败: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+
+	// ctx 结束时主动关闭连接：ReadMessage 在没有读超时的情况下不会因 ctx
+	// 被取消而返回，不主动关闭的话，Stop/重连后旧连接会一直挂着
+	// （在平台上表现为一个永不消失的会话）。
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
 
 	// 先读取 HELLO，确认握手成功并拿到 session_id
 	hello, err := g.readFrame(conn)

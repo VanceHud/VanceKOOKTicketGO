@@ -19,7 +19,6 @@ type Manager struct {
 
 	mu        sync.Mutex
 	bot       *Bot
-	cancel    context.CancelFunc
 	running   bool
 	lastError string
 }
@@ -33,6 +32,9 @@ func NewManager(deps Deps) (*Manager, error) {
 }
 
 // Start 读取配置并建立连接（幂等：已运行时不会重复启动）。
+//
+// ctx 仅用于本次建连的准备工作（见 Bot.Start）；连接建立后由 Stop 负责断开，
+// 因此调用方用 HTTP 请求上下文调用它是安全的。
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	if m.running {
@@ -41,23 +43,18 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 
-	runCtx, cancel := context.WithCancel(ctx)
-
 	instance, err := New(m.deps)
 	if err != nil {
-		cancel()
 		m.setError(err)
 		return err
 	}
-	if err := instance.Start(runCtx); err != nil {
-		cancel()
+	if err := instance.Start(ctx); err != nil {
 		m.setError(err)
 		return err
 	}
 
 	m.mu.Lock()
 	m.bot = instance
-	m.cancel = cancel
 	m.running = true
 	m.lastError = ""
 	m.mu.Unlock()
@@ -67,15 +64,12 @@ func (m *Manager) Start(ctx context.Context) error {
 // Stop 断开当前连接。
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	instance, cancel := m.bot, m.cancel
-	m.bot, m.cancel, m.running = nil, nil, false
+	instance := m.bot
+	m.bot, m.running = nil, false
 	m.mu.Unlock()
 
 	if instance != nil {
 		instance.Stop()
-	}
-	if cancel != nil {
-		cancel()
 	}
 }
 
@@ -84,10 +78,7 @@ func (m *Manager) Restart(ctx context.Context) error {
 	m.deps.Logger.Info("正在按最新配置重启机器人连接")
 	m.Stop()
 
-	// 清空缓存，确保读到新的频道/角色
-	if instance := m.current(); instance != nil {
-		instance.RefreshPanels()
-	}
+	// Start 会构造新的 Bot 实例，角色/频道缓存随之重建，无需额外清理。
 	return m.Start(ctx)
 }
 
