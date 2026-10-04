@@ -181,7 +181,7 @@ ensure_env() {
 # ---------------------------------------------------------------------------
 
 cmd_init() {
-  local port="${OPT_PORT:-8080}"
+  local port="${OPT_PORT:-9235}"
   local bind="${OPT_BIND:-127.0.0.1}"
   local tz="${OPT_TZ:-Asia/Shanghai}"
   local dry="${OPT_DRYRUN:-0}"
@@ -319,7 +319,7 @@ cmd_down() {
 
 wait_ready() {
   local timeout="${1:-120}" elapsed=0 url status
-  url="http://127.0.0.1:$(env_value PORT 8080)/healthz"
+  url="http://127.0.0.1:$(env_value PORT 9235)/healthz"
 
   step "等待服务就绪（最长 ${timeout}s）"
   while (( elapsed < timeout )); do
@@ -396,7 +396,7 @@ cmd_status() {
   ensure_env
 
   local port bind version health
-  port="$(env_value PORT 8080)"
+  port="$(env_value PORT 9235)"
   bind="$(env_value BIND_ADDR 127.0.0.1)"
   version="$(docker_cli exec "$CONTAINER" /app/kook-ticket -version 2>/dev/null || true)"
   health="$(curl -fsS --max-time 5 "http://127.0.0.1:${port}/healthz" 2>/dev/null || true)"
@@ -662,7 +662,7 @@ cmd_doctor() {
   if [[ -f "$ENV_FILE" ]]; then
     ok "$ENV_FILE 存在（权限 $(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo '?'))"
     local port
-    port="$(env_value PORT 8080)"
+    port="$(env_value PORT 9235)"
     if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
       local owner
       owner="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1}')"
@@ -729,7 +729,7 @@ KOOK Ticket 部署脚本
   help                 显示本帮助
 
 选项:
-  --port N             宿主机端口（默认 8080）
+  --port N             宿主机端口（默认 9235）
   --bind ADDR          监听地址（默认 127.0.0.1，直接对外访问用 0.0.0.0）
   --tz TZ              业务时区（默认 Asia/Shanghai）
   --password PW        指定初始/新密码（默认随机生成）
@@ -739,7 +739,7 @@ KOOK Ticket 部署脚本
   --yes                跳过交互确认
 
 示例:
-  ./deploy.sh init --port 8080
+  ./deploy.sh init --port 9235
   ./deploy.sh up --bind 0.0.0.0
   ./deploy.sh upgrade
   ./deploy.sh backup
