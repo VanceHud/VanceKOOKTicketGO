@@ -394,12 +394,13 @@ func TestPanelCreateAllowsMultiplePerChannel(t *testing.T) {
 	}
 }
 
-// TestPanelOpenMessageValidation 验证“开单后发送内容”的长度限制与清空。
+// TestPanelOpenMessageValidation 验证“开单后发送内容”的长度限制与清空，
+// 并确保单独更新该字段不会触发卡片重建（不重发、不删卡）。
 func TestPanelOpenMessageValidation(t *testing.T) {
 	env := newTestEnv(t)
 	env.seedUser(t, "admin", adminPassword, store.RoleAdmin, false)
 	cookie, csrf := env.login(t, "admin", adminPassword)
-	env.withFakeBot(t)
+	fake := env.withFakeBot(t)
 
 	// 超长内容应被拒绝
 	tooLong := strings.Repeat("啊", maxPanelOpenMessageLength+1)
@@ -421,13 +422,28 @@ func TestPanelOpenMessageValidation(t *testing.T) {
 	if res.body["openMessage"] != "" {
 		t.Fatalf("未配置时开单提示应为空，得到 %v", res.body["openMessage"])
 	}
+	if len(fake.panels) != 1 {
+		t.Fatalf("创建面板应只发送一次卡片，实际 %v", fake.panels)
+	}
+	stored, err := env.store.Panels.ByID(panelID)
+	if err != nil {
+		t.Fatalf("读取面板失败: %v", err)
+	}
+	originalMsgID := stored.MsgID
 
-	// 可单独更新
+	// 可单独更新（只写入数据库：不应重建卡片、不应删除原消息）
 	res = env.do(t, http.MethodPatch, fmt.Sprintf("/api/v1/panels/%d", panelID), map[string]any{
 		"openMessage": "注意：请勿泄露密码",
 	}, withCookie(cookie), withCSRF(csrf))
 	if res.status != http.StatusOK || res.body["openMessage"] != "注意：请勿泄露密码" {
 		t.Fatalf("开单提示应可单独更新: %d %s", res.status, res.raw)
+	}
+	if len(fake.panels) != 1 || len(fake.deleted) != 0 {
+		t.Fatalf("仅更新开单提示不应重建卡片，实际发送 %v 删除 %v", fake.panels, fake.deleted)
+	}
+	stored, _ = env.store.Panels.ByID(panelID)
+	if stored.MsgID != originalMsgID {
+		t.Fatalf("仅更新开单提示不应改变消息 ID，原 %s 现 %s", originalMsgID, stored.MsgID)
 	}
 
 	// 可清空
@@ -436,6 +452,9 @@ func TestPanelOpenMessageValidation(t *testing.T) {
 	}, withCookie(cookie), withCSRF(csrf))
 	if res.status != http.StatusOK || res.body["openMessage"] != "" {
 		t.Fatalf("开单提示应可清空: %d %s", res.status, res.raw)
+	}
+	if len(fake.panels) != 1 || len(fake.deleted) != 0 {
+		t.Fatalf("清空开单提示不应重建卡片，实际发送 %v 删除 %v", fake.panels, fake.deleted)
 	}
 }
 

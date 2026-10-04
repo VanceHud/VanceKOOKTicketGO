@@ -5,6 +5,8 @@
  * - 同一频道允许存在多张工单按钮卡片，每张卡片各自携带独立的文案与面板管理员角色；
  * - 面板卡片必须由机器人发送（按钮 value 需要机器人签名并内嵌面板 ID），
  *   因此新建/重建需要机器人在线；不在线时界面给出明确提示而不是静默失败；
+ * - 编辑时仅在卡片文案或按钮文字变化后重建卡片；“开单后发送内容”保存即生效，
+ *   不会触发重建（避免无意义的删卡/重发）；
  * - 面板文案按 KMarkdown 渲染并支持多行，编辑时提供实时预览。
  */
 
@@ -85,13 +87,16 @@ export function PanelsPage() {
     onError: (error) => toastError(error),
   })
 
-  // 编辑：先保存文案、按钮文字与开单提示；若机器人在线则同时重建卡片，让卡片修改立即生效。
+  // 编辑：先保存文案、按钮文字与开单提示。
+  // 只有卡片文案或按钮文字变化、且机器人在线时才重建卡片：
+  //“开单后发送内容”不参与卡片渲染，只影响之后新开的工单，保存即生效，无需重建。
   const editMutation = useMutation({
     mutationFn: async (payload: {
       id: number
       title: string
       buttonText: string
       openMessage: string
+      cardChanged: boolean
       rebuild: boolean
     }) => {
       await api.patch<Panel>(`/panels/${payload.id}`, {
@@ -99,13 +104,20 @@ export function PanelsPage() {
         buttonText: payload.buttonText,
         openMessage: payload.openMessage,
       })
-      if (payload.rebuild) {
+      const rebuilt = payload.rebuild && payload.cardChanged
+      if (rebuilt) {
         await api.post<Panel>(`/panels/${payload.id}/refresh`)
       }
-      return payload.rebuild
+      return { rebuilt, cardChanged: payload.cardChanged }
     },
-    onSuccess: (rebuilt) => {
-      toastSuccess(rebuilt ? t("panels.editSuccess") : t("panels.editSaved"))
+    onSuccess: ({ rebuilt, cardChanged }) => {
+      if (rebuilt) {
+        toastSuccess(t("panels.editSuccess"))
+      } else if (cardChanged) {
+        toastSuccess(t("panels.editSaved"))
+      } else {
+        toastSuccess(t("panels.openMessageSaved"))
+      }
       setEditing(null)
       invalidate()
     },
@@ -315,9 +327,16 @@ export function PanelsPage() {
               initialTitle={editing.title}
               initialButtonText={editing.buttonText}
               initialOpenMessage={editing.openMessage}
-              rebuild={botConnected}
-              onSubmit={(title, buttonText, openMessage) =>
-                editMutation.mutate({ id: editing.id, title, buttonText, openMessage, rebuild: botConnected })
+              botConnected={botConnected}
+              onSubmit={(title, buttonText, openMessage, cardChanged) =>
+                editMutation.mutate({
+                  id: editing.id,
+                  title,
+                  buttonText,
+                  openMessage,
+                  cardChanged,
+                  rebuild: botConnected,
+                })
               }
             />
           ) : null}
@@ -461,26 +480,31 @@ function CreatePanelForm({
   )
 }
 
-/** 编辑面板文案：保存后按需重建卡片。 */
+/** 编辑面板文案：卡片字段变化时才重建卡片，只改开单提示则保存即生效。 */
 function EditPanelForm({
   pending,
   initialTitle,
   initialButtonText,
   initialOpenMessage,
-  rebuild,
+  botConnected,
   onSubmit,
 }: {
   pending: boolean
   initialTitle: string
   initialButtonText: string
   initialOpenMessage: string
-  rebuild: boolean
-  onSubmit: (title: string, buttonText: string, openMessage: string) => void
+  botConnected: boolean
+  onSubmit: (title: string, buttonText: string, openMessage: string, cardChanged: boolean) => void
 }) {
   const { t } = useTranslation()
   const [title, setTitle] = useState(initialTitle)
   const [buttonText, setButtonText] = useState(initialButtonText)
   const [openMessage, setOpenMessage] = useState(initialOpenMessage)
+
+  // 卡片正文与按钮文字决定频道内卡片的外观；“开单后发送内容”只在开单时单独发送。
+  const cardChanged = title.trim() !== initialTitle.trim() || buttonText.trim() !== initialButtonText.trim()
+  const openMessageChanged = openMessage.trim() !== initialOpenMessage.trim()
+  const dirty = cardChanged || openMessageChanged
 
   return (
     <>
@@ -515,10 +539,10 @@ function EditPanelForm({
       </div>
       <DialogFooter>
         <Button
-          disabled={pending}
-          onClick={() => onSubmit(title.trim(), buttonText.trim(), openMessage.trim())}
+          disabled={pending || !dirty}
+          onClick={() => onSubmit(title.trim(), buttonText.trim(), openMessage.trim(), cardChanged)}
         >
-          {pending ? t("common.saving") : rebuild ? t("panels.saveAndRefresh") : t("common.save")}
+          {pending ? t("common.saving") : cardChanged && botConnected ? t("panels.saveAndRefresh") : t("common.save")}
         </Button>
       </DialogFooter>
     </>

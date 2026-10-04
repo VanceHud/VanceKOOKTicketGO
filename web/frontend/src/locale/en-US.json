@@ -247,10 +247,11 @@
     "previewEmpty": "Type text on the left to see the preview here",
     "edit": "Edit text",
     "editTitle": "Edit panel text",
-    "editDesc": "Card text and the open message both support KMarkdown and multiple lines. When the bot is online, saving also rebuilds the channel card so card changes take effect immediately; the open message affects only tickets opened afterwards and applies on save.",
+    "editDesc": "Card text and the open message both support KMarkdown and multiple lines. When card text or the button label changes and the bot is online, the channel card is rebuilt; changing only the open message applies on save without rebuilding the card (it affects tickets opened afterwards only).",
     "saveAndRefresh": "Save & rebuild card",
     "editSuccess": "Text saved and card rebuilt",
-    "editSaved": "Text saved. Rebuild the card once the bot is online to apply it."
+    "editSaved": "Text saved. Rebuild the card once the bot is online to apply it.",
+    "openMessageSaved": "Open message saved; it applies only to tickets opened afterwards."
   },
   "emoji": {
     "title": "Reaction roles",
