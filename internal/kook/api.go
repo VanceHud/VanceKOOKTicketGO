@@ -454,7 +454,7 @@ func (c *Client) DeleteDirectMessage(ctx context.Context, msgID string) error {
 }
 
 // ---------------------------------------------------------------------------
-// 机器人在玩状态
+// 游戏库与机器人在玩状态
 // ---------------------------------------------------------------------------
 
 // 动态类型。
@@ -463,7 +463,76 @@ const (
 	ActivityTypeMusic = 2
 )
 
-// StartGameActivity 设置机器人正在玩某个游戏（需先在开发者后台创建游戏并获得 ID）。
+// gameListResponse 对应 game 列表接口的分页结构。
+type gameListResponse struct {
+	Items []Game `json:"items"`
+	Meta  struct {
+		Page      int `json:"page"`
+		PageTotal int `json:"page_total"`
+		PageSize  int `json:"page_size"`
+		Total     int `json:"total"`
+	} `json:"meta"`
+}
+
+// gamePageSize 是拉取游戏列表时使用的分页大小（平台上限通常为 50）。
+const gamePageSize = 50
+
+// GameList 拉取游戏列表。
+//
+// gameType 取 GameType* 常量（0 全部 / 1 用户创建 / 2 系统创建），
+// 返回当前第一页（最多 50 条）的结果。
+func (c *Client) GameList(ctx context.Context, gameType int) ([]Game, error) {
+	var out gameListResponse
+	err := c.call(ctx, http.MethodGet, "game", map[string]any{
+		"type":      gameType,
+		"page":      1,
+		"page_size": gamePageSize,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return out.Items, nil
+}
+
+// GameCreate 新建游戏。
+//
+// 注意：平台限制单日最多创建 5 个游戏，超限时返回明确的业务错误。
+func (c *Client) GameCreate(ctx context.Context, name, icon string) (*Game, error) {
+	params := map[string]any{"name": strings.TrimSpace(name)}
+	if icon = strings.TrimSpace(icon); icon != "" {
+		params["icon"] = icon
+	}
+	var out Game
+	if err := c.call(ctx, http.MethodPost, "game/create", params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GameUpdate 更新游戏名称或图标。
+//
+// name / icon 为空表示不修改；调用方应保证至少提供一项。
+func (c *Client) GameUpdate(ctx context.Context, id int64, name, icon string) (*Game, error) {
+	params := map[string]any{"id": id}
+	if name = strings.TrimSpace(name); name != "" {
+		params["name"] = name
+	}
+	if icon = strings.TrimSpace(icon); icon != "" {
+		params["icon"] = icon
+	}
+	var out Game
+	if err := c.call(ctx, http.MethodPost, "game/update", params, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GameDelete 删除游戏。
+func (c *Client) GameDelete(ctx context.Context, id int64) error {
+	return c.call(ctx, http.MethodPost, "game/delete", map[string]any{"id": id}, nil)
+}
+
+// StartGameActivity 设置机器人正在玩某个游戏（需先在开发者后台或 WebUI 创建游戏并获得 ID）。
 func (c *Client) StartGameActivity(ctx context.Context, gameID int64) error {
 	return c.call(ctx, http.MethodPost, "game/activity", map[string]any{
 		"id":        gameID,
@@ -472,12 +541,25 @@ func (c *Client) StartGameActivity(ctx context.Context, gameID int64) error {
 }
 
 // StartMusicActivity 设置机器人正在听歌。
-func (c *Client) StartMusicActivity(ctx context.Context, name, singer string) error {
+//
+// software 取 MusicSoftware* 常量，为空时使用 cloudmusic；singer / musicName 必填。
+func (c *Client) StartMusicActivity(ctx context.Context, musicName, singer, software string) error {
+	musicName = strings.TrimSpace(musicName)
+	singer = strings.TrimSpace(singer)
+	if musicName == "" || singer == "" {
+		return fmt.Errorf("歌曲名与歌手不能为空")
+	}
+	if software = strings.TrimSpace(software); software == "" {
+		software = MusicSoftwareCloudMusic
+	}
+	if !ValidMusicSoftware(software) {
+		return fmt.Errorf("不支持的音乐软件 %q", software)
+	}
 	return c.call(ctx, http.MethodPost, "game/activity", map[string]any{
 		"data_type":  ActivityTypeMusic,
-		"software":   "qqmusic",
+		"software":   software,
 		"singer":     singer,
-		"music_name": name,
+		"music_name": musicName,
 	}, nil)
 }
 

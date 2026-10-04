@@ -11,9 +11,10 @@ import (
 )
 
 // 面板默认文案（WebUI 未填写时使用）。
+// 默认文案以 "# 标题" 开头：发送时会成为卡片 header 模块（KOOK 没有 # 标题语法）。
 const (
-	panelDefaultTitle  = "请点击右侧按钮发起工单"
-	panelDefaultButton = "ticket"
+	DefaultPanelTitle  = "# 请点击右侧按钮发起工单"
+	DefaultPanelButton = "ticket"
 )
 
 // SendPanelCard 按面板记录发送一张工单按钮卡片，返回消息 ID。
@@ -41,7 +42,7 @@ func (b *Bot) SendPanelCard(ctx context.Context, panel *store.Panel, buttonText 
 	// 仅在为空时替换为默认文案，不 trim 正文本身，避免破坏 Markdown 的首行缩进。
 	title := panel.Title
 	if strings.TrimSpace(title) == "" {
-		title = panelDefaultTitle
+		title = DefaultPanelTitle
 	}
 	// 按钮文字优先级：调用方传入 > 面板记录中的值 > 默认值。
 	buttonText = strings.TrimSpace(buttonText)
@@ -49,7 +50,7 @@ func (b *Bot) SendPanelCard(ctx context.Context, panel *store.Panel, buttonText 
 		buttonText = strings.TrimSpace(panel.ButtonText)
 	}
 	if buttonText == "" {
-		buttonText = panelDefaultButton
+		buttonText = DefaultPanelButton
 	}
 
 	openValue := b.encodeButton(actionOpen, "", channelID, panel.ID)

@@ -59,12 +59,6 @@ func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
 		b.cmdAddAdminRole(ctx, event, args)
 	case "kill":
 		b.cmdKill(ctx, event)
-	case "gaming":
-		b.cmdGaming(ctx, event, args)
-	case "singing":
-		b.cmdSinging(ctx, event, args)
-	case "sleeping":
-		b.cmdSleeping(ctx, event, args)
 	default:
 		// 未识别的命令静默忽略，避免刷屏。
 	}
@@ -95,8 +89,8 @@ func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event) {
 	panel := &store.Panel{
 		ChannelID:   channelID,
 		ChannelName: event.Extra.ChannelName,
-		Title:       panelDefaultTitle,
-		ButtonText:  panelDefaultButton,
+		Title:       DefaultPanelTitle,
+		ButtonText:  DefaultPanelButton,
 		Enabled:     true,
 	}
 	if err := b.deps.Store.Panels.Create(panel); err != nil {
@@ -105,7 +99,7 @@ func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event) {
 		return
 	}
 
-	msgID, err := b.SendPanelCard(ctx, panel, panelDefaultButton)
+	msgID, err := b.SendPanelCard(ctx, panel, DefaultPanelButton)
 	if err != nil {
 		b.deps.Logger.Error("发送工单面板失败", "channel_id", channelID, "err", err)
 		// 卡片未能发出时回滚记录，避免留下无法点击的空面板。
@@ -273,87 +267,6 @@ func (b *Bot) cmdKill(ctx context.Context, event kook.Event) {
 			b.deps.RequestStop()
 		}()
 	}
-}
-
-// cmdGaming 让机器人开始玩游戏。
-func (b *Bot) cmdGaming(ctx context.Context, event kook.Event, args []string) {
-	if !b.isAdmin(ctx, event.AuthorID, "") {
-		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
-		return
-	}
-	if len(args) == 0 {
-		b.replyEphemeral(ctx, event, "用法：`/gaming 游戏ID`（游戏需先在 KOOK 开发者后台创建）")
-		return
-	}
-	gameID, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil || gameID <= 0 {
-		b.replyEphemeral(ctx, event, "游戏 ID 必须是正整数")
-		return
-	}
-	client, _, err := b.ready()
-	if err != nil {
-		b.replyEphemeral(ctx, event, "机器人尚未连接 KOOK")
-		return
-	}
-	if err := client.StartGameActivity(ctx, gameID); err != nil {
-		b.replyEphemeral(ctx, event, "设置游戏状态失败："+friendlyError(err))
-		return
-	}
-	b.replyEphemeral(ctx, event, fmt.Sprintf("机器人开始玩游戏（ID %d），KOOK 的状态同步可能稍有延迟", gameID))
-}
-
-// cmdSinging 让机器人开始听歌。
-func (b *Bot) cmdSinging(ctx context.Context, event kook.Event, args []string) {
-	if !b.isAdmin(ctx, event.AuthorID, "") {
-		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
-		return
-	}
-	if len(args) == 0 {
-		b.replyEphemeral(ctx, event, "用法：`/singing 歌名 歌手`")
-		return
-	}
-	name := args[0]
-	singer := "未知"
-	if len(args) > 1 {
-		singer = strings.Join(args[1:], " ")
-	}
-	client, _, err := b.ready()
-	if err != nil {
-		b.replyEphemeral(ctx, event, "机器人尚未连接 KOOK")
-		return
-	}
-	if err := client.StartMusicActivity(ctx, name, singer); err != nil {
-		b.replyEphemeral(ctx, event, "设置听歌状态失败："+friendlyError(err))
-		return
-	}
-	b.replyEphemeral(ctx, event, fmt.Sprintf("机器人开始听《%s》（%s）", name, singer))
-}
-
-// cmdSleeping 停止游戏或音乐状态。
-func (b *Bot) cmdSleeping(ctx context.Context, event kook.Event, args []string) {
-	if !b.isAdmin(ctx, event.AuthorID, "") {
-		b.replyEphemeral(ctx, event, "你没有权限执行该命令")
-		return
-	}
-	if len(args) == 0 {
-		b.replyEphemeral(ctx, event, "用法：`/sleeping 1` 停止游戏，`/sleeping 2` 停止听歌")
-		return
-	}
-	dataType, err := strconv.Atoi(args[0])
-	if err != nil || (dataType != kook.ActivityTypeGame && dataType != kook.ActivityTypeMusic) {
-		b.replyEphemeral(ctx, event, "参数只能是 1（游戏）或 2（音乐）")
-		return
-	}
-	client, _, err := b.ready()
-	if err != nil {
-		b.replyEphemeral(ctx, event, "机器人尚未连接 KOOK")
-		return
-	}
-	if err := client.DeleteActivity(ctx, dataType); err != nil {
-		b.replyEphemeral(ctx, event, "清除状态失败："+friendlyError(err))
-		return
-	}
-	b.replyEphemeral(ctx, event, "已清除机器人动态")
 }
 
 // ---------------------------------------------------------------------------

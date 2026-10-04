@@ -27,6 +27,12 @@ import (
 	"vancekookticket/internal/ticket"
 )
 
+// ErrNotConnected 表示机器人当前没有可用的 KOOK 连接。
+//
+// 上层（API 层）依赖这个哨兵错误把“未连接”映射为 503，而不是 500，
+// 以便 WebUI 提示用户先完成配置并重连。
+var ErrNotConnected = errors.New("机器人尚未连接 KOOK")
+
 // Config 是机器人运行配置快照（来自数据库 settings 表）。
 type Config struct {
 	Token string
@@ -201,6 +207,11 @@ func (b *Bot) Start(ctx context.Context) error {
 					s.LastError = status.LastError
 				}
 			})
+			// 每次连接建立（含网关自动重连）都尝试恢复在玩动态：
+			// KOOK 的动态绑定在网关上，重新握手后会丢失。
+			if status.Connected {
+				go b.restoreActivity()
+			}
 		},
 	})
 	if err != nil {
@@ -312,13 +323,117 @@ func (b *Bot) GuildChannels(ctx context.Context) ([]kook.Channel, error) {
 	return channels, nil
 }
 
+// ---------------------------------------------------------------------------
+// 游戏库与在玩动态（供 WebUI 调用）
+// ---------------------------------------------------------------------------
+
+// GameList 拉取游戏库；未连接时报错。
+func (b *Bot) GameList(ctx context.Context, gameType int) ([]kook.Game, error) {
+	client, _, err := b.ready()
+	if err != nil {
+		return nil, err
+	}
+	return client.GameList(ctx, gameType)
+}
+
+// GameCreate 新建游戏；未连接时报错。
+func (b *Bot) GameCreate(ctx context.Context, name, icon string) (*kook.Game, error) {
+	client, _, err := b.ready()
+	if err != nil {
+		return nil, err
+	}
+	return client.GameCreate(ctx, name, icon)
+}
+
+// GameUpdate 更新游戏名称或图标；未连接时报错。
+func (b *Bot) GameUpdate(ctx context.Context, id int64, name, icon string) (*kook.Game, error) {
+	client, _, err := b.ready()
+	if err != nil {
+		return nil, err
+	}
+	return client.GameUpdate(ctx, id, name, icon)
+}
+
+// GameDelete 删除游戏；未连接时报错。
+func (b *Bot) GameDelete(ctx context.Context, id int64) error {
+	client, _, err := b.ready()
+	if err != nil {
+		return err
+	}
+	return client.GameDelete(ctx, id)
+}
+
+// StartGameActivity 让机器人开始玩游戏；未连接时报错。
+func (b *Bot) StartGameActivity(ctx context.Context, gameID int64) error {
+	client, _, err := b.ready()
+	if err != nil {
+		return err
+	}
+	return client.StartGameActivity(ctx, gameID)
+}
+
+// StartMusicActivity 让机器人开始听歌；未连接时报错。
+func (b *Bot) StartMusicActivity(ctx context.Context, musicName, singer, software string) error {
+	client, _, err := b.ready()
+	if err != nil {
+		return err
+	}
+	return client.StartMusicActivity(ctx, musicName, singer, software)
+}
+
+// DeleteActivity 停止指定类型的动态；未连接时报错。
+func (b *Bot) DeleteActivity(ctx context.Context, dataType int) error {
+	client, _, err := b.ready()
+	if err != nil {
+		return err
+	}
+	return client.DeleteActivity(ctx, dataType)
+}
+
+// restoreActivity 在连接建立后按持久化的“期望动态”重新设置在玩状态。
+//
+// 失败只记日志：恢复是尽力而为，不应影响机器人其它功能。
+func (b *Bot) restoreActivity() {
+	if !b.deps.Store.Settings.ActivityAutoRestore() {
+		return
+	}
+	activity, err := b.deps.Store.Activity.Current()
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			b.deps.Logger.Warn("读取待恢复的动态失败", "err", err)
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var restoreErr error
+	switch activity.DataType {
+	case kook.ActivityTypeGame:
+		restoreErr = b.StartGameActivity(ctx, activity.GameID)
+	case kook.ActivityTypeMusic:
+		restoreErr = b.StartMusicActivity(ctx, activity.MusicName, activity.Singer, activity.Software)
+	default:
+		return
+	}
+	if restoreErr != nil {
+		b.deps.Logger.Warn("自动恢复在玩状态失败",
+			"data_type", kook.ActivityTypeName(activity.DataType), "err", restoreErr)
+		return
+	}
+	b.deps.Logger.Info("已自动恢复在玩状态",
+		"data_type", kook.ActivityTypeName(activity.DataType),
+		"game_id", activity.GameID, "music", activity.MusicName)
+}
+
 // ready 返回可用的客户端与配置，未连接时返回错误。
 func (b *Bot) ready() (*kook.Client, *Config, error) {
 	b.mu.RLock()
 	client, cfg := b.client, b.config
 	b.mu.RUnlock()
 	if client == nil || cfg == nil {
-		return nil, nil, errors.New("机器人尚未连接 KOOK")
+		return nil, nil, ErrNotConnected
 	}
 	return client, cfg, nil
 }

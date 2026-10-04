@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 
@@ -105,18 +104,18 @@ func (m *Manager) Status() Status {
 
 // GuildRoles 返回服务器角色；未连接时报错。
 func (m *Manager) GuildRoles(ctx context.Context) ([]kook.Role, error) {
-	instance := m.current()
-	if instance == nil {
-		return nil, errors.New("机器人尚未连接 KOOK")
+	instance, err := m.requireInstance()
+	if err != nil {
+		return nil, err
 	}
 	return instance.GuildRoles(ctx)
 }
 
 // GuildChannels 返回服务器频道；未连接时报错。
 func (m *Manager) GuildChannels(ctx context.Context) ([]kook.Channel, error) {
-	instance := m.current()
-	if instance == nil {
-		return nil, errors.New("机器人尚未连接 KOOK")
+	instance, err := m.requireInstance()
+	if err != nil {
+		return nil, err
 	}
 	return instance.GuildChannels(ctx)
 }
@@ -124,9 +123,9 @@ func (m *Manager) GuildChannels(ctx context.Context) ([]kook.Channel, error) {
 // ResolveWebRole 用当前 KOOK 角色解析用户应得的 WebUI 权限。
 // 未连接时返回 ok=false，调用方应回退到签发验证码时的角色快照。
 func (m *Manager) ResolveWebRole(ctx context.Context, kookUserID string) (string, bool, error) {
-	instance := m.current()
-	if instance == nil {
-		return "", false, errors.New("机器人尚未连接 KOOK")
+	instance, err := m.requireInstance()
+	if err != nil {
+		return "", false, err
 	}
 	role, ok := instance.ResolveWebRole(ctx, kookUserID)
 	return role, ok, nil
@@ -134,38 +133,105 @@ func (m *Manager) ResolveWebRole(ctx context.Context, kookUserID string) (string
 
 // SendPanelCard 让机器人发送/重发某个面板的卡片。
 func (m *Manager) SendPanelCard(ctx context.Context, panel *store.Panel, buttonText string) (string, error) {
-	instance := m.current()
-	if instance == nil {
-		return "", errors.New("机器人尚未连接 KOOK，无法发送面板卡片")
+	instance, err := m.requireInstance()
+	if err != nil {
+		return "", err
 	}
 	return instance.SendPanelCard(ctx, panel, buttonText)
 }
 
 // DeleteMessage 尽力删除一条消息。
 func (m *Manager) DeleteMessage(ctx context.Context, msgID string) error {
-	instance := m.current()
-	if instance == nil {
-		return errors.New("机器人尚未连接 KOOK")
+	instance, err := m.requireInstance()
+	if err != nil {
+		return err
 	}
 	return instance.DeleteMessage(ctx, msgID)
 }
 
 // ChannelInfo 返回频道信息。
 func (m *Manager) ChannelInfo(ctx context.Context, channelID string) (*kook.Channel, error) {
-	instance := m.current()
-	if instance == nil {
-		return nil, errors.New("机器人尚未连接 KOOK")
+	instance, err := m.requireInstance()
+	if err != nil {
+		return nil, err
 	}
 	return instance.ChannelInfo(ctx, channelID)
 }
 
-// RoleName 返回角色名（未知返回空串）。
+// RoleName 返回角色名（未知返回空串）；未连接时返回空串。
 func (m *Manager) RoleName(ctx context.Context, roleID string) string {
 	instance := m.current()
 	if instance == nil {
 		return ""
 	}
 	return instance.RoleInfo(ctx, roleID)
+}
+
+// ---------------------------------------------------------------------------
+// 游戏库与在玩动态（供 WebUI 调用）
+// ---------------------------------------------------------------------------
+
+// GameList 拉取游戏库；未连接时报错。
+func (m *Manager) GameList(ctx context.Context, gameType int) ([]kook.Game, error) {
+	instance, err := m.requireInstance()
+	if err != nil {
+		return nil, err
+	}
+	return instance.GameList(ctx, gameType)
+}
+
+// GameCreate 新建游戏；未连接时报错。
+func (m *Manager) GameCreate(ctx context.Context, name, icon string) (*kook.Game, error) {
+	instance, err := m.requireInstance()
+	if err != nil {
+		return nil, err
+	}
+	return instance.GameCreate(ctx, name, icon)
+}
+
+// GameUpdate 更新游戏；未连接时报错。
+func (m *Manager) GameUpdate(ctx context.Context, id int64, name, icon string) (*kook.Game, error) {
+	instance, err := m.requireInstance()
+	if err != nil {
+		return nil, err
+	}
+	return instance.GameUpdate(ctx, id, name, icon)
+}
+
+// GameDelete 删除游戏；未连接时报错。
+func (m *Manager) GameDelete(ctx context.Context, id int64) error {
+	instance, err := m.requireInstance()
+	if err != nil {
+		return err
+	}
+	return instance.GameDelete(ctx, id)
+}
+
+// StartGameActivity 设置游戏动态；未连接时报错。
+func (m *Manager) StartGameActivity(ctx context.Context, gameID int64) error {
+	instance, err := m.requireInstance()
+	if err != nil {
+		return err
+	}
+	return instance.StartGameActivity(ctx, gameID)
+}
+
+// StartMusicActivity 设置音乐动态；未连接时报错。
+func (m *Manager) StartMusicActivity(ctx context.Context, musicName, singer, software string) error {
+	instance, err := m.requireInstance()
+	if err != nil {
+		return err
+	}
+	return instance.StartMusicActivity(ctx, musicName, singer, software)
+}
+
+// DeleteActivity 停止指定类型的动态；未连接时报错。
+func (m *Manager) DeleteActivity(ctx context.Context, dataType int) error {
+	instance, err := m.requireInstance()
+	if err != nil {
+		return err
+	}
+	return instance.DeleteActivity(ctx, dataType)
 }
 
 // NotifyConfigChanged 在 WebUI 修改面板等配置后清缓存。
@@ -179,6 +245,15 @@ func (m *Manager) current() *Bot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.bot
+}
+
+// requireInstance 返回当前连接实例；未连接时返回统一的 ErrNotConnected。
+func (m *Manager) requireInstance() (*Bot, error) {
+	instance := m.current()
+	if instance == nil {
+		return nil, ErrNotConnected
+	}
+	return instance, nil
 }
 
 func (m *Manager) setError(err error) {

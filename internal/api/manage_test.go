@@ -27,6 +27,17 @@ type fakeBot struct {
 	channels      map[string]kook.Channel
 	roles         map[string]string
 	restartCalled bool
+
+	// 游戏库与在玩动态的可编程状态
+	games        []kook.Game
+	gameErr      error
+	lastGameType int
+	createdGames []string
+	updatedGames []int64
+	deletedGames []int64
+	startedGames []int64
+	startedMusic []string
+	deletedTypes []int
 }
 
 func newFakeBot() *fakeBot {
@@ -67,6 +78,66 @@ func (f *fakeBot) ChannelInfo(_ any, channelID string) (*kook.Channel, error) {
 }
 
 func (f *fakeBot) RoleName(_ any, roleID string) string { return f.roles[roleID] }
+
+func (f *fakeBot) GameList(_ any, gameType int) ([]kook.Game, error) {
+	f.lastGameType = gameType
+	if f.gameErr != nil {
+		return nil, f.gameErr
+	}
+	out := make([]kook.Game, len(f.games))
+	copy(out, f.games)
+	return out, nil
+}
+
+func (f *fakeBot) GameCreate(_ any, name, icon string) (*kook.Game, error) {
+	if f.gameErr != nil {
+		return nil, f.gameErr
+	}
+	f.createdGames = append(f.createdGames, name)
+	game := kook.Game{ID: int64(1000000 + len(f.games)), Name: name, Icon: icon}
+	f.games = append(f.games, game)
+	return &game, nil
+}
+
+func (f *fakeBot) GameUpdate(_ any, id int64, name, icon string) (*kook.Game, error) {
+	if f.gameErr != nil {
+		return nil, f.gameErr
+	}
+	f.updatedGames = append(f.updatedGames, id)
+	return &kook.Game{ID: id, Name: name, Icon: icon}, nil
+}
+
+func (f *fakeBot) GameDelete(_ any, id int64) error {
+	if f.gameErr != nil {
+		return f.gameErr
+	}
+	f.deletedGames = append(f.deletedGames, id)
+	return nil
+}
+
+func (f *fakeBot) StartGameActivity(_ any, gameID int64) error {
+	if f.gameErr != nil {
+		return f.gameErr
+	}
+	f.startedGames = append(f.startedGames, gameID)
+	return nil
+}
+
+func (f *fakeBot) StartMusicActivity(_ any, musicName, singer, software string) error {
+	if f.gameErr != nil {
+		return f.gameErr
+	}
+	f.startedMusic = append(f.startedMusic, musicName+"|"+singer+"|"+software)
+	return nil
+}
+
+func (f *fakeBot) DeleteActivity(_ any, dataType int) error {
+	if f.gameErr != nil {
+		return f.gameErr
+	}
+	f.deletedTypes = append(f.deletedTypes, dataType)
+	return nil
+}
 
 func (f *fakeBot) NotifyConfigChanged() {}
 
@@ -114,6 +185,34 @@ func (a botAdapter) RoleName(ctx context.Context, roleID string) string {
 	return a.inner.RoleName(ctx, roleID)
 }
 
+func (a botAdapter) GameList(ctx context.Context, gameType int) ([]kook.Game, error) {
+	return a.inner.GameList(ctx, gameType)
+}
+
+func (a botAdapter) GameCreate(ctx context.Context, name, icon string) (*kook.Game, error) {
+	return a.inner.GameCreate(ctx, name, icon)
+}
+
+func (a botAdapter) GameUpdate(ctx context.Context, id int64, name, icon string) (*kook.Game, error) {
+	return a.inner.GameUpdate(ctx, id, name, icon)
+}
+
+func (a botAdapter) GameDelete(ctx context.Context, id int64) error {
+	return a.inner.GameDelete(ctx, id)
+}
+
+func (a botAdapter) StartGameActivity(ctx context.Context, gameID int64) error {
+	return a.inner.StartGameActivity(ctx, gameID)
+}
+
+func (a botAdapter) StartMusicActivity(ctx context.Context, musicName, singer, software string) error {
+	return a.inner.StartMusicActivity(ctx, musicName, singer, software)
+}
+
+func (a botAdapter) DeleteActivity(ctx context.Context, dataType int) error {
+	return a.inner.DeleteActivity(ctx, dataType)
+}
+
 // withFakeBot 注入假机器人（在线状态），用于测试面板管理等依赖机器人的接口。
 func (e *testEnv) withFakeBot(t *testing.T) *fakeBot {
 	t.Helper()
@@ -157,7 +256,7 @@ func TestPanelCRUDWithBotOnline(t *testing.T) {
 
 	// 创建面板
 	res := env.do(t, http.MethodPost, "/api/v1/panels", map[string]any{
-		"channelId": "30001", "title": "点我开单", "buttonText": "开单",
+		"channelId": "30001", "title": "点我开单", "buttonText": "开单", "openMessage": "请提供订单号",
 	}, withCookie(cookie), withCSRF(csrf))
 	if res.status != http.StatusCreated {
 		t.Fatalf("创建面板失败: %d %s", res.status, res.raw)
@@ -168,6 +267,9 @@ func TestPanelCRUDWithBotOnline(t *testing.T) {
 	panelID := uint(res.body["id"].(float64))
 	if res.body["channelName"] != "工单面板" {
 		t.Fatalf("应记录频道名，得到 %v", res.body["channelName"])
+	}
+	if res.body["openMessage"] != "请提供订单号" {
+		t.Fatalf("开单提示应被保存，得到 %v", res.body["openMessage"])
 	}
 
 	// 非法参数：分组不能作为面板
@@ -187,16 +289,19 @@ func TestPanelCRUDWithBotOnline(t *testing.T) {
 		t.Fatalf("不存在的频道应被拒绝，得到 %d", res.status)
 	}
 
-	// 更新（禁用并改文案与按钮文字）
+	// 更新（禁用并改文案、按钮文字与开单提示）
 	disabled := false
 	res = env.do(t, http.MethodPatch, fmt.Sprintf("/api/v1/panels/%d", panelID), map[string]any{
-		"enabled": disabled, "title": "新文案", "buttonText": "联系客服",
+		"enabled": disabled, "title": "新文案", "buttonText": "联系客服", "openMessage": "  新提示  ",
 	}, withCookie(cookie), withCSRF(csrf))
 	if res.status != http.StatusOK || res.body["enabled"] != false {
 		t.Fatalf("更新面板失败: %d %s", res.status, res.raw)
 	}
 	if res.body["buttonText"] != "联系客服" {
 		t.Fatalf("按钮文字应被保存，得到 %v", res.body["buttonText"])
+	}
+	if res.body["openMessage"] != "新提示" {
+		t.Fatalf("开单提示应被保存并去除首尾空白，得到 %v", res.body["openMessage"])
 	}
 
 	// 面板角色：真实角色应被接受并补全名称
@@ -286,6 +391,51 @@ func TestPanelCreateAllowsMultiplePerChannel(t *testing.T) {
 	}
 	if len(panels) != 2 {
 		t.Fatalf("同一频道应保留 2 条面板记录，实际 %d 条", len(panels))
+	}
+}
+
+// TestPanelOpenMessageValidation 验证“开单后发送内容”的长度限制与清空。
+func TestPanelOpenMessageValidation(t *testing.T) {
+	env := newTestEnv(t)
+	env.seedUser(t, "admin", adminPassword, store.RoleAdmin, false)
+	cookie, csrf := env.login(t, "admin", adminPassword)
+	env.withFakeBot(t)
+
+	// 超长内容应被拒绝
+	tooLong := strings.Repeat("啊", maxPanelOpenMessageLength+1)
+	res := env.do(t, http.MethodPost, "/api/v1/panels", map[string]any{
+		"channelId": "30001", "openMessage": tooLong,
+	}, withCookie(cookie), withCSRF(csrf))
+	if res.status != http.StatusBadRequest {
+		t.Fatalf("超长开单提示应被拒绝，得到 %d %s", res.status, res.raw)
+	}
+
+	// 创建时允许留空
+	res = env.do(t, http.MethodPost, "/api/v1/panels", map[string]any{
+		"channelId": "30001",
+	}, withCookie(cookie), withCSRF(csrf))
+	if res.status != http.StatusCreated {
+		t.Fatalf("创建面板失败: %d %s", res.status, res.raw)
+	}
+	panelID := uint(res.body["id"].(float64))
+	if res.body["openMessage"] != "" {
+		t.Fatalf("未配置时开单提示应为空，得到 %v", res.body["openMessage"])
+	}
+
+	// 可单独更新
+	res = env.do(t, http.MethodPatch, fmt.Sprintf("/api/v1/panels/%d", panelID), map[string]any{
+		"openMessage": "注意：请勿泄露密码",
+	}, withCookie(cookie), withCSRF(csrf))
+	if res.status != http.StatusOK || res.body["openMessage"] != "注意：请勿泄露密码" {
+		t.Fatalf("开单提示应可单独更新: %d %s", res.status, res.raw)
+	}
+
+	// 可清空
+	res = env.do(t, http.MethodPatch, fmt.Sprintf("/api/v1/panels/%d", panelID), map[string]any{
+		"openMessage": "   ",
+	}, withCookie(cookie), withCSRF(csrf))
+	if res.status != http.StatusOK || res.body["openMessage"] != "" {
+		t.Fatalf("开单提示应可清空: %d %s", res.status, res.raw)
 	}
 }
 

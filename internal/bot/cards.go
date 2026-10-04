@@ -18,15 +18,47 @@ func (b *Bot) formatTime(t time.Time) string {
 }
 
 // panelCard 生成工单面板卡片（含开单按钮）。
+//
+// 文案会先经 kook.NormalizePanelText 归一化：KOOK 的 KMarkdown 并不支持
+// "# 标题"、"__下划线__"、"- 列表" 这些 Markdown 写法（WebUI 预览支持，
+// 发到 KOOK 却原样显示）。首行标题会改用卡片 header 模块展示，
+// 这是 KOOK 里唯一的大标题形式。
 func (b *Bot) panelCard(title, buttonText, openValue string) string {
-	card := kook.NewCard(kook.CardThemePrimary).
-		KMarkdownSection(title).
-		ActionGroup(kook.Button{Text: buttonText, Value: openValue, Theme: kook.CardThemePrimary})
+	text := kook.NormalizePanelText(title)
+
+	card := kook.NewCard(kook.CardThemePrimary)
+	if text.Heading != "" {
+		card.Header(text.Heading)
+	}
+	if strings.TrimSpace(text.Body) != "" {
+		card.KMarkdownSection(text.Body)
+	}
+	card.ActionGroup(kook.Button{Text: buttonText, Value: openValue, Theme: kook.CardThemePrimary})
+
 	content, err := kook.SingleCard(card)
 	if err != nil {
 		return title
 	}
 	return content
+}
+
+// panelOpenMessage 渲染面板自定义的开单提示。
+//
+// 支持变量：{user} 提及开单人、{user_name} 开单人昵称、{ticket_no} 工单编号、{time} 开单时间；
+// 未识别的花括号内容原样保留，避免误伤正常文案。
+// 昵称经转义处理：KOOK 昵称可能包含 (met)all(met) 之类的提及语法，不能直接回填。
+//
+// 该内容以 KMarkdown 文本消息发送（不是卡片，没有 header 模块可用），
+// 因此 KOOK 不支持的 "# 标题"、"__下划线__"、"- 列表" 会先转换成
+// 加粗、(ins) 与「• 」，避免管理员在 WebUI 里看到效果、发到 KOOK 却是原文。
+func (b *Bot) panelOpenMessage(template string, t *store.Ticket) string {
+	replacer := strings.NewReplacer(
+		"{user}", kook.MentionUser(t.UserID),
+		"{user_name}", kook.EscapeMentionText(firstNonEmpty(t.UserName, t.UserID)),
+		"{ticket_no}", t.No,
+		"{time}", b.formatTime(t.StartedAt),
+	)
+	return kook.NormalizeKMarkdown(replacer.Replace(template))
 }
 
 // ticketCard 生成工单频道内的首条卡片（含关闭与锁定按钮）。
@@ -151,9 +183,6 @@ func (b *Bot) helpCard() string {
 		"`/ticket` 在当前频道新建一张工单按钮卡片（同一频道可多张）",
 		"`/tkcm 工单编号 备注` 为已关闭的工单添加备注",
 		"`/aar @角色` 把角色设为当前面板的管理员角色；加 `-g` 设为全局管理员角色",
-		"`/gaming 游戏ID` 让机器人开始玩游戏（游戏需先在开发者后台创建）",
-		"`/singing 歌名 歌手` 让机器人开始听歌",
-		"`/sleeping 1|2` 停止游戏(1)或听歌(2)",
 		"`/login`（私聊）获取 WebUI 一次性登录码",
 		"`/bind`（私聊）获取账号绑定码，用于把 KOOK 身份绑定到 WebUI 账号",
 		"```\nID 获取方式：KOOK 设置 → 高级设置 → 打开开发者模式，然后右键复制对应 ID\n```",

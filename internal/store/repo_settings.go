@@ -25,6 +25,8 @@ const (
 	SettingDebugChannelID = "debug_channel_id"
 	// SettingOutdateHours 是工单空闲锁定阈值（小时）。
 	SettingOutdateHours = "outdate_hours"
+	// SettingActivityAutoRestore 控制在机器人重连后是否自动恢复上次的在玩/在听动态。
+	SettingActivityAutoRestore = "activity_auto_restore"
 	// SettingInitializedAt 记录首次初始化时间。
 	SettingInitializedAt = "initialized_at"
 	// SettingGuildName / SettingCategoryName 等仅用于界面展示，避免每次都请求 KOOK。
@@ -150,6 +152,23 @@ func (r *SettingsRepo) OutdateHours() int {
 		return DefaultOutdateHours
 	}
 	return hours
+}
+
+// ActivityAutoRestore 返回是否在重连后自动恢复动态；默认开启。
+func (r *SettingsRepo) ActivityAutoRestore() bool {
+	value, ok, err := r.Get(SettingActivityAutoRestore)
+	if err != nil || !ok || value == "" {
+		return true
+	}
+	return value == "true"
+}
+
+// SetActivityAutoRestore 写入自动恢复开关。
+func (r *SettingsRepo) SetActivityAutoRestore(enabled bool) error {
+	if enabled {
+		return r.Set(SettingActivityAutoRestore, "true")
+	}
+	return r.Set(SettingActivityAutoRestore, "false")
 }
 
 // RuntimeConfig 是机器人运行所需的业务配置快照。

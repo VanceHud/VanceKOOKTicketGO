@@ -66,7 +66,7 @@ export function PanelsPage() {
   }
 
   const createMutation = useMutation({
-    mutationFn: (payload: { channelId: string; title: string; buttonText: string }) =>
+    mutationFn: (payload: { channelId: string; title: string; buttonText: string; openMessage: string }) =>
       api.post<Panel>("/panels", payload),
     onSuccess: () => {
       toastSuccess(t("panels.createSuccess"))
@@ -85,12 +85,19 @@ export function PanelsPage() {
     onError: (error) => toastError(error),
   })
 
-  // 编辑文案：先保存文案与按钮文字；若机器人在线则同时重建卡片，让修改立即生效。
+  // 编辑：先保存文案、按钮文字与开单提示；若机器人在线则同时重建卡片，让卡片修改立即生效。
   const editMutation = useMutation({
-    mutationFn: async (payload: { id: number; title: string; buttonText: string; rebuild: boolean }) => {
+    mutationFn: async (payload: {
+      id: number
+      title: string
+      buttonText: string
+      openMessage: string
+      rebuild: boolean
+    }) => {
       await api.patch<Panel>(`/panels/${payload.id}`, {
         title: payload.title,
         buttonText: payload.buttonText,
+        openMessage: payload.openMessage,
       })
       if (payload.rebuild) {
         await api.post<Panel>(`/panels/${payload.id}/refresh`)
@@ -200,8 +207,15 @@ export function PanelsPage() {
                         </p>
                       </div>
                     </TableCell>
-                    <TableCell className="hidden max-w-56 truncate text-sm md:table-cell">
-                      {panel.title || "—"}
+                    <TableCell className="hidden max-w-56 md:table-cell">
+                      <div className="space-y-0.5">
+                        <p className="truncate text-sm">{panel.title || "—"}</p>
+                        {panel.openMessage ? (
+                          <p className="text-muted-foreground truncate text-xs">
+                            {t("panels.openMessageShort")}: {panel.openMessage}
+                          </p>
+                        ) : null}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap items-center gap-1">
@@ -300,9 +314,10 @@ export function PanelsPage() {
               pending={editMutation.isPending}
               initialTitle={editing.title}
               initialButtonText={editing.buttonText}
+              initialOpenMessage={editing.openMessage}
               rebuild={botConnected}
-              onSubmit={(title, buttonText) =>
-                editMutation.mutate({ id: editing.id, title, buttonText, rebuild: botConnected })
+              onSubmit={(title, buttonText, openMessage) =>
+                editMutation.mutate({ id: editing.id, title, buttonText, openMessage, rebuild: botConnected })
               }
             />
           ) : null}
@@ -355,13 +370,19 @@ function CreatePanelForm({
 }: {
   pending: boolean
   channels: { id: string; name: string; kind?: string }[]
-  onSubmit: (payload: { channelId: string; title: string; buttonText: string }) => void
+  onSubmit: (payload: {
+    channelId: string
+    title: string
+    buttonText: string
+    openMessage: string
+  }) => void
 }) {
   const { t } = useTranslation()
   const playable = channels.filter((channel) => channel.kind !== "category")
   const [channelId, setChannelId] = useState(playable[0]?.id ?? "")
   const [title, setTitle] = useState("")
   const [buttonText, setButtonText] = useState("")
+  const [openMessage, setOpenMessage] = useState("")
 
   return (
     <>
@@ -393,7 +414,14 @@ function CreatePanelForm({
             onChange={(event) => setChannelId(event.target.value)}
           />
         </div>
-        <PanelTextEditor value={title} onChange={setTitle} idPrefix="panel-create" />
+        <PanelTextEditor
+          value={title}
+          onChange={setTitle}
+          idPrefix="panel-create"
+          label={t("panels.titleLabel")}
+          hint={t("panels.titleHint")}
+          placeholder={"# 请点击右侧按钮发起工单\n\n**处理范围**\n- 账号问题\n- 充值问题"}
+        />
         <div className="space-y-2">
           <Label htmlFor="panel-button">{t("panels.buttonLabel")}</Label>
           <Input
@@ -404,12 +432,26 @@ function CreatePanelForm({
             onChange={(event) => setButtonText(event.target.value)}
           />
         </div>
+        <PanelTextEditor
+          value={openMessage}
+          onChange={setOpenMessage}
+          idPrefix="panel-create-open"
+          rows={6}
+          label={t("panels.openMessageLabel")}
+          hint={t("panels.openMessageHint")}
+          placeholder={t("panels.openMessagePlaceholder")}
+        />
       </div>
       <DialogFooter>
         <Button
           disabled={pending || channelId.trim().length === 0}
           onClick={() =>
-            onSubmit({ channelId: channelId.trim(), title: title.trim(), buttonText: buttonText.trim() })
+            onSubmit({
+              channelId: channelId.trim(),
+              title: title.trim(),
+              buttonText: buttonText.trim(),
+              openMessage: openMessage.trim(),
+            })
           }
         >
           {pending ? t("common.saving") : t("common.create")}
@@ -424,23 +466,33 @@ function EditPanelForm({
   pending,
   initialTitle,
   initialButtonText,
+  initialOpenMessage,
   rebuild,
   onSubmit,
 }: {
   pending: boolean
   initialTitle: string
   initialButtonText: string
+  initialOpenMessage: string
   rebuild: boolean
-  onSubmit: (title: string, buttonText: string) => void
+  onSubmit: (title: string, buttonText: string, openMessage: string) => void
 }) {
   const { t } = useTranslation()
   const [title, setTitle] = useState(initialTitle)
   const [buttonText, setButtonText] = useState(initialButtonText)
+  const [openMessage, setOpenMessage] = useState(initialOpenMessage)
 
   return (
     <>
       <div className="space-y-4">
-        <PanelTextEditor value={title} onChange={setTitle} idPrefix="panel-edit" />
+        <PanelTextEditor
+          value={title}
+          onChange={setTitle}
+          idPrefix="panel-edit"
+          label={t("panels.titleLabel")}
+          hint={t("panels.titleHint")}
+          placeholder={"# 请点击右侧按钮发起工单\n\n**处理范围**\n- 账号问题\n- 充值问题"}
+        />
         <div className="space-y-2">
           <Label htmlFor="panel-edit-button">{t("panels.buttonLabel")}</Label>
           <Input
@@ -451,9 +503,21 @@ function EditPanelForm({
             onChange={(event) => setButtonText(event.target.value)}
           />
         </div>
+        <PanelTextEditor
+          value={openMessage}
+          onChange={setOpenMessage}
+          idPrefix="panel-edit-open"
+          rows={6}
+          label={t("panels.openMessageLabel")}
+          hint={t("panels.openMessageHint")}
+          placeholder={t("panels.openMessagePlaceholder")}
+        />
       </div>
       <DialogFooter>
-        <Button disabled={pending} onClick={() => onSubmit(title.trim(), buttonText.trim())}>
+        <Button
+          disabled={pending}
+          onClick={() => onSubmit(title.trim(), buttonText.trim(), openMessage.trim())}
+        >
           {pending ? t("common.saving") : rebuild ? t("panels.saveAndRefresh") : t("common.save")}
         </Button>
       </DialogFooter>
@@ -466,29 +530,39 @@ function PanelTextEditor({
   value,
   onChange,
   idPrefix,
+  label,
+  hint,
+  placeholder,
+  maxLength = maxPanelTitleLength,
+  rows = 8,
 }: {
   value: string
   onChange: (value: string) => void
   idPrefix: string
+  label: string
+  hint: string
+  placeholder: string
+  maxLength?: number
+  rows?: number
 }) {
   const { t } = useTranslation()
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <Label htmlFor={`${idPrefix}-title`}>{t("panels.titleLabel")}</Label>
+        <Label htmlFor={`${idPrefix}-title`}>{label}</Label>
         <span className="text-muted-foreground text-xs">
-          {value.length}/{maxPanelTitleLength}
+          {value.length}/{maxLength}
         </span>
       </div>
       <div className="grid gap-3 md:grid-cols-2">
         <Textarea
           id={`${idPrefix}-title`}
-          rows={8}
-          maxLength={maxPanelTitleLength}
+          rows={rows}
+          maxLength={maxLength}
           value={value}
           className="max-h-64 min-h-40 font-mono text-sm"
-          placeholder={"请点击右侧按钮发起工单\n\n**处理范围**\n- 账号问题\n- 充值问题"}
+          placeholder={placeholder}
           onChange={(event) => onChange(event.target.value)}
         />
         <div className="rounded-lg border bg-muted/30 p-3">
@@ -498,7 +572,7 @@ function PanelTextEditor({
           </div>
         </div>
       </div>
-      <p className="text-muted-foreground text-xs">{t("panels.titleHint")}</p>
+      <p className="text-muted-foreground text-xs">{hint}</p>
     </div>
   )
 }

@@ -83,6 +83,9 @@ func (p *platform) NotifyReopened(ctx context.Context, t *store.Ticket, actor ti
 // 容错策略：两处通知都是尽力而为——
 // 通知失败不应阻止“工单关闭”这一事实，否则会出现权限/频道状态与数据库不一致。
 // 因此这里只记录警告，并把能拿到的消息 ID 返回给业务层（用于后续 /tkcm 更新卡片）。
+//
+// 开单人私信被屏蔽时，会在日志频道额外发一张提醒卡片并写入时间线——
+// 这是开单环节不再发「私信探测」消息后的兜底，否则开单人会拿不到任何关闭记录。
 func (p *platform) NotifyClosed(ctx context.Context, t *store.Ticket, actor ticket.Actor, note string) (string, string, error) {
 	client, cfg, err := p.b.ready()
 	if err != nil {
@@ -109,6 +112,7 @@ func (p *platform) NotifyClosed(ctx context.Context, t *store.Ticket, actor tick
 			userMsgID = msg.ID
 		case isDirectMessageBlocked(err):
 			p.b.deps.Logger.Info("开单人未开启私聊，跳过关闭通知", "ticket_no", t.No, "user_id", t.UserID)
+			p.warnDirectMessageUndeliverable(ctx, t)
 		default:
 			p.b.deps.Logger.Warn("向开单人发送关闭通知失败",
 				"ticket_no", t.No, "user_id", t.UserID, "err", err)
@@ -116,6 +120,32 @@ func (p *platform) NotifyClosed(ctx context.Context, t *store.Ticket, actor tick
 	}
 
 	return logMsgID, userMsgID, nil
+}
+
+// warnDirectMessageUndeliverable 告知管理员「关闭通知没能私信送到开单人」。
+//
+// 关闭卡片已经发往日志频道，但开单人不会看到它；这里再补一张卡片，
+// 把需要人工转达这件事显式摆到管理员面前，并写进时间线供 WebUI 追溯。
+func (p *platform) warnDirectMessageUndeliverable(ctx context.Context, t *store.Ticket) {
+	client, cfg, err := p.b.ready()
+	if err != nil {
+		return
+	}
+	const timeline = "开单人未开启私聊，关闭通知未能私信送达"
+
+	if cfg.LogChannelID != "" {
+		notice := kook.NoticeCard(kook.CardThemeWarning,
+			fmt.Sprintf("工单「%s」的关闭通知未能私信送达", t.No),
+			fmt.Sprintf("开单人 %s 未开启私聊，收不到关闭记录。\n请人工转达，或让其先私聊机器人任意一条消息后再开单。",
+				kook.MentionUser(t.UserID)))
+		if _, err := client.SendChannelMessage(ctx, cfg.LogChannelID, kook.MsgTypeCard, notice, kook.MessageOptions{}); err != nil {
+			p.b.deps.Logger.Warn("发送私信未送达提醒失败", "ticket_no", t.No, "err", err)
+		}
+	}
+
+	if _, err := p.b.deps.Tickets.AddBotMessage(ctx, t.No, t.ChannelID, timeline); err != nil {
+		p.b.deps.Logger.Debug("写入私信未送达时间线失败", "ticket_no", t.No, "err", err)
+	}
 }
 
 // CloseTicketChannel 删除工单频道。

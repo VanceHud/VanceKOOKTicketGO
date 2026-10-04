@@ -8,6 +8,7 @@
 import {
   BarChart3,
   Bot,
+  Gamepad2,
   LayoutDashboard,
   LayoutPanelLeft,
   ScrollText,
@@ -68,6 +69,7 @@ const NAV_GROUPS: NavGroup[] = [
     labelKey: "nav.sectionSystem",
     items: [
       { to: "/bot", labelKey: "nav.bot", icon: Bot },
+      { to: "/activity", labelKey: "nav.activity", icon: Gamepad2 },
       { to: "/users", labelKey: "nav.users", icon: Users, minRole: "admin" },
       { to: "/settings", labelKey: "nav.settings", icon: Settings, minRole: "admin" },
       { to: "/audit", labelKey: "nav.audit", icon: ScrollText, minRole: "admin" },

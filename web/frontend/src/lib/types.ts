@@ -248,6 +248,8 @@ export interface Panel {
   msgId: string
   title: string
   buttonText: string
+  /** 开单成功后机器人在工单频道单独发送的 KMarkdown 内容；为空则不发送。 */
+  openMessage: string
   enabled: boolean
   createdAt: string
   updatedAt: string
@@ -314,6 +316,54 @@ export interface KookOptionsResponse {
   dryRun: boolean
   items: KookOption[]
   note?: string
+}
+
+/** KOOK 游戏对象（对应 object-game）。 */
+export interface KookGame {
+  id: number
+  name: string
+  /** 0 游戏 / 1 VUP / 2 进程。 */
+  type: number
+  options?: string
+  kmhookAdmin?: boolean
+  processName?: string[]
+  productName?: string[]
+  icon?: string
+}
+
+/** 游戏列表响应；机器人离线时 available 为 false。 */
+export interface GameListResponse {
+  available: boolean
+  dryRun: boolean
+  type: number
+  items: KookGame[]
+  note?: string
+}
+
+/** 动态类型：1 游戏 / 2 音乐（与平台 data_type 一致）。 */
+export type ActivityDataType = 1 | 2
+
+/** 音乐动态支持的软件枚举。 */
+export type MusicSoftware = "cloudmusic" | "qqmusic" | "kugou"
+
+/** 机器人当前在玩/在听动态（服务端持久化的期望状态）。 */
+export interface BotActivityState {
+  dataType: ActivityDataType
+  gameId?: number
+  gameName?: string
+  musicName?: string
+  singer?: string
+  software?: MusicSoftware | string
+  actor?: string
+  startedAt: string
+}
+
+/** 动态页初始化数据。 */
+export interface BotActivityResponse {
+  connected: boolean
+  dryRun: boolean
+  autoRestore: boolean
+  current: BotActivityState | null
 }
 
 export interface AuditParams {

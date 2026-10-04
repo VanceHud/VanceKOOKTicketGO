@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from "react"
 import {
   ArrowRight,
   Bot,
+  Gamepad2,
   LayoutDashboard,
   LayoutPanelLeft,
   LocateFixed,
@@ -56,6 +57,7 @@ const NAV_ITEMS = [
   { to: "/emoji-roles", labelKey: "nav.emoji", icon: SmilePlus },
   { to: "/roles", labelKey: "nav.roles", icon: ShieldCheck },
   { to: "/bot", labelKey: "nav.bot", icon: Bot },
+  { to: "/activity", labelKey: "nav.activity", icon: Gamepad2 },
   { to: "/users", labelKey: "nav.users", icon: Users },
   { to: "/settings", labelKey: "nav.settings", icon: Settings },
   { to: "/audit", labelKey: "nav.audit", icon: ScrollText },

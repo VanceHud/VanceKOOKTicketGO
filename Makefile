@@ -9,6 +9,7 @@
 
 SHELL := /bin/bash
 BIN := bin/kook-ticket
+VERSION ?= 1.0.0
 PORT ?= 8080
 DATA_DIR ?= ./data
 
@@ -37,7 +38,7 @@ frontend: ## 构建前端并同步到 web/dist（供 go:embed 打包）
 .PHONY: build
 build: frontend ## 构建单二进制到 bin/kook-ticket
 	@mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=$$(git describe --tags --always --dirty 2>/dev/null || echo dev)" -o $(BIN) ./cmd/server
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.Version=$(VERSION)" -o $(BIN) ./cmd/server
 	@echo "已生成 $(BIN)"
 
 .PHONY: run
@@ -47,7 +48,7 @@ run: build ## 构建并运行（生产模式，需要 KOOK_TOKEN）
 .PHONY: dist
 dist: frontend ## 交叉编译发布包（linux/amd64、linux/arm64、darwin/arm64）到 bin/
 	@mkdir -p bin
-	@version=$$(git describe --tags --always --dirty 2>/dev/null || echo dev); \
+	@version=$(VERSION); \
 	for target in linux/amd64 linux/arm64 darwin/arm64; do \
 		os=$${target%%/*}; arch=$${target##*/}; \
 		out=bin/kook-ticket-$$os-$$arch; \

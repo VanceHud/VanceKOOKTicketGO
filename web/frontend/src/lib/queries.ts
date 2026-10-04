@@ -10,8 +10,10 @@ import type {
   AdminRole,
   AuditLog,
   AuditParams,
+  BotActivityResponse,
   EmojiGrant,
   EmojiRule,
+  GameListResponse,
   KookOptionsResponse,
   ListResponse,
   Panel,
@@ -46,6 +48,8 @@ export const queryKeys = {
   roleMappings: ["role-mappings"] as const,
   kookRoles: ["kook-roles"] as const,
   kookChannels: ["kook-channels"] as const,
+  games: (type: number) => ["games", type] as const,
+  botActivity: ["bot-activity"] as const,
 }
 
 export function useTickets(params: TicketListParams): UseQueryResult<ListResponse<Ticket>> {
@@ -147,4 +151,14 @@ export function useKookRoles(): UseQueryResult<KookOptionsResponse> {
 
 export function useKookChannels(): UseQueryResult<KookOptionsResponse> {
   return useQuery({ queryKey: queryKeys.kookChannels, queryFn: () => api.get<KookOptionsResponse>("/meta/guild/channels") })
+}
+
+/** 游戏库；type 为平台过滤值（0 全部 / 1 用户创建 / 2 系统创建）。 */
+export function useGames(type: number): UseQueryResult<GameListResponse> {
+  return useQuery({ queryKey: queryKeys.games(type), queryFn: () => api.get<GameListResponse>(`/games?type=${type}`) })
+}
+
+/** 机器人当前在玩/在听动态与自动恢复开关。 */
+export function useBotActivity(): UseQueryResult<BotActivityResponse> {
+  return useQuery({ queryKey: queryKeys.botActivity, queryFn: () => api.get<BotActivityResponse>("/bot/activity") })
 }

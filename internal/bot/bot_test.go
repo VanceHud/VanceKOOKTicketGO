@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -296,6 +297,128 @@ func TestOpenTicketCreatesChannelPermissionsAndCard(t *testing.T) {
 	}
 }
 
+// panelOpenMessageCalls 返回发往指定频道的 KMarkdown 文本消息内容。
+func (e *botEnv) panelOpenMessageCalls(channelID string) []string {
+	var out []string
+	for _, call := range e.mock.CallsOf("message/create") {
+		if fmt.Sprint(call.Params["target_id"]) != channelID {
+			continue
+		}
+		if int(toFloat(call.Params["type"])) != kook.MsgTypeKMarkdown {
+			continue
+		}
+		out = append(out, fmt.Sprint(call.Params["content"]))
+	}
+	return out
+}
+
+// TestOpenTicketSendsPanelOpenMessage 验证面板自定义的“开单后发送内容”：
+// 以独立 KMarkdown 消息发送、占位符被替换，并写入工单时间线。
+func TestOpenTicketSendsPanelOpenMessage(t *testing.T) {
+	env := newBotEnv(t)
+
+	template := "你好 {user}（{user_name}），工单 {ticket_no} 创建于 {time}。\n请提供订单号与截图。"
+	if err := env.store.Panels.UpdateFields(env.panelID, map[string]any{"open_message": template}); err != nil {
+		t.Fatalf("写入开单提示失败: %v", err)
+	}
+
+	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
+
+	env.waitFor("工单创建完成", func() bool {
+		ticket := env.firstTicket()
+		return ticket != nil && ticket.Status == store.TicketOpen
+	})
+
+	opened := env.firstTicket()
+	sent := env.panelOpenMessageCalls(opened.ChannelID)
+	if len(sent) != 1 {
+		t.Fatalf("应在新频道发送 1 条开单提示，实际 %d 条: %v", len(sent), sent)
+	}
+	for _, expected := range []string{kook.MentionUser(userAsker), "提问用户", opened.No, "请提供订单号与截图"} {
+		if !strings.Contains(sent[0], expected) {
+			t.Fatalf("开单提示应包含 %q，实际: %s", expected, sent[0])
+		}
+	}
+	if strings.Contains(sent[0], "{") {
+		t.Fatalf("占位符应被全部替换: %s", sent[0])
+	}
+
+	// 时间线：开单系统消息 + 自定义提示。
+	messages, err := env.store.Tickets.Messages(opened.No, 10, 0)
+	if err != nil {
+		t.Fatalf("查询消息失败: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("应写入 2 条机器人消息，实际 %d 条", len(messages))
+	}
+	last := messages[len(messages)-1]
+	if !last.IsBot || last.MsgType != store.MsgTypeSystem || last.Content != sent[0] {
+		t.Fatalf("时间线应记录自定义提示，实际 %+v", last)
+	}
+}
+
+// TestPanelOpenMessageNormalizesMarkdown 验证开单提示也做 KMarkdown 归一化：
+// 开单提示以普通文本消息发送（没有卡片 header 模块），标题只能降级成加粗。
+func TestPanelOpenMessageNormalizesMarkdown(t *testing.T) {
+	env := newBotEnv(t)
+	ticket := &store.Ticket{No: "ticket.1", UserID: userAsker, StartedAt: store.Now()}
+
+	got := env.bot.panelOpenMessage("# 标题\n- 账号问题\n__下划线__", ticket)
+
+	if strings.Contains(got, "#") || strings.Contains(got, "__") {
+		t.Fatalf("开单提示不应残留 KOOK 不支持的写法: %q", got)
+	}
+	for _, want := range []string{"**标题**", "• 账号问题", "(ins)下划线(ins)"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("开单提示应包含 %q，实际: %q", want, got)
+		}
+	}
+}
+
+// TestOpenTicketOpenMessageEscapesNickname 验证昵称中的提及语法不会被回填执行：
+// KOOK 昵称可能包含 (met)all(met)，直接回填会导致伪造 @全体成员。
+func TestOpenTicketOpenMessageEscapesNickname(t *testing.T) {
+	env := newBotEnv(t)
+
+	if err := env.store.Panels.UpdateFields(env.panelID, map[string]any{"open_message": "{user_name} 你好"}); err != nil {
+		t.Fatalf("写入开单提示失败: %v", err)
+	}
+	// 伪造一个含提及语法的昵称。
+	asker := env.user(userAsker)
+	asker.Nickname = "(met)all(met)"
+
+	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), asker))
+
+	env.waitFor("工单创建完成", func() bool {
+		ticket := env.firstTicket()
+		return ticket != nil && ticket.Status == store.TicketOpen
+	})
+
+	sent := env.panelOpenMessageCalls(env.firstTicket().ChannelID)
+	if len(sent) != 1 {
+		t.Fatalf("应发送 1 条开单提示，实际 %v", sent)
+	}
+	if strings.Contains(sent[0], "(met)all(met)") {
+		t.Fatalf("昵称中的提及语法应被转义: %s", sent[0])
+	}
+}
+
+// TestOpenTicketWithoutPanelOpenMessageSendsNoText 验证面板未配置时不在工单频道内发文本消息。
+func TestOpenTicketWithoutPanelOpenMessageSendsNoText(t *testing.T) {
+	env := newBotEnv(t)
+
+	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
+
+	env.waitFor("工单创建完成", func() bool {
+		ticket := env.firstTicket()
+		return ticket != nil && ticket.Status == store.TicketOpen
+	})
+
+	if sent := env.panelOpenMessageCalls(env.firstTicket().ChannelID); len(sent) != 0 {
+		t.Fatalf("未配置开单提示时不应发送文本消息，实际 %v", sent)
+	}
+}
+
 // TestOpenTicketFromSecondPanelUsesItsOwnRoles 验证同一频道内多张面板卡片各自携带角色：
 // 点击第二张卡片的按钮时，只应下发第二张面板的管理员角色。
 func TestOpenTicketFromSecondPanelUsesItsOwnRoles(t *testing.T) {
@@ -388,7 +511,11 @@ func TestOneActiveTicketPerUser(t *testing.T) {
 	}
 }
 
-func TestOpenTicketWhenPrivateMessageBlockedStillCreatesTicket(t *testing.T) {
+// TestOpenTicketSendsNoDirectMessageProbe 是回归测试：
+//
+// 开单时不再发送「工单私信通道测试，消息将被自动删除」这类探测私信，
+// 也不会因为私信被屏蔽而在面板频道提示用户开启私聊。
+func TestOpenTicketSendsNoDirectMessageProbe(t *testing.T) {
 	env := newBotEnv(t)
 	env.mock.DMBlocked = true
 
@@ -399,16 +526,59 @@ func TestOpenTicketWhenPrivateMessageBlockedStillCreatesTicket(t *testing.T) {
 		return ticket != nil && ticket.Status == store.TicketOpen
 	})
 
-	// 应提示用户先开启私聊
-	var noticed bool
+	if calls := env.mock.CallsOf("direct-message/create"); len(calls) != 0 {
+		t.Fatalf("开单不应发送私信探测消息，实际发送 %d 条", len(calls))
+	}
 	for _, call := range env.mock.CallsOf("message/create") {
-		if fmt.Sprint(call.Params["temp_target_id"]) == userAsker &&
-			strings.Contains(fmt.Sprint(call.Params["content"]), "私聊") {
-			noticed = true
+		if strings.Contains(fmt.Sprint(call.Params["content"]), "私聊") {
+			t.Fatal("开单环节不应再提示用户开启私聊")
 		}
 	}
-	if !noticed {
-		t.Fatal("私信被屏蔽时应提示用户开启私聊")
+}
+
+// TestCloseNotifiesAdminWhenPrivateMessageBlocked 校验私信兜底：
+//
+// 开单人未开启私聊时，关闭通知送不到，必须在日志频道提醒管理员人工转达，
+// 并把这件事写进时间线。
+func TestCloseNotifiesAdminWhenPrivateMessageBlocked(t *testing.T) {
+	env := newBotEnv(t)
+	env.mock.DMBlocked = true
+
+	channelID := env.openTicketForTest()
+	ticket := env.firstTicket()
+
+	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(
+		channelID, userStaff, env.ticketValue(actionClose, ticket.No, channelID), env.user(userStaff)))
+
+	env.waitFor("工单关闭", func() bool {
+		updated, err := env.store.Tickets.ByNo(ticket.No)
+		return err == nil && updated.Status == store.TicketClosed
+	})
+
+	// 提醒卡片应发往日志频道，而不是开单人私聊
+	var warned bool
+	for _, call := range env.mock.CallsOf("message/create") {
+		if fmt.Sprint(call.Params["target_id"]) == testLogChan &&
+			strings.Contains(fmt.Sprint(call.Params["content"]), "未能私信送达") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatal("开单人私信不可达时应提醒管理员手动转达")
+	}
+
+	msgs, err := env.store.Tickets.Messages(ticket.No, 50, 0)
+	if err != nil {
+		t.Fatalf("读取时间线失败: %v", err)
+	}
+	var logged bool
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, "关闭通知未能私信送达") {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Fatal("时间线应记录关闭通知未送达")
 	}
 }
 
@@ -849,6 +1019,75 @@ func TestSendPanelCardKeepsStoredButtonText(t *testing.T) {
 	}
 	if !strings.Contains(content, actionOpen) {
 		t.Fatalf("卡片应包含开单按钮: %s", content)
+	}
+}
+
+// TestPanelCardNormalizesMarkdown 验证 KOOK 不支持的 Markdown 写法在发送前被转换：
+// 首行 "# 标题" 改用卡片 header 模块（KOOK 唯一的大标题形式，纯文本），
+// __下划线__ 与 "- 列表" 降级为 KOOK 真正支持的写法。
+func TestPanelCardNormalizesMarkdown(t *testing.T) {
+	env := newBotEnv(t)
+
+	content := env.bot.panelCard(
+		"# 请点击按钮发起工单TEST1\n123123\n**加粗**、__下划线__\n- 账号问题",
+		"发起工单", "open-value",
+	)
+
+	var cards []kook.Card
+	if err := json.Unmarshal([]byte(content), &cards); err != nil {
+		t.Fatalf("面板卡片不是合法 JSON: %v（%s）", err, content)
+	}
+	if len(cards) != 1 || len(cards[0].Modules) != 3 {
+		t.Fatalf("面板卡片应含标题/内容/按钮三个模块: %s", content)
+	}
+
+	header := cards[0].Modules[0]
+	if header.Type != "header" || header.Text == nil || header.Text.Type != "plain-text" {
+		t.Fatalf("首行标题应使用 plain-text 的 header 模块: %+v", header)
+	}
+	if header.Text.Content != "请点击按钮发起工单TEST1" {
+		t.Fatalf("header 内容不符: %q", header.Text.Content)
+	}
+
+	section := cards[0].Modules[1]
+	if section.Type != "section" || section.Text == nil || section.Text.Type != "kmarkdown" {
+		t.Fatalf("正文应使用 kmarkdown 的 section 模块: %+v", section)
+	}
+	body := section.Text.Content
+	if strings.Contains(body, "#") || strings.Contains(body, "__") {
+		t.Fatalf("正文不应残留 KOOK 不支持的写法: %q", body)
+	}
+	for _, want := range []string{"123123", "**加粗**", "(ins)下划线(ins)", "• 账号问题"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("正文应包含 %q: %q", want, body)
+		}
+	}
+
+	action := cards[0].Modules[2]
+	if action.Type != "action-group" || len(action.Elements) != 1 {
+		t.Fatalf("按钮组异常: %+v", action)
+	}
+	if action.Elements[0].Value != "open-value" || action.Elements[0].Text.Content != "发起工单" {
+		t.Fatalf("按钮内容异常: %+v", action.Elements[0])
+	}
+}
+
+// TestPanelCardKeepsPlainTitleInSection 验证未写标题语法的面板文案行为不变：
+// 整段文案仍然放在 kmarkdown 模块里。
+func TestPanelCardKeepsPlainTitleInSection(t *testing.T) {
+	env := newBotEnv(t)
+
+	content := env.bot.panelCard("请点击右侧按钮发起工单", "ticket", "open-value")
+
+	var cards []kook.Card
+	if err := json.Unmarshal([]byte(content), &cards); err != nil {
+		t.Fatalf("面板卡片不是合法 JSON: %v（%s）", err, content)
+	}
+	if len(cards) != 1 || len(cards[0].Modules) != 2 {
+		t.Fatalf("无标题文案应只有内容与按钮模块: %s", content)
+	}
+	if cards[0].Modules[0].Type != "section" {
+		t.Fatalf("首个模块应为 section: %+v", cards[0].Modules[0])
 	}
 }
 

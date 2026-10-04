@@ -169,10 +169,15 @@ type Panel struct {
 	//
 	// 必须持久化：重建卡片（refresh）或编辑文案后需要原样恢复按钮文字，
 	// 否则会把自定义按钮文字冲成默认的 "ticket"。
-	ButtonText string    `gorm:"size:32" json:"buttonText"`
-	Enabled    bool      `gorm:"default:true" json:"enabled"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ButtonText string `gorm:"size:32" json:"buttonText"`
+	// OpenMessage 是开单成功后机器人在工单频道内单独发送的内容，按 KMarkdown 渲染。
+	//
+	// 支持占位符：{user} 提及开单人、{user_name} 开单人昵称、{ticket_no} 工单编号、{time} 开单时间。
+	// 为空时不发送任何内容（仅保留默认工单卡片）。
+	OpenMessage string    `gorm:"type:text" json:"openMessage"`
+	Enabled     bool      `gorm:"default:true" json:"enabled"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 
 	Roles []PanelRole `gorm:"foreignKey:PanelID" json:"roles,omitempty"`
 }
@@ -307,6 +312,29 @@ type RoleMapping struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// BotActivity 是机器人当前的在玩/在听动态（单行表，主键恒为 ActivitySingletonID）。
+//
+// 为什么会持久化平台状态：KOOK 的在玩动态绑定在网关上，机器人断开或重启后会丢失。
+// 这里保存“期望的动态”，机器人重连后按配置自动恢复；WebUI 也据此展示当前状态。
+type BotActivity struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// DataType 为 1（游戏）或 2（音乐）。
+	DataType int `gorm:"not null" json:"dataType"`
+
+	GameID   int64  `json:"gameId,omitempty"`
+	GameName string `gorm:"size:128" json:"gameName,omitempty"`
+
+	MusicName string `gorm:"size:200" json:"musicName,omitempty"`
+	Singer    string `gorm:"size:200" json:"singer,omitempty"`
+	Software  string `gorm:"size:32" json:"software,omitempty"`
+
+	// Actor 记录最后一次操作者（WebUI 用户名），便于审计展示。
+	Actor string `gorm:"size:128" json:"actor,omitempty"`
+
+	StartedAt time.Time `json:"startedAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 // AuditLog 是审计日志。仅追加，不提供删除接口。
 type AuditLog struct {
 	ID uint `gorm:"primaryKey" json:"id"`
@@ -340,5 +368,6 @@ func AllModels() []any {
 		&AuthCode{},
 		&RoleMapping{},
 		&AuditLog{},
+		&BotActivity{},
 	}
 }

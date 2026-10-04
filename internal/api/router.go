@@ -75,6 +75,9 @@ func NewRouter(d Deps) *gin.Engine {
 	readonly.GET("/meta/runtime", server.handleRuntimeInfo)
 	readonly.GET("/meta/guild/roles", server.handleGuildRoles)
 	readonly.GET("/meta/guild/channels", server.handleGuildChannels)
+	// 游戏库与在玩动态：读取对任意已登录角色开放
+	readonly.GET("/games", server.handleGameList)
+	readonly.GET("/bot/activity", server.handleActivityGet)
 	readonly.GET("/events", server.handleEvents)
 
 	// 工单操作：客服及以上
@@ -110,6 +113,13 @@ func NewRouter(d Deps) *gin.Engine {
 	admin.DELETE("/roles/mappings/:id", server.handleRoleMappingDelete)
 	admin.GET("/audit", server.handleAuditList)
 	admin.POST("/bot/restart", server.handleBotRestart)
+	// 游戏库增删改与在玩动态控制：会变更 KOOK 侧状态，归入管理员权限
+	admin.POST("/games", server.handleGameCreate)
+	admin.PATCH("/games/:id", server.handleGameUpdate)
+	admin.DELETE("/games/:id", server.handleGameDelete)
+	admin.POST("/bot/activity", server.handleActivityStart)
+	admin.DELETE("/bot/activity", server.handleActivityStop)
+	admin.PUT("/bot/activity/settings", server.handleActivitySettings)
 
 	// 静态资源与 SPA 前端。
 	if d.Web != nil {

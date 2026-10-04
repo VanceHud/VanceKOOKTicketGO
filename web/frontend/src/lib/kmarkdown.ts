@@ -2,9 +2,12 @@
  * 极简 KMarkdown 渲染器：仅用于面板文案的实时预览。
  *
  * 说明：
- * - KOOK 卡片正文按 KMarkdown 渲染，支持加粗、斜体、删除线、下划线、行内代码、
- *   代码块、引用、标题、列表、链接与 (met)/(rol)/(chn) 提及。
- * - 预览只做展示，不追求与 KOOK 客户端 100% 一致；
+ * - KOOK 的 KMarkdown 只支持 **加粗**、*斜体*、~~删除线~~、`行内代码`、```代码块```、
+ *   > 引用、--- 分隔线、[链接](url)，以及 (ins)/(met)/(rol)/(chn) 等自定义标签；
+ *   `# 标题`、`__下划线__`、`- 列表` 这些 Markdown 写法 KOOK 并不认识。
+ * - 后端发送前会做一次归一化（internal/kook/kmd.go）：首行 `# 标题` 改用卡片 header
+ *   模块，`__下划线__` 转成 (ins)，`- 列表` 转成「• 」。
+ * - 因此这里的渲染规则要和后端保持一致，保证「预览即所得」。
  * - 所有文本先做 HTML 转义，再套用标记，避免把用户输入当作 HTML 执行。
  */
 
@@ -38,7 +41,9 @@ function renderInline(text: string): string {
     )
     // 加粗
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    // 下划线
+    // 下划线：KOOK 原生写法 (ins) 与 Markdown 写法 __ 都会渲染成下划线
+    // （后端会把 __文本__ 自动转换成 (ins)文本(ins)，这里同步展示）。
+    .replace(/\(ins\)([^(\n]+)\(ins\)/g, "<u>$1</u>")
     .replace(/__([^_\n]+)__/g, "<u>$1</u>")
     // 删除线
     .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
@@ -98,12 +103,16 @@ export function renderKMarkdown(source: string): string {
       continue
     }
 
-    // 标题
-    const heading = /^(#{1,3})\s+(.*)$/.exec(line)
+    // 标题：只有正文首行会显示为卡片大标题。
+    // KOOK 的 KMarkdown 没有 "# 标题" 语法，后端会把首行标题放进卡片的 header 模块；
+    // 出现在其它位置、或后面没有任何正文时会被降级为加粗（卡片必须保留内容模块），
+    // 这里与 KOOK 实际渲染保持一致。
+    const heading = /^(#{1,6})\s+(.+)$/.exec(line)
     if (heading) {
       flushParagraph(paragraph)
-      const level = heading[1].length
-      blocks.push(`<h${level}>${renderInline(heading[2])}</h${level}>`)
+      const content = renderInline(heading[2])
+      const hasBody = lines.slice(index + 1).some((rest) => rest.trim() !== "")
+      blocks.push(blocks.length === 0 && hasBody ? `<h1>${content}</h1>` : `<p><strong>${content}</strong></p>`)
       index += 1
       continue
     }
@@ -120,12 +129,12 @@ export function renderKMarkdown(source: string): string {
       continue
     }
 
-    // 无序列表
-    if (/^\s*[-*]\s+/.test(line)) {
+    // 无序列表（KOOK 会渲染成「• 项目」，视觉上就是列表）
+    if (/^\s*[-*+]\s+/.test(line)) {
       flushParagraph(paragraph)
       const items: string[] = []
-      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^\s*[-*]\s+/, ""))
+      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index])) {
+        items.push(lines[index].replace(/^\s*[-*+]\s+/, ""))
         index += 1
       }
       blocks.push(`<ul>${items.map((item) => `<li>${renderInline(item)}</li>`).join("")}</ul>`)

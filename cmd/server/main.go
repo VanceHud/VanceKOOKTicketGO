@@ -31,7 +31,7 @@ import (
 )
 
 // Version 是构建版本号，可在构建时通过 -ldflags "-X main.Version=..." 覆盖。
-var Version = "0.1.0-milestone1"
+var Version = "1.0.0"
 
 func main() {
 	// 运维子命令：忘记密码时的救援手段。

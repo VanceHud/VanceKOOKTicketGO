@@ -27,6 +27,7 @@ const EmojiRolesPage = lazyPage(() => import("@/routes/EmojiRoles"), "EmojiRoles
 const RoleMappingPage = lazyPage(() => import("@/routes/RoleMapping"), "RoleMappingPage")
 const UsersPage = lazyPage(() => import("@/routes/Users"), "UsersPage")
 const BotStatusPage = lazyPage(() => import("@/routes/BotStatus"), "BotStatusPage")
+const ActivityPage = lazyPage(() => import("@/routes/Activity"), "ActivityPage")
 const SettingsPage = lazyPage(() => import("@/routes/Settings"), "SettingsPage")
 const AuditPage = lazyPage(() => import("@/routes/Audit"), "AuditPage")
 const NotFoundPage = lazyPage(() => import("@/routes/NotFound"), "NotFoundPage")
@@ -70,6 +71,7 @@ export function App() {
             <Route path="/roles" element={<RoleMappingPage />} />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/bot" element={<BotStatusPage />} />
+            <Route path="/activity" element={<ActivityPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="*" element={<NotFoundPage />} />

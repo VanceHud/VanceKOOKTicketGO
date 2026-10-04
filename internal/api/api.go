@@ -48,6 +48,20 @@ type BotController interface {
 	ChannelInfo(ctx context.Context, channelID string) (*kook.Channel, error)
 	// RoleName 返回角色名（未知时返回空串）。
 	RoleName(ctx context.Context, roleID string) string
+	// GameList 拉取游戏库；未连接时返回错误。
+	GameList(ctx context.Context, gameType int) ([]kook.Game, error)
+	// GameCreate 新建游戏；未连接时返回错误。
+	GameCreate(ctx context.Context, name, icon string) (*kook.Game, error)
+	// GameUpdate 更新游戏名称/图标；未连接时返回错误。
+	GameUpdate(ctx context.Context, id int64, name, icon string) (*kook.Game, error)
+	// GameDelete 删除游戏；未连接时返回错误。
+	GameDelete(ctx context.Context, id int64) error
+	// StartGameActivity 设置游戏动态；未连接时返回错误。
+	StartGameActivity(ctx context.Context, gameID int64) error
+	// StartMusicActivity 设置音乐动态；未连接时返回错误。
+	StartMusicActivity(ctx context.Context, musicName, singer, software string) error
+	// DeleteActivity 停止指定类型的动态；未连接时返回错误。
+	DeleteActivity(ctx context.Context, dataType int) error
 }
 
 // Deps 是 API 层的依赖集合。

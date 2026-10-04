@@ -165,6 +165,61 @@ type Emoji struct {
 	Name string `json:"name"`
 }
 
+// Game 是游戏/状态对象（game 列表、创建、更新接口返回）。
+//
+// 对应官方文档的 object-game：Type 0 表示游戏、1 表示 VUP、2 表示进程；
+// Options / ProcessName / ProductName / KMHookAdmin 由 KOOK 客户端用于识别进程，
+// 通过接口创建的记录这几项通常为空。
+type Game struct {
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	Type        int      `json:"type"`
+	Options     string   `json:"options"`
+	KMHookAdmin bool     `json:"kmhook_admin"`
+	ProcessName []string `json:"process_name"`
+	ProductName []string `json:"product_name"`
+	Icon        string   `json:"icon"`
+}
+
+// 游戏列表的类型过滤（game?type=）。
+const (
+	// GameTypeAll 查询全部游戏。
+	GameTypeAll = 0
+	// GameTypeUser 只查询用户创建的游戏（WebUI 可增删改的那些）。
+	GameTypeUser = 1
+	// GameTypeSystem 只查询 KOOK 内置的游戏。
+	GameTypeSystem = 2
+)
+
+// 音乐动态支持的软件枚举（game/activity 的 software 字段）。
+const (
+	MusicSoftwareCloudMusic = "cloudmusic"
+	MusicSoftwareQQMusic    = "qqmusic"
+	MusicSoftwareKugou      = "kugou"
+)
+
+// ValidMusicSoftware 判断软件名是否属于平台支持的枚举值。
+func ValidMusicSoftware(software string) bool {
+	switch software {
+	case MusicSoftwareCloudMusic, MusicSoftwareQQMusic, MusicSoftwareKugou:
+		return true
+	default:
+		return false
+	}
+}
+
+// ActivityTypeName 返回动态类型的中文名，便于日志与提示。
+func ActivityTypeName(dataType int) string {
+	switch dataType {
+	case ActivityTypeGame:
+		return "游戏"
+	case ActivityTypeMusic:
+		return "音乐"
+	default:
+		return "未知"
+	}
+}
+
 // ExtraType 兼容 extra.type 的两种平台形态：
 //
 //   - 普通消息事件（type=1/2/3/…）：数字，取值与事件主类型一致；

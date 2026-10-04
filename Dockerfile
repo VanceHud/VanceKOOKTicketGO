@@ -32,7 +32,7 @@ COPY . .
 RUN rm -rf ./web/dist && mkdir -p ./web/dist
 COPY --from=frontend /src/dist ./web/dist
 
-ARG VERSION=dev
+ARG VERSION=1.0.0
 RUN CGO_ENABLED=0 go build \
         -trimpath \
         -ldflags="-s -w -X main.Version=${VERSION}" \

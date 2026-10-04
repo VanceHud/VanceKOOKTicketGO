@@ -64,6 +64,9 @@ func Seed(st *store.Store, loc *time.Location, log *slog.Logger) error {
 	if err := seedPanelsAndRoles(st, log); err != nil {
 		return err
 	}
+	if err := seedActivity(st, log); err != nil {
+		return err
+	}
 	if err := seedTickets(st, loc, rng, now, log); err != nil {
 		return err
 	}
@@ -83,8 +86,9 @@ func seedPanelsAndRoles(st *store.Store, log *slog.Logger) error {
 		ChannelID:   panelChannel,
 		ChannelName: "工单面板",
 		MsgID:       demoUserID(3),
-		Title:       "点击按钮发起工单",
+		Title:       "# 点击按钮发起工单",
 		ButtonText:  "ticket",
+		OpenMessage: "你好 {user}，工单 **{ticket_no}** 已创建（{time}）。\n请提供以下信息，便于我们尽快处理：\n1. 订单号或问题截图\n2. 问题发生的大致时间\n\n补充信息可直接在本频道回复。",
 		Enabled:     true,
 	}
 	if err := st.Panels.Create(panel); err != nil {
@@ -112,6 +116,23 @@ func seedPanelsAndRoles(st *store.Store, log *slog.Logger) error {
 		}
 	}
 	log.Debug("演示数据：面板与角色已写入")
+	return nil
+}
+
+// seedActivity 写入一条演示用的在玩动态，便于离线验收「机器人动态」页。
+//
+// 游戏 ID / 名称与 handleGameList 的 DryRun 演示数据保持一致。
+func seedActivity(st *store.Store, log *slog.Logger) error {
+	if err := st.Activity.Replace(&store.BotActivity{
+		DataType:  1,
+		GameID:    111111,
+		GameName:  "CS",
+		Actor:     "demo",
+		StartedAt: store.Now(),
+	}); err != nil {
+		return err
+	}
+	log.Debug("演示数据：在玩动态已写入")
 	return nil
 }
 

@@ -125,20 +125,33 @@ func (s *Service) Activate(ctx context.Context, no, channelID string) (*store.Ti
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.Tickets.AddMessage(&store.TicketMessage{
-		TicketNo:  no,
-		ChannelID: channelID,
-		UserID:    "bot",
-		UserName:  "TicketBot",
-		Content:   "工单已创建，等待管理员处理",
-		MsgType:   store.MsgTypeSystem,
-		IsBot:     true,
-		CreatedAt: store.Now(),
-	}); err != nil {
+	if _, err := s.AddBotMessage(ctx, no, channelID, "工单已创建，等待管理员处理"); err != nil {
 		s.logWarn("写入开单系统消息失败", no, err)
 	}
 	s.publish(eventbus.EventTicketCreated, no, updated)
 	return updated, nil
+}
+
+// AddBotMessage 记录一条机器人发送的系统消息（如面板自定义的开单提示），并广播消息事件。
+//
+// 消息内容原样入库供 WebUI 时间线展示；KOOK 侧的发送由调用方完成，
+// 以便发送失败时不产生“时间线有记录但频道内没有”的脏数据。
+func (s *Service) AddBotMessage(ctx context.Context, no, channelID, content string) (*store.TicketMessage, error) {
+	message := &store.TicketMessage{
+		TicketNo:  no,
+		ChannelID: channelID,
+		UserID:    "bot",
+		UserName:  "TicketBot",
+		Content:   content,
+		MsgType:   store.MsgTypeSystem,
+		IsBot:     true,
+		CreatedAt: store.Now(),
+	}
+	if err := s.store.Tickets.AddMessage(message); err != nil {
+		return nil, err
+	}
+	s.publish(eventbus.EventTicketMessage, no, message)
+	return message, nil
 }
 
 // DiscardPending 回收占号：仅在状态仍为 pending 时生效（编号尚未对外暴露）。

@@ -41,6 +41,7 @@ type Store struct {
 	Roles    *RolesRepo
 	Emoji    *EmojiRepo
 	Audit    *AuditRepo
+	Activity *ActivityRepo
 }
 
 // Now 返回统一的 UTC 时间，避免各处混用本地时间。
@@ -95,6 +96,7 @@ func Open(path string) (*Store, error) {
 	s.Roles = &RolesRepo{db: db}
 	s.Emoji = &EmojiRepo{db: db}
 	s.Audit = &AuditRepo{db: db}
+	s.Activity = &ActivityRepo{db: db}
 
 	hardenSQLiteFiles(path)
 	return s, nil

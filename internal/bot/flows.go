@@ -105,11 +105,14 @@ const maxChannelNameLength = 20
 //
 // 步骤（对应参考实现）：
 //  1. 校验按钮来自已启用的面板；一人同时只能有一个未关闭工单
-//  2. 私信可用性测试（工单记录会私聊送达，因此需要用户先与机器人建立会话）
-//  3. 分配工单编号并落库（pending）
-//  4. 在配置的隐藏分组下创建工单频道
-//  5. 下发频道权限：全局管理员角色、面板管理员角色、开单人
-//  6. 发送含「关闭 / 锁定」按钮的卡片，并把工单置为进行中
+//  2. 分配工单编号并落库（pending）
+//  3. 在配置的隐藏分组下创建工单频道
+//  4. 下发频道权限：全局管理员角色、面板管理员角色、开单人
+//  5. 发送含「关闭 / 锁定」按钮的卡片，并把工单置为进行中
+//
+// 这里刻意不做「私信可用性探测」：KOOK 没有探测接口，只能真发一条私信，
+// 用户会看到它一闪而过（删除失败时还会长期留在私信里）。
+// 私信送达问题改到关闭环节兜底，见 platform.NotifyClosed。
 //
 // panelID 来自按钮签名（旧卡片为 0），用于在同一频道的多张面板卡片中定位实际点击的那一张。
 func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, userInfo kook.User, panelID uint) {
@@ -142,8 +145,6 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		))
 		return
 	}
-
-	b.dmTest(ctx, panelChannelID, userID)
 
 	name := userInfo.DisplayName()
 	if name == "" {
@@ -207,6 +208,9 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		return
 	}
 
+	// 面板自定义的开单提示：独立 KMarkdown 消息，发送成功后写入时间线。
+	b.sendPanelOpenMessage(ctx, client, activated, panel)
+
 	b.deps.Store.Audit.Write(&store.AuditLog{
 		Actor:     userInfo.FullName(),
 		ActorType: store.ActorTypeKook,
@@ -236,6 +240,24 @@ func (b *Bot) panelForOpen(channelID string, panelID uint) (*store.Panel, error)
 	return panel, nil
 }
 
+// sendPanelOpenMessage 在工单频道内发送面板自定义的开单提示（独立 KMarkdown 文本消息）。
+//
+// 内容为空时不发送。只有 KOOK 侧发送成功才写入时间线，
+// 避免出现“WebUI 有记录但频道内看不到消息”的不一致。
+func (b *Bot) sendPanelOpenMessage(ctx context.Context, client *kook.Client, t *store.Ticket, panel *store.Panel) {
+	if strings.TrimSpace(panel.OpenMessage) == "" {
+		return
+	}
+	content := b.panelOpenMessage(panel.OpenMessage, t)
+	if _, err := client.SendChannelMessage(ctx, t.ChannelID, kook.MsgTypeKMarkdown, content, kook.MessageOptions{}); err != nil {
+		b.deps.Logger.Warn("发送面板开单提示失败", "ticket_no", t.No, "panel_id", panel.ID, "err", err)
+		return
+	}
+	if _, err := b.deps.Tickets.AddBotMessage(ctx, t.No, t.ChannelID, content); err != nil {
+		b.deps.Logger.Warn("写入开单提示时间线失败", "ticket_no", t.No, "err", err)
+	}
+}
+
 // grantChannelAccess 为频道内的角色/用户下发“可看可发”权限。
 func (b *Bot) grantChannelAccess(ctx context.Context, channelID, subjectType, value string) error {
 	client, _, err := b.ready()
@@ -255,33 +277,6 @@ func (b *Bot) grantChannelAccess(ctx context.Context, channelID, subjectType, va
 	case <-time.After(120 * time.Millisecond):
 	}
 	return nil
-}
-
-// dmTest 测试机器人能否私聊该用户。
-//
-// 工单关闭通知依赖私信送达，因此开单前先做一次探测；
-// 失败时在频道内做一次临时提示（不阻止开单，用户仍可在工单频道内沟通）。
-func (b *Bot) dmTest(ctx context.Context, channelID, userID string) {
-	client, _, err := b.ready()
-	if err != nil {
-		return
-	}
-	msg, err := client.SendDirectMessage(ctx, userID, kook.MsgTypeText, "工单私信通道测试，消息将被自动删除", kook.MessageOptions{})
-	if err != nil {
-		if isDirectMessageBlocked(err) {
-			b.deps.Logger.Info("用户未开启私聊，已提示", "user_id", userID)
-			b.sendEphemeral(ctx, channelID, userID,
-				"为了保证工单记录能送达，请先私聊机器人任意一条消息（开启私信）")
-			return
-		}
-		b.deps.Logger.Warn("私信测试失败", "user_id", userID, "err", err)
-		return
-	}
-	if msg != nil && msg.ID != "" {
-		if err := client.DeleteDirectMessage(ctx, msg.ID); err != nil {
-			b.deps.Logger.Debug("删除私信测试消息失败", "err", err)
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------

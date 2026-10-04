@@ -44,13 +44,18 @@ type Server struct {
 	channels map[string]kook.Channel
 	roles    []kook.Role
 	users    map[string]kook.User
-	nextID   int64
+	games    map[int64]kook.Game
+	// gameSystem 标记哪些游戏属于 KOOK 内置（game?type=2），用于列表过滤。
+	gameSystem map[int64]bool
+	nextID     int64
+	nextGame   int64
 
 	// 可编程行为
 	DMBlocked         bool // 私聊被屏蔽（模拟用户未开启私聊）
 	ChannelCreateFail bool // 建频道失败
 	ChannelDeleteFail bool // 删频道失败
 	RoleGrantFail     bool // 发放角色失败
+	GameCreateFail    bool // 新建游戏失败（模拟超出每日上限）
 	Compress          bool // 网关下发是否压缩（由 compress 查询参数决定）
 
 	upgrader websocket.Upgrader
@@ -73,9 +78,11 @@ func (s *Server) write(conn *websocket.Conn, messageType int, payload []byte) er
 // New 启动模拟平台。
 func New() *Server {
 	s := &Server{
-		channels: make(map[string]kook.Channel),
-		users:    make(map[string]kook.User),
-		conns:    make(map[*websocket.Conn]bool),
+		channels:   make(map[string]kook.Channel),
+		users:      make(map[string]kook.User),
+		games:      make(map[int64]kook.Game),
+		gameSystem: make(map[int64]bool),
+		conns:      make(map[*websocket.Conn]bool),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(*http.Request) bool { return true },
 		},
@@ -90,6 +97,10 @@ func New() *Server {
 	s.users["9002"] = kook.User{ID: "9002", Username: "admin", Nickname: "客服小林", IdentifyNum: "0002", Roles: []int64{1002}}
 	s.users["9003"] = kook.User{ID: "9003", Username: "master", Nickname: "服主", IdentifyNum: "0003", Roles: []int64{1001}}
 	s.users["9004"] = kook.User{ID: "9004", Username: "helper", Nickname: "实习客服", IdentifyNum: "0004", Roles: []int64{1003}}
+
+	s.games[111111] = kook.Game{ID: 111111, Name: "CS", Type: 0, ProcessName: []string{"cstrike"}}
+	s.gameSystem[111111] = true
+	s.games[222222] = kook.Game{ID: 222222, Name: "KOOK", Type: 0}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v3/", s.handleAPI)
@@ -124,6 +135,24 @@ func (s *Server) AddChannel(channel kook.Channel) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.channels[channel.ID] = channel
+}
+
+// Games 返回当前游戏库快照。
+func (s *Server) Games() []kook.Game {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]kook.Game, 0, len(s.games))
+	for _, game := range s.games {
+		out = append(out, game)
+	}
+	return out
+}
+
+// AddGame 注册一个已存在的游戏。
+func (s *Server) AddGame(game kook.Game) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.games[game.ID] = game
 }
 
 // Calls 返回所有调用记录的副本。
@@ -303,6 +332,76 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		writeData(w, map[string]any{})
 
 	case "game/activity", "game/delete-activity", "user/offline":
+		writeData(w, map[string]any{})
+
+	case "game":
+		gameType := toInt(params["type"])
+		s.mu.Lock()
+		items := make([]kook.Game, 0, len(s.games))
+		for id, game := range s.games {
+			system := s.gameSystem[id]
+			switch gameType {
+			case kook.GameTypeUser:
+				if system {
+					continue
+				}
+			case kook.GameTypeSystem:
+				if !system {
+					continue
+				}
+			}
+			items = append(items, game)
+		}
+		s.mu.Unlock()
+		writeData(w, map[string]any{
+			"items": items,
+			"meta": map[string]any{
+				"page": 1, "page_total": 1, "page_size": 50, "total": len(items),
+			},
+		})
+
+	case "game/create":
+		if s.GameCreateFail {
+			writeJSON(w, http.StatusForbidden, 40300, "今日创建游戏数量已达上限", nil)
+			return
+		}
+		s.mu.Lock()
+		s.nextGame++
+		game := kook.Game{
+			ID:   1000000 + s.nextGame,
+			Name: fmt.Sprint(params["name"]),
+			Type: 0,
+			Icon: fmt.Sprint(params["icon"]),
+		}
+		s.games[game.ID] = game
+		s.mu.Unlock()
+		writeData(w, game)
+
+	case "game/update":
+		id := toInt64(params["id"])
+		s.mu.Lock()
+		game, ok := s.games[id]
+		if !ok {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusNotFound, 40400, "游戏不存在", nil)
+			return
+		}
+		if name := fmt.Sprint(params["name"]); name != "" && name != "<nil>" {
+			game.Name = name
+		}
+		if icon := fmt.Sprint(params["icon"]); icon != "" && icon != "<nil>" {
+			game.Icon = icon
+		}
+		s.games[id] = game
+		s.mu.Unlock()
+		writeData(w, game)
+
+	case "game/delete":
+		id := toInt64(params["id"])
+		s.mu.Lock()
+		delete(s.games, id)
+		delete(s.gameSystem, id)
+		s.mu.Unlock()
 		writeData(w, map[string]any{})
 
 	case "gateway/index":
@@ -502,6 +601,19 @@ func toInt(value any) int {
 		return int(v)
 	case string:
 		var out int
+		_, _ = fmt.Sscan(v, &out)
+		return out
+	default:
+		return 0
+	}
+}
+
+func toInt64(value any) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case string:
+		var out int64
 		_, _ = fmt.Sscan(v, &out)
 		return out
 	default:

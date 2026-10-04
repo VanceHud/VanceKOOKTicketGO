@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"vancekookticket/internal/bot"
 	"vancekookticket/internal/store"
 )
 
@@ -25,14 +26,31 @@ var (
 // 仍保留一个上限，避免超出 KOOK 卡片内容限制。
 const maxPanelTitleLength = 2000
 
+// maxPanelOpenMessageLength 是“开单后发送内容”的长度上限（按字符计）。
+//
+// 该内容以 KMarkdown 文本消息发送，上限与面板文案保持一致，便于管理员理解。
+const maxPanelOpenMessageLength = 2000
+
+// normalizePanelOpenMessage 校验并规整“开单后发送内容”。
+//
+// 返回值为去掉首尾空白后的内容；空串表示不发送，允许作为“清空”操作。
+func normalizePanelOpenMessage(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if len([]rune(trimmed)) > maxPanelOpenMessageLength {
+		return "", fmt.Errorf("开单后发送内容不能超过 %d 个字符", maxPanelOpenMessageLength)
+	}
+	return trimmed, nil
+}
+
 // ---------------------------------------------------------------------------
 // 工单面板
 // ---------------------------------------------------------------------------
 
 type panelCreateRequest struct {
-	ChannelID  string `json:"channelId"`
-	Title      string `json:"title"`
-	ButtonText string `json:"buttonText"`
+	ChannelID   string `json:"channelId"`
+	Title       string `json:"title"`
+	ButtonText  string `json:"buttonText"`
+	OpenMessage string `json:"openMessage"`
 }
 
 // handlePanelCreate 在指定频道创建工单面板。
@@ -66,6 +84,11 @@ func (s *Server) handlePanelCreate(c *gin.Context) {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "按钮文字不能超过 32 个字符")
 		return
 	}
+	openMessage, err := normalizePanelOpenMessage(req.OpenMessage)
+	if err != nil {
+		s.fail(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 
 	channel, err := s.Bot.ChannelInfo(c.Request.Context(), channelID)
 	if err != nil {
@@ -82,8 +105,9 @@ func (s *Server) handlePanelCreate(c *gin.Context) {
 	panel := &store.Panel{
 		ChannelID:   channelID,
 		ChannelName: channel.Name,
-		Title:       firstNonEmptyString(title, "请点击右侧按钮发起工单"),
-		ButtonText:  firstNonEmptyString(buttonText, "ticket"),
+		Title:       firstNonEmptyString(title, bot.DefaultPanelTitle),
+		ButtonText:  firstNonEmptyString(buttonText, bot.DefaultPanelButton),
+		OpenMessage: openMessage,
 		Enabled:     true,
 	}
 	if err := s.Store.Panels.Create(panel); err != nil {
@@ -116,15 +140,16 @@ func (s *Server) handlePanelCreate(c *gin.Context) {
 }
 
 type panelUpdateRequest struct {
-	Enabled    *bool   `json:"enabled"`
-	Title      *string `json:"title"`
-	ButtonText *string `json:"buttonText"`
+	Enabled     *bool   `json:"enabled"`
+	Title       *string `json:"title"`
+	ButtonText  *string `json:"buttonText"`
+	OpenMessage *string `json:"openMessage"`
 }
 
 // handlePanelUpdate 更新面板的可编辑字段。
 //
-// 说明：文案与按钮文字的变更需要重建卡片才会生效（调用 refresh），
-// 这里只更新数据库记录，重建时会按记录内容恢复。
+// 说明：卡片上的文案与按钮文字需要重建卡片才会生效（调用 refresh），
+// 而“开单后发送内容”只作用于后续新开的工单，保存即生效、无需重建。
 func (s *Server) handlePanelUpdate(c *gin.Context) {
 	id := uint(atoiDefault(c.Param("id"), 0))
 	if id == 0 {
@@ -161,7 +186,15 @@ func (s *Server) handlePanelUpdate(c *gin.Context) {
 			s.fail(c, http.StatusBadRequest, "invalid_request", "按钮文字不能超过 32 个字符")
 			return
 		}
-		updates["button_text"] = firstNonEmptyString(buttonText, "ticket")
+		updates["button_text"] = firstNonEmptyString(buttonText, bot.DefaultPanelButton)
+	}
+	if req.OpenMessage != nil {
+		openMessage, err := normalizePanelOpenMessage(*req.OpenMessage)
+		if err != nil {
+			s.fail(c, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		updates["open_message"] = openMessage
 	}
 	if len(updates) == 0 {
 		c.JSON(http.StatusOK, panel)

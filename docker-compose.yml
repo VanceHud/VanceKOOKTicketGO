@@ -14,7 +14,7 @@ services:
     build:
       context: .
       args:
-        VERSION: ${VERSION:-dev}
+        VERSION: ${VERSION:-1.0.0}
     image: kook-ticket:local
     container_name: kook-ticket
     restart: unless-stopped
