@@ -210,6 +210,9 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		return
 	}
 
+	// 回到按钮所在的面板频道，给开单人一条「仅自己可见」的完成提示与频道跳转链接。
+	b.notifyTicketCreated(ctx, panelChannelID, userID, activated)
+
 	// 面板自定义的开单提示：独立 KMarkdown 消息，发送成功后写入时间线。
 	b.sendPanelOpenMessage(ctx, client, activated, panel)
 
@@ -645,6 +648,24 @@ func messageTime(event kook.Event) time.Time {
 // ---------------------------------------------------------------------------
 // 辅助
 // ---------------------------------------------------------------------------
+
+// notifyTicketCreated 在面板频道发送「仅开单人可见」的开单完成提示。
+//
+// KOOK 的临时消息（temp_target_id）只能在消息所在频道内对指定用户可见，
+// 因此提示必须发回按钮所在的面板频道；卡片内的 (chn) 频道提及即跳转链接。
+// 提示失败不影响工单本身（工单频道卡片已经发出），只记录警告。
+func (b *Bot) notifyTicketCreated(ctx context.Context, panelChannelID, userID string, t *store.Ticket) {
+	client, _, err := b.ready()
+	if err != nil {
+		return
+	}
+	if _, err := client.SendChannelMessage(ctx, panelChannelID, kook.MsgTypeCard, b.ticketCreatedCard(t), kook.MessageOptions{
+		TempTargetID: userID,
+	}); err != nil {
+		b.deps.Logger.Warn("发送开单完成提示失败",
+			"ticket_no", t.No, "channel_id", panelChannelID, "user_id", userID, "err", err)
+	}
+}
 
 // sendEphemeral 在频道内发送仅指定用户可见的提示。
 func (b *Bot) sendEphemeral(ctx context.Context, channelID, userID, markdown string) {

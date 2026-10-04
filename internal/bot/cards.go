@@ -91,6 +91,30 @@ func (b *Bot) ticketCard(t *store.Ticket, adminRoleIDs []string, closeValue, loc
 	return content
 }
 
+// ticketCreatedCard 生成开单完成提示卡片。
+//
+// 该卡片发往按钮所在的面板频道，并用 temp_target_id 限定「仅开单人可见」——
+// KOOK 的临时消息只在消息所在频道内对指定用户可见，所以不能发进工单频道。
+// 卡片里的 (chn) 频道提及会被客户端渲染成可点击链接，点击即可跳到工单频道。
+func (b *Bot) ticketCreatedCard(t *store.Ticket) string {
+	markdown := fmt.Sprintf(
+		"你的工单 **%s** 已创建完成，请前往 %s 与管理员沟通。",
+		t.No,
+		kook.MentionChannel(t.ChannelID),
+	)
+
+	card := kook.NewCard(kook.CardThemeSuccess).
+		Header("工单已创建完成").
+		KMarkdownSection(markdown)
+
+	content, err := kook.SingleCard(card)
+	if err != nil {
+		// 兜底：序列化失败时返回纯文本，避免静默丢提示。
+		return markdown
+	}
+	return content
+}
+
 // closedCard 生成关闭通知卡片（同时发往日志频道与开单人私聊）。
 func (b *Bot) closedCard(t *store.Ticket, actor ticket.Actor, note string) string {
 	closer := actor.ID

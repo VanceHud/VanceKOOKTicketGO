@@ -357,6 +357,50 @@ func TestOpenTicketSendsPanelOpenMessage(t *testing.T) {
 	}
 }
 
+// TestOpenTicketSendsEphemeralCreatedNotice 验证开单成功后会在面板频道发送
+// 一条仅开单人可见的完成提示，并带工单频道跳转链接。
+func TestOpenTicketSendsEphemeralCreatedNotice(t *testing.T) {
+	env := newBotEnv(t)
+
+	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
+
+	env.waitFor("工单创建完成", func() bool {
+		ticket := env.firstTicket()
+		return ticket != nil && ticket.Status == store.TicketOpen
+	})
+	opened := env.firstTicket()
+
+	var notices []string
+	for _, call := range env.mock.CallsOf("message/create") {
+		if fmt.Sprint(call.Params["target_id"]) != testPanelChan {
+			continue
+		}
+		if fmt.Sprint(call.Params["temp_target_id"]) != userAsker {
+			continue
+		}
+		if int(toFloat(call.Params["type"])) != kook.MsgTypeCard {
+			t.Fatalf("完成提示应以卡片消息发送，实际 type=%v", call.Params["type"])
+		}
+		notices = append(notices, fmt.Sprint(call.Params["content"]))
+	}
+	if len(notices) != 1 {
+		t.Fatalf("应在面板频道发送 1 条仅开单人可见的完成提示，实际 %d 条: %v", len(notices), notices)
+	}
+	for _, want := range []string{"已创建完成", opened.No, kook.MentionChannel(opened.ChannelID)} {
+		if !strings.Contains(notices[0], want) {
+			t.Fatalf("完成提示应包含 %q，实际: %s", want, notices[0])
+		}
+	}
+
+	// KOOK 的临时消息只在所在频道内可见，因此提示必须发回面板频道而非工单频道。
+	for _, call := range env.mock.CallsOf("message/create") {
+		if fmt.Sprint(call.Params["target_id"]) == opened.ChannelID &&
+			fmt.Sprint(call.Params["temp_target_id"]) == userAsker {
+			t.Fatal("完成提示不应发往工单频道")
+		}
+	}
+}
+
 // TestPanelOpenMessageNormalizesMarkdown 验证开单提示也做 KMarkdown 归一化：
 // 开单提示以普通文本消息发送（没有卡片 header 模块），标题只能降级成加粗。
 func TestPanelOpenMessageNormalizesMarkdown(t *testing.T) {
