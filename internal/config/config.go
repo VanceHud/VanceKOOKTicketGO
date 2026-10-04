@@ -85,8 +85,13 @@ const secretFileName = "app_secret"
 
 // Load 解析环境变量并校验配置。
 func Load() (*Config, error) {
+	port, err := parsePort(env("PORT", "8080"))
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Config{
-		Addr:             ":" + env("PORT", "8080"),
+		Addr:             ":" + strconv.Itoa(port),
 		DataDir:          env("DATA_DIR", "./data"),
 		SecureCookieMode: SecureCookieMode(strings.ToLower(env("COOKIE_SECURE", string(SecureCookieAuto)))),
 		AdminUsername:    env("ADMIN_USERNAME", "admin"),
@@ -124,19 +129,21 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("TICKET_TZ=%q 无法加载，请确认容器内已安装 tzdata: %w", c.TicketTZ, err)
 	}
 
-	if c.SessionIdleTTL, err = envDuration("SESSION_IDLE_HOURS", 12*time.Hour); err != nil {
+	// 注意：裸数字按变量名隐含的单位解释（例如 SESSION_IDLE_HOURS=12 表示 12 小时），
+	// 也接受 Go duration 字面量（如 "12h"、"168h"）。
+	if c.SessionIdleTTL, err = envDurationUnit("SESSION_IDLE_HOURS", 12*time.Hour, time.Hour); err != nil {
 		return nil, err
 	}
-	if c.SessionMaxTTL, err = envDuration("SESSION_MAX_DAYS", 7*24*time.Hour); err != nil {
+	if c.SessionMaxTTL, err = envDurationUnit("SESSION_MAX_DAYS", 7*24*time.Hour, 24*time.Hour); err != nil {
 		return nil, err
 	}
 	if c.LoginMaxFails, err = envInt("LOGIN_MAX_FAILS", 5); err != nil {
 		return nil, err
 	}
-	if c.LoginWindow, err = envDuration("LOGIN_WINDOW_MINUTES", 15*time.Minute); err != nil {
+	if c.LoginWindow, err = envDurationUnit("LOGIN_WINDOW_MINUTES", 15*time.Minute, time.Minute); err != nil {
 		return nil, err
 	}
-	if c.LoginLockFor, err = envDuration("LOGIN_LOCK_MINUTES", 15*time.Minute); err != nil {
+	if c.LoginLockFor, err = envDurationUnit("LOGIN_LOCK_MINUTES", 15*time.Minute, time.Minute); err != nil {
 		return nil, err
 	}
 
@@ -257,19 +264,33 @@ func envInt(key string, def int) (int, error) {
 	return v, nil
 }
 
-func envDuration(key string, def time.Duration) (time.Duration, error) {
+// envDurationUnit 解析时长类配置。
+//
+// 规则：纯数字按 unit 解释（unit 由变量名隐含，例如 SESSION_IDLE_HOURS 是小时），
+// 也可以直接写 Go duration 字面量（如 "12h"、"90m"）以显式指定单位。
+//
+// 之所以必须按变量名区分单位：早期实现把裸数字一律当分钟，
+// 导致 SESSION_IDLE_HOURS=12 / SESSION_MAX_DAYS=7 被解析成 12 分钟与 7 分钟，
+// 触发“空闲过期不能大于绝对过期”的校验，容器直接启动失败。
+func envDurationUnit(key string, def, unit time.Duration) (time.Duration, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
 		return def, nil
 	}
-	if v, err := strconv.Atoi(raw); err == nil {
-		return time.Duration(v) * time.Minute, nil
+	if value, err := strconv.Atoi(raw); err == nil {
+		if value < 0 {
+			return 0, fmt.Errorf("%s 不能为负数", key)
+		}
+		return time.Duration(value) * unit, nil
 	}
-	d, err := time.ParseDuration(raw)
+	parsed, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("%s 需要是分钟数或 Go duration（如 12h）: %w", key, err)
+		return 0, fmt.Errorf("%s 需要是数字（单位由变量名决定）或 Go duration（如 12h）: %w", key, err)
 	}
-	return d, nil
+	if parsed < 0 {
+		return 0, fmt.Errorf("%s 不能为负数", key)
+	}
+	return parsed, nil
 }
 
 func envBool(key string, def bool) (bool, error) {
@@ -284,6 +305,20 @@ func envBool(key string, def bool) (bool, error) {
 	default:
 		return false, fmt.Errorf("%s 需要是布尔值（1/0/true/false）", key)
 	}
+}
+
+// parsePort 校验并解析监听端口：必须是 1–65535 的整数。
+//
+// 早点失败比在 ListenAndServe 时才报错更友好（容器里表现为看不懂的监听错误）。
+func parsePort(raw string) (int, error) {
+	port, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("PORT 必须是数字，当前为 %q", raw)
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("PORT 必须在 1–65535 之间，当前为 %d", port)
+	}
+	return port, nil
 }
 
 func parseLogLevel(raw string) (slog.Level, error) {

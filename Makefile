@@ -44,6 +44,20 @@ build: frontend ## 构建单二进制到 bin/kook-ticket
 run: build ## 构建并运行（生产模式，需要 KOOK_TOKEN）
 	PORT=$(PORT) DATA_DIR=$(DATA_DIR) ./$(BIN)
 
+.PHONY: dist
+dist: frontend ## 交叉编译发布包（linux/amd64、linux/arm64、darwin/arm64）到 bin/
+	@mkdir -p bin
+	@version=$$(git describe --tags --always --dirty 2>/dev/null || echo dev); \
+	for target in linux/amd64 linux/arm64 darwin/arm64; do \
+		os=$${target%%/*}; arch=$${target##*/}; \
+		out=bin/kook-ticket-$$os-$$arch; \
+		echo "→ $$out"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath \
+			-ldflags="-s -w -X main.Version=$$version" -o $$out ./cmd/server || exit 1; \
+	done
+	@echo "完成："
+	@ls -lh bin/ | tail -n +2
+
 .PHONY: check
 check: ## 后端静态检查 + 前端类型检查与构建
 	@files=$$(gofmt -l .); if [ -n "$$files" ]; then echo "存在未格式化的 Go 文件（已列出，可执行 gofmt -w .）:"; echo "$$files"; exit 1; fi

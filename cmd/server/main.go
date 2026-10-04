@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -33,13 +34,26 @@ import (
 var Version = "0.1.0-milestone1"
 
 func main() {
-	if err := run(); err != nil {
+	// 运维子命令：忘记密码时的救援手段。
+	// 示例：kook-ticket -reset-password admin              （随机生成新密码并打印）
+	//      kook-ticket -reset-password admin -password 'xxx'
+	resetUser := flag.String("reset-password", "", "重置指定账号的密码后退出（运维用）")
+	newPassword := flag.String("password", "", "配合 -reset-password 使用：指定新密码，留空则随机生成")
+	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(Version)
+		return
+	}
+
+	if err := run(*resetUser, *newPassword); err != nil {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(resetUser, newPassword string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -72,6 +86,11 @@ func run() error {
 		logger.Error("数据库自检未通过，请检查数据文件", "result", result, "err", err)
 	} else {
 		logger.Debug("数据库自检通过", "path", cfg.DBPath)
+	}
+
+	// 运维模式：重置密码后直接退出，不启动 HTTP 服务与机器人。
+	if resetUser != "" {
+		return resetPassword(st, resetUser, newPassword, logger)
 	}
 
 	initResult, err := bootstrap.Init(st, cfg, logger)
@@ -189,6 +208,61 @@ func run() error {
 		logger.Error("优雅关闭超时", "err", err)
 	}
 	logger.Info("已退出")
+	return nil
+}
+
+// resetPassword 重置指定账号的密码（运维救援路径）。
+//
+// 行为：重置后要求首次登录改密，并立即吊销该账号的全部会话；
+// 未指定新密码时随机生成并打印一次。
+func resetPassword(st *store.Store, username, newPassword string, logger *slog.Logger) error {
+	user, err := st.Users.ByUsername(username)
+	if err != nil {
+		return fmt.Errorf("账号 %s 不存在（可在数据库中查看用户名，或用 ADMIN_USERNAME 重新初始化）", username)
+	}
+
+	generated := false
+	password := strings.TrimSpace(newPassword)
+	if password == "" {
+		password, err = auth.GeneratePassword()
+		if err != nil {
+			return fmt.Errorf("生成随机密码失败: %w", err)
+		}
+		generated = true
+	}
+	if err := auth.ValidatePasswordStrength(password); err != nil {
+		return fmt.Errorf("新密码不满足强度要求: %w", err)
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		return err
+	}
+
+	if err := st.Users.UpdateFields(user.ID, map[string]any{
+		"password_hash":        hash,
+		"must_change_password": true,
+		"updated_at":           store.Now(),
+	}); err != nil {
+		return err
+	}
+	// 密码已变更：吊销该账号的全部会话，避免旧会话继续可用。
+	if err := st.Sessions.DeleteForUser(user.ID); err != nil {
+		logger.Warn("吊销旧会话失败", "user", user.Username, "err", err)
+	}
+	_ = st.Audit.Write(&store.AuditLog{
+		Actor:     "cli",
+		ActorType: store.ActorTypeBot,
+		Action:    "auth.password.reset",
+		Target:    user.Username,
+		Detail:    "通过命令行重置密码",
+		CreatedAt: store.Now(),
+	})
+
+	if generated {
+		fmt.Printf("已重置账号 %s 的密码（首次登录需改密）：\n\n    %s\n\n", user.Username, password)
+	} else {
+		fmt.Printf("已重置账号 %s 的密码（首次登录需改密）。\n", user.Username)
+	}
 	return nil
 }
 

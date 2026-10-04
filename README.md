@@ -61,6 +61,10 @@ KOOK 工单（Ticket）机器人，带自托管 WebUI 与 SQLite 数据库，**�
 | 9 | 报表定时导出（CSV 邮件/Webhook 推送）、按客服的自定义工作量统计 |
 | 10 | 多服务器（多 guild）支持、账号解绑接口 |
 
+> 📘 **部署到服务器请直接看 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**：
+> 从 KOOK 应用申请、权限与事件订阅，到 Docker Compose / 二进制 + systemd 部署、
+> 反向代理与 HTTPS、首次配置顺序、备份恢复、忘记密码救援与排错速查表。
+
 ---
 
 ## 2. 快速开始
@@ -185,15 +189,18 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 
 * SQLite（WAL 模式）保存在 `DATA_DIR`：`ticket.db`、`ticket.db-wal`、`ticket.db-shm`、`app_secret`。
 * 所有时间戳以 UTC 存库（驱动的时间文本格式定宽，因此文本比较等价于时间比较），界面按浏览器本地时区渲染。
-* 在线备份（不中断服务）：
+* 备份（两种方式，详见 [部署教程](docs/DEPLOYMENT.md#36-备份与恢复)）：
 
 ```bash
-# 宿主机未安装 sqlite3 时可通过容器执行
-docker compose exec kook-ticket sh -c 'ls -l /app/data'
+# 方式一：停服后整目录打包（最稳，包含 WAL；容器内没有 sqlite3 命令，所以不要在容器里做）
+docker compose stop && tar czf backup-$(date +%F).tar.gz data/ && docker compose start
+
+# 方式二：宿主机装有 sqlite3 时在线备份（不中断服务）
 sqlite3 ./data/ticket.db ".backup './data/backup-$(date +%F).db'"
 ```
 
-* 恢复：停止服务 → 用备份文件替换 `ticket.db` → 启动（同时删除遗留的 `-wal` / `-shm`）。
+* 别忘了备份 `data/app_secret`：它是加密 KOOK Token 的密钥。
+* 恢复：停止服务 → 删除 `ticket.db*` → 从备份恢复 → 启动。
 
 ---
 
@@ -228,8 +235,17 @@ sqlite3 ./data/ticket.db ".backup './data/backup-$(date +%F).db'"
 
 ```bash
 make check      # gofmt 检查 + go vet + go build + 前端类型检查与构建
-make test       # Go 测试（51 个用例，含 HTTP 层集成测试）
+make test       # Go 测试（含 HTTP 层集成测试与模拟 KOOK 平台的端到端链路测试）
 make docker     # 构建镜像
+make dist       # 交叉编译发布包（linux/amd64、linux/arm64、darwin/arm64）
+```
+
+运维常用命令：
+
+```bash
+./kook-ticket -version                       # 查看版本
+./kook-ticket -reset-password admin          # 忘记密码：随机生成新密码并打印
+./kook-ticket -reset-password admin -password 'NewPass@2026x'
 ```
 
 前端：
