@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,10 +61,27 @@ type Server struct {
 	RoleGrantFail     bool // 发放角色失败
 	GameCreateFail    bool // 新建游戏失败（模拟超出每日上限）
 	Compress          bool // 网关下发是否压缩（由 compress 查询参数决定）
+	// RejectResume 为真时拒绝带 resume 参数的续传（会话已过期）。
+	RejectResume bool
+	// SuppressResumeAck 为真时受理续传但不下发 resumeOK(s=6)，
+	// 用于模拟「续传实际没生效、事件仍留在旧会话」的平台异常。
+	SuppressResumeAck bool
+	// Delay 让每次 REST 调用慢下来，便于测试并发行为（默认 0）。
+	Delay time.Duration
+	// SuppressRateHeaders 为真时不返回限流响应头，
+	// 用于模拟“客户端还没学到额度”的场景。
+	SuppressRateHeaders bool
+
+	// inFlight / maxInFlight 记录同时进行的 REST 调用数，
+	// 供测试断言“这些接口是并发调用的”。
+	inFlight    atomic.Int64
+	maxInFlight atomic.Int64
 
 	upgrader websocket.Upgrader
 	conns    map[*websocket.Conn]bool
 	connMu   sync.Mutex
+	// wsConnects 记录每次网关连接的 query 参数，用于断言续传行为。
+	wsConnects []url.Values
 	// writeMu 串行化所有向客户端的写入。gorilla/websocket 不允许并发写，
 	// 推送事件（Push）与心跳 PONG、HELLO 可能同时在写，需要加锁。
 	writeMu  sync.Mutex
@@ -191,6 +210,12 @@ func (s *Server) CallsOf(endpoint string) []Call {
 	return out
 }
 
+// MaxInFlight 返回模拟平台同时处理过的最大 REST 调用数。
+func (s *Server) MaxInFlight() int64 { return s.maxInFlight.Load() }
+
+// ResetConcurrency 清零并发度统计，便于单个用例从零开始断言。
+func (s *Server) ResetConcurrency() { s.maxInFlight.Store(0) }
+
 // Channels 返回当前频道快照。
 func (s *Server) Channels() map[string]kook.Channel {
 	s.mu.Lock()
@@ -200,6 +225,28 @@ func (s *Server) Channels() map[string]kook.Channel {
 		out[id] = channel
 	}
 	return out
+}
+
+// WSConnects 返回每次网关连接的 query 参数（含 resume/session_id/sn）。
+func (s *Server) WSConnects() []url.Values {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]url.Values, len(s.wsConnects))
+	copy(out, s.wsConnects)
+	return out
+}
+
+// SendReconnect 向所有连接下发 s=5（平台要求重连），用于测试会话失效场景。
+func (s *Server) SendReconnect(code int, errText string) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	frame, _ := json.Marshal(map[string]any{
+		"s": kook.SignalReconnect,
+		"d": map[string]any{"code": code, "err": errText},
+	})
+	for conn := range s.conns {
+		_ = s.write(conn, websocket.TextMessage, frame)
+	}
 }
 
 // Push 向所有已连接的网关客户端推送一个事件。
@@ -233,6 +280,27 @@ func (s *Server) Push(eventType int, body any) {
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	endpoint := strings.TrimPrefix(r.URL.Path, "/api/v3/")
 	params := map[string]any{}
+
+	// 记录并发度：真实的开单流程会并发调用多个接口，测试用最大并发数来断言。
+	tracked := s.inFlight.Add(1)
+	for {
+		current := s.maxInFlight.Load()
+		if tracked <= current || s.maxInFlight.CompareAndSwap(current, tracked) {
+			break
+		}
+	}
+	defer s.inFlight.Add(-1)
+
+	if s.Delay > 0 {
+		time.Sleep(s.Delay)
+	}
+	if !s.SuppressRateHeaders {
+		// 与平台一致：每个受控响应都带限流头（客户端据此分桶限速）。
+		w.Header().Set("X-Rate-Limit-Limit", "50")
+		w.Header().Set("X-Rate-Limit-Remaining", "49")
+		w.Header().Set("X-Rate-Limit-Reset", "1")
+		w.Header().Set("X-Rate-Limit-Bucket", endpoint)
+	}
 
 	if r.Method == http.MethodPost {
 		_ = json.NewDecoder(r.Body).Decode(&params)
@@ -470,11 +538,31 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	query := r.URL.Query()
+	s.mu.Lock()
+	s.wsConnects = append(s.wsConnects, query)
+	s.mu.Unlock()
+
+	// 续传被拒：真实平台会用 HELLO 的错误码告知会话已失效（40107 session 过期）。
+	if query.Get("resume") == "1" && s.RejectResume {
+		hello, _ := json.Marshal(map[string]any{"s": kook.SignalHello, "d": map[string]any{"code": 40107}})
+		_ = s.write(conn, websocket.TextMessage, hello)
+		_ = conn.Close()
+		return
+	}
+
 	s.connMu.Lock()
 	s.conns[conn] = true
 	s.connMu.Unlock()
 
-	sessionID := fmt.Sprintf("sess-%d", atomic.AddInt64(&s.sessions, 1))
+	// 续传时沿用客户端给出的 session_id（与真实平台一致），否则新建会话。
+	sessionID := query.Get("session_id")
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("sess-%d", atomic.AddInt64(&s.sessions, 1))
+	} else if sn, err := strconv.ParseInt(query.Get("sn"), 10, 64); err == nil {
+		// 真实平台按会话继续编号：续传后的事件从客户端上报的 sn 往后排。
+		atomic.StoreInt64(&s.sn, sn)
+	}
 
 	// HELLO：真实平台会带上 session_id
 	hello, _ := json.Marshal(map[string]any{"s": kook.SignalHello, "d": map[string]any{
@@ -483,6 +571,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}})
 	if err := s.write(conn, websocket.TextMessage, hello); err != nil {
 		return
+	}
+
+	// 续传完成后平台会补发离线事件，并以 resumeOK(s=6) 结束。
+	if query.Get("resume") == "1" && !s.SuppressResumeAck {
+		resumeAck, _ := json.Marshal(map[string]any{"s": kook.SignalResumeAck, "d": map[string]any{"session_id": sessionID}})
+		if err := s.write(conn, websocket.TextMessage, resumeAck); err != nil {
+			return
+		}
 	}
 
 	// 处理客户端心跳：收到 PING 回复 PONG；收到 RESUME 回复 RESUME_ACK

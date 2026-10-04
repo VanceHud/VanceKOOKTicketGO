@@ -29,6 +29,10 @@ const (
 	SettingActivityAutoRestore = "activity_auto_restore"
 	// SettingInitializedAt 记录首次初始化时间。
 	SettingInitializedAt = "initialized_at"
+	// SettingGatewaySessionID / SettingGatewaySessionSN 持久化 KOOK 网关会话，
+	// 供进程重启（升级、重建容器）后带旧会话 resume 续传。
+	SettingGatewaySessionID = "kook_gateway_session_id"
+	SettingGatewaySessionSN = "kook_gateway_sn"
 	// SettingGuildName / SettingCategoryName 等仅用于界面展示，避免每次都请求 KOOK。
 	SettingGuildName      = "guild_name"
 	SettingCategoryName   = "category_name"
@@ -143,6 +147,41 @@ func (r *SettingsRepo) GetSecret(key string, appSecret []byte) (string, bool, er
 		return "", true, err
 	}
 	return plaintext, true, nil
+}
+
+// LoadGatewaySession 读取持久化的网关会话。
+//
+// 返回空 sessionID 表示没有可续传的会话（首次启动，或上次会话已被平台作废）。
+func (r *SettingsRepo) LoadGatewaySession() (string, int64, error) {
+	sessionID, _, err := r.Get(SettingGatewaySessionID)
+	if err != nil || sessionID == "" {
+		return "", 0, err
+	}
+	raw, _, err := r.Get(SettingGatewaySessionSN)
+	if err != nil {
+		return "", 0, err
+	}
+	sn, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		// 序号损坏时按 0 处理：平台会从头补发，最多重复几条事件，
+		// 好过整段会话无法续传。
+		return sessionID, 0, nil
+	}
+	return sessionID, sn, nil
+}
+
+// SaveGatewaySession 写入网关会话；sessionID 为空表示清空（会话已失效）。
+func (r *SettingsRepo) SaveGatewaySession(sessionID string, sn int64) error {
+	if sessionID == "" {
+		if err := r.Delete(SettingGatewaySessionID); err != nil {
+			return err
+		}
+		return r.Delete(SettingGatewaySessionSN)
+	}
+	if err := r.Set(SettingGatewaySessionID, sessionID); err != nil {
+		return err
+	}
+	return r.Set(SettingGatewaySessionSN, strconv.FormatInt(sn, 10))
 }
 
 // OutdateHours 返回工单空闲锁定阈值（小时）。

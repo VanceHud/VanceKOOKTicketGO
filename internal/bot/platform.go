@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"vancekookticket/internal/kook"
 	"vancekookticket/internal/store"
@@ -84,6 +85,8 @@ func (p *platform) NotifyReopened(ctx context.Context, t *store.Ticket, actor ti
 // 通知失败不应阻止“工单关闭”这一事实，否则会出现权限/频道状态与数据库不一致。
 // 因此这里只记录警告，并把能拿到的消息 ID 返回给业务层（用于后续 /tkcm 更新卡片）。
 //
+// 两处通知互不依赖，并发发送：关闭流程因此少等一个往返。
+//
 // 开单人私信被屏蔽时，会在日志频道额外发一张提醒卡片并写入时间线——
 // 这是开单环节不再发「私信探测」消息后的兜底，否则开单人会拿不到任何关闭记录。
 func (p *platform) NotifyClosed(ctx context.Context, t *store.Ticket, actor ticket.Actor, note string) (string, string, error) {
@@ -93,32 +96,45 @@ func (p *platform) NotifyClosed(ctx context.Context, t *store.Ticket, actor tick
 	}
 
 	content := p.b.closedCard(t, actor, note)
-	logMsgID, userMsgID := "", ""
+	var (
+		wg        sync.WaitGroup
+		logMsgID  string
+		userMsgID string
+	)
 
 	if cfg.LogChannelID != "" {
-		msg, err := client.SendChannelMessage(ctx, cfg.LogChannelID, kook.MsgTypeCard, content, kook.MessageOptions{})
-		if err != nil {
-			p.b.deps.Logger.Warn("向日志频道发送关闭通知失败",
-				"ticket_no", t.No, "channel_id", cfg.LogChannelID, "err", err)
-		} else {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			msg, err := client.SendChannelMessage(ctx, cfg.LogChannelID, kook.MsgTypeCard, content, kook.MessageOptions{})
+			if err != nil {
+				p.b.deps.Logger.Warn("向日志频道发送关闭通知失败",
+					"ticket_no", t.No, "channel_id", cfg.LogChannelID, "err", err)
+				return
+			}
 			logMsgID = msg.ID
-		}
+		}()
 	}
 
 	if t.UserID != "" {
-		msg, err := client.SendDirectMessage(ctx, t.UserID, kook.MsgTypeCard, content, kook.MessageOptions{})
-		switch {
-		case err == nil:
-			userMsgID = msg.ID
-		case isDirectMessageBlocked(err):
-			p.b.deps.Logger.Info("开单人未开启私聊，跳过关闭通知", "ticket_no", t.No, "user_id", t.UserID)
-			p.warnDirectMessageUndeliverable(ctx, t)
-		default:
-			p.b.deps.Logger.Warn("向开单人发送关闭通知失败",
-				"ticket_no", t.No, "user_id", t.UserID, "err", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			msg, err := client.SendDirectMessage(ctx, t.UserID, kook.MsgTypeCard, content, kook.MessageOptions{})
+			switch {
+			case err == nil:
+				userMsgID = msg.ID
+			case isDirectMessageBlocked(err):
+				p.b.deps.Logger.Info("开单人未开启私聊，跳过关闭通知", "ticket_no", t.No, "user_id", t.UserID)
+				p.warnDirectMessageUndeliverable(ctx, t)
+			default:
+				p.b.deps.Logger.Warn("向开单人发送关闭通知失败",
+					"ticket_no", t.No, "user_id", t.UserID, "err", err)
+			}
+		}()
 	}
 
+	wg.Wait()
 	return logMsgID, userMsgID, nil
 }
 

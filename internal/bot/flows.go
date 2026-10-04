@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"vancekookticket/internal/eventbus"
@@ -103,14 +104,28 @@ func (b *Bot) handleButtonClick(ctx context.Context, event kook.Event) {
 // maxChannelNameLength 是频道名中昵称部分的长度上限，避免超长频道名。
 const maxChannelNameLength = 20
 
+// grantTarget 描述一次频道权限下发。
+//
+// kind 只用于日志/提示文案（例如“全局管理员角色”），subjectType 是 KOOK 需要的
+// 主体类型（role_id / user_id）。
+type grantTarget struct {
+	subjectType string
+	value       string
+	kind        string
+}
+
 // openTicket 执行开单流程。
 //
-// 步骤（对应参考实现）：
+// 步骤：
 //  1. 校验按钮来自已启用的面板；一人同时只能有一个未关闭工单
 //  2. 分配工单编号并落库（pending）
-//  3. 在配置的隐藏分组下创建工单频道
-//  4. 下发频道权限：全局管理员角色、面板管理员角色、开单人
-//  5. 发送含「关闭 / 锁定」按钮的卡片，并把工单置为进行中
+//  3. 在配置的隐藏分组下创建工单频道，并把工单置为进行中
+//  4. 发含「关闭 / 锁定」按钮的卡片，同时并发下发频道权限（全局管理员角色、
+//     面板管理员角色、开单人）与面板开单提示
+//  5. 回到按钮所在频道发「仅开单人可见」的完成提示
+//
+// 第 4 步之所以并发：这些动作互不依赖，串行执行会让用户白等好几个往返；
+// 对平台的调用频率交给限流器（按桶额度）控制，而不是用固定 sleep 拖延。
 //
 // 这里刻意不做「私信可用性探测」：KOOK 没有探测接口，只能真发一条私信，
 // 用户会看到它一闪而过（删除失败时还会长期留在私信里）。
@@ -118,9 +133,12 @@ const maxChannelNameLength = 20
 //
 // panelID 来自按钮签名（旧卡片为 0），用于在同一频道的多张面板卡片中定位实际点击的那一张。
 func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, userInfo kook.User, panelID uint) {
-	// 同一时间只处理一个开单，避免并发建频道导致编号/状态错乱。
-	b.openLock.Lock()
-	defer b.openLock.Unlock()
+	started := time.Now()
+
+	// 同一个用户同时只能有一个未关闭工单：按用户加锁，避免连点重复建频道；
+	// 不同用户的开单流程互不阻塞（旧实现用全局锁，第二个用户要等第一个人跑完）。
+	unlock := b.openLocks.Lock("open:" + userID)
+	defer unlock()
 
 	client, cfg, err := b.ready()
 	if err != nil {
@@ -172,37 +190,10 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		b.notifyDebug(ctx, fmt.Sprintf("创建工单频道失败：%s（请确认机器人拥有「管理频道」权限，且分组 ID 正确）", err.Error()))
 		return
 	}
+	channelElapsed := time.Since(started)
 
-	// 权限下发：全局管理员角色 + 面板角色 + 开单人本身
-	adminRoles, err := b.deps.Store.Roles.ListAdmin()
-	if err != nil {
-		b.deps.Logger.Error("读取全局管理员角色失败", "err", err)
-	}
-	roleIDs := make([]string, 0, len(adminRoles)+len(panel.Roles))
-	for _, role := range adminRoles {
-		if err := b.grantChannelAccess(ctx, channel.ID, "role_id", role.RoleID); err != nil {
-			b.deps.Logger.Warn("下发全局管理员角色权限失败", "role_id", role.RoleID, "err", err)
-		}
-		roleIDs = append(roleIDs, role.RoleID)
-	}
-	for _, role := range panel.Roles {
-		if err := b.grantChannelAccess(ctx, channel.ID, "role_id", role.RoleID); err != nil {
-			b.deps.Logger.Warn("下发面板角色权限失败", "role_id", role.RoleID, "err", err)
-		}
-		roleIDs = append(roleIDs, role.RoleID)
-	}
-	if err := b.grantChannelAccess(ctx, channel.ID, "user_id", userID); err != nil {
-		b.deps.Logger.Error("下发开单人频道权限失败", "ticket_no", pending.No, "err", err)
-		b.notifyDebug(ctx, "下发开单人频道权限失败："+err.Error())
-	}
-
-	closeValue := b.encodeButton(actionClose, pending.No, channel.ID, 0)
-	lockValue := b.encodeButton(actionLock, pending.No, channel.ID, 0)
-	card := b.ticketCard(pending, roleIDs, closeValue, lockValue)
-	if _, err := client.SendChannelMessage(ctx, channel.ID, kook.MsgTypeCard, card, kook.MessageOptions{}); err != nil {
-		b.deps.Logger.Warn("发送工单卡片失败", "ticket_no", pending.No, "err", err)
-	}
-
+	// 频道建好即把工单置为进行中：后面的权限下发与消息发送都不影响“工单已可用”，
+	// 用户的等待时间因此只取决于建频道 + 发卡片 + 发提示这几步。
 	activated, err := b.deps.Tickets.Activate(ctx, pending.No, channel.ID)
 	if err != nil {
 		b.deps.Logger.Error("激活工单失败", "ticket_no", pending.No, "err", err)
@@ -210,11 +201,60 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		return
 	}
 
-	// 回到按钮所在的面板频道，给开单人一条「仅自己可见」的完成提示与频道跳转链接。
-	b.notifyTicketCreated(ctx, panelChannelID, userID, activated)
+	// 权限下发目标：全局管理员角色 + 面板角色 + 开单人本身。
+	adminRoles, err := b.deps.Store.Roles.ListAdmin()
+	if err != nil {
+		b.deps.Logger.Error("读取全局管理员角色失败", "err", err)
+	}
+	grants := make([]grantTarget, 0, len(adminRoles)+len(panel.Roles)+1)
+	roleIDs := make([]string, 0, len(adminRoles)+len(panel.Roles))
+	for _, role := range adminRoles {
+		grants = append(grants, grantTarget{"role_id", role.RoleID, "全局管理员角色"})
+		roleIDs = append(roleIDs, role.RoleID)
+	}
+	for _, role := range panel.Roles {
+		grants = append(grants, grantTarget{"role_id", role.RoleID, "面板角色"})
+		roleIDs = append(roleIDs, role.RoleID)
+	}
+	grants = append(grants, grantTarget{"user_id", userID, "开单人"})
 
-	// 面板自定义的开单提示：独立 KMarkdown 消息，发送成功后写入时间线。
-	b.sendPanelOpenMessage(ctx, client, activated, panel)
+	closeValue := b.encodeButton(actionClose, pending.No, channel.ID, 0)
+	lockValue := b.encodeButton(actionLock, pending.No, channel.ID, 0)
+	card := b.ticketCard(activated, roleIDs, closeValue, lockValue)
+
+	// 卡片先发：频道里出现工单卡片是“开单成功”最直观的信号。
+	if _, err := client.SendChannelMessage(ctx, channel.ID, kook.MsgTypeCard, card, kook.MessageOptions{}); err != nil {
+		b.deps.Logger.Warn("发送工单卡片失败", "ticket_no", activated.No, "err", err)
+	}
+	cardElapsed := time.Since(started)
+
+	// 权限下发与面板开单提示并发：互不依赖，没必要串行等待。
+	// 并发度由限流器按平台的桶额度控制，不再用固定 sleep 硬拖延。
+	var wg sync.WaitGroup
+	for _, grant := range grants {
+		wg.Add(1)
+		go func(grant grantTarget) {
+			defer wg.Done()
+			if err := b.grantChannelAccess(ctx, channel.ID, grant.subjectType, grant.value); err != nil {
+				b.deps.Logger.Warn("下发频道权限失败",
+					"ticket_no", activated.No, "kind", grant.kind, "type", grant.subjectType,
+					"value", grant.value, "err", err)
+				if grant.subjectType == "user_id" {
+					b.notifyDebug(ctx, "下发开单人频道权限失败："+err.Error())
+				}
+			}
+		}(grant)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		b.sendPanelOpenMessage(ctx, client, activated, panel)
+	}()
+	wg.Wait()
+	grantsElapsed := time.Since(started)
+
+	// 最后回到按钮所在的面板频道，给开单人一条「仅自己可见」的完成提示与频道跳转链接。
+	b.notifyTicketCreated(ctx, panelChannelID, userID, activated)
 
 	b.deps.Store.Audit.Write(&store.AuditLog{
 		Actor:     userInfo.FullName(),
@@ -224,7 +264,11 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		Detail:    fmt.Sprintf("创建工单频道 %s", channel.ID),
 		CreatedAt: store.Now(),
 	})
-	b.deps.Logger.Info("工单已创建", "ticket_no", activated.No, "channel_id", channel.ID, "user", userInfo.FullName())
+	b.deps.Logger.Info("工单已创建",
+		"ticket_no", activated.No, "channel_id", channel.ID, "user", userInfo.FullName(),
+		"roles", len(grants), "elapsed", time.Since(started).Round(time.Millisecond).String(),
+		"channel_ms", channelElapsed.Milliseconds(), "card_ms", cardElapsed.Milliseconds(),
+		"grants_ms", grantsElapsed.Milliseconds(), "notice_ms", (time.Since(started) - grantsElapsed).Milliseconds())
 }
 
 // panelForOpen 定位开单按钮所属的面板。
@@ -264,6 +308,10 @@ func (b *Bot) sendPanelOpenMessage(ctx context.Context, client *kook.Client, t *
 }
 
 // grantChannelAccess 为频道内的角色/用户下发“可看可发”权限。
+//
+// KOOK 需要先 create 出权限覆写记录，再 update 权限位，两步必须按顺序；
+// 但不同主体之间可以并发，具体并发度由限流器按平台回报的桶额度决定
+// （旧实现在每个主体之间硬 sleep 120ms，纯粹是白等）。
 func (b *Bot) grantChannelAccess(ctx context.Context, channelID, subjectType, value string) error {
 	client, _, err := b.ready()
 	if err != nil {
@@ -273,15 +321,7 @@ func (b *Bot) grantChannelAccess(ctx context.Context, channelID, subjectType, va
 		b.deps.Logger.Debug("创建频道权限覆写失败（可能已存在）",
 			"channel_id", channelID, "type", subjectType, "err", err)
 	}
-	if err := client.ChannelRoleUpdate(ctx, channelID, subjectType, value, kook.PermissionAllText, 0); err != nil {
-		return err
-	}
-	// 权限接口有频率限制，逐个下发之间稍作停顿。
-	select {
-	case <-ctx.Done():
-	case <-time.After(120 * time.Millisecond):
-	}
-	return nil
+	return client.ChannelRoleUpdate(ctx, channelID, subjectType, value, kook.PermissionAllText, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -289,11 +329,11 @@ func (b *Bot) grantChannelAccess(ctx context.Context, channelID, subjectType, va
 // ---------------------------------------------------------------------------
 
 // closeTicket 处理关闭按钮。
+//
+// 同一张工单的并发操作由 ticket.Service 内部的按工单锁拦下，这里不再用全局锁：
+// 两位管理员关不同工单时不应该彼此等待。
 func (b *Bot) closeTicket(ctx context.Context, channelID, userID, ticketNo string) {
-	// 同一时间只处理一个关闭操作：关闭涉及“通知 + 删频道 + 落库”，并发会互相打架。
-	b.closeLock.Lock()
-	defer b.closeLock.Unlock()
-
+	started := time.Now()
 	t, ok := b.ticketForButton(ctx, channelID, userID, ticketNo)
 	if !ok {
 		return
@@ -309,7 +349,8 @@ func (b *Bot) closeTicket(ctx context.Context, channelID, userID, ticketNo strin
 		b.sendEphemeral(ctx, channelID, userID, "关闭工单失败："+friendlyError(err))
 		return
 	}
-	b.deps.Logger.Info("工单已关闭", "ticket_no", t.No, "by", actor.Name)
+	b.deps.Logger.Info("工单已关闭", "ticket_no", t.No, "by", actor.Name,
+		"elapsed", time.Since(started).Round(time.Millisecond).String())
 }
 
 // lockTicket 处理锁定按钮。
@@ -371,12 +412,23 @@ func (b *Bot) ticketForButton(ctx context.Context, channelID, userID, ticketNo s
 }
 
 // ticketActor 构造业务操作者。
+//
+// 昵称优先从带缓存的用户信息里取（权限判定刚刚查过，正常情况不会额外发请求），
+// 拿不到时退化为直接调用 user/view，最后退化为用 ID 展示。
 func (b *Bot) ticketActor(ctx context.Context, userID, channelID string) ticket.Actor {
-	name := userID
-	if client, _, err := b.ready(); err == nil {
-		if user, err := client.UserView(ctx, userID, ""); err == nil {
-			name = user.FullName()
+	name := ""
+	if user, err := b.userInfo(ctx, userID); err == nil {
+		name = user.FullName()
+	}
+	if name == "" {
+		if client, _, err := b.ready(); err == nil {
+			if user, err := client.UserView(ctx, userID, ""); err == nil {
+				name = user.FullName()
+			}
 		}
+	}
+	if name == "" {
+		name = userID
 	}
 	return ticket.Actor{ID: userID, Name: name, Source: "kook"}
 }

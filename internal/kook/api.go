@@ -50,16 +50,17 @@ func NewClient(opts Options) (*Client, error) {
 	}
 	httpClient := opts.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = defaultHTTPClient()
 	}
-	// 默认 4/s：低于 KOOK 的常见上限，留出余量给 WebUI 触发的主动操作。
+	// 默认 8/s：开单/关单会在一瞬间并发调用多个接口（建频道、下发权限、发卡片），
+	// 客户端侧保留一个总闸门，具体的“每秒多少次”交给平台的限流桶（响应头）来定。
 	rate := opts.RatePerSecond
 	if rate <= 0 {
-		rate = 4
+		rate = defaultRatePerSecond
 	}
 	burst := opts.Burst
 	if burst <= 0 {
-		burst = 4
+		burst = defaultBurst
 	}
 	logger := opts.Logger
 	if logger == nil {
@@ -77,6 +78,18 @@ func NewClient(opts Options) (*Client, error) {
 // BaseURL 返回当前 API 基础地址。
 func (c *Client) BaseURL() string { return c.baseURL }
 
+// defaultHTTPClient 构造适合并发调用的 HTTP 客户端。
+//
+// 默认的 http.DefaultTransport 每个 host 只保留 2 条空闲连接，而开单流程会
+// 并发调用多个接口：连接不够时每次都要重新做 TCP/TLS 握手，白白多出上百毫秒。
+func defaultHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 32
+	transport.MaxIdleConnsPerHost = 16
+	transport.IdleConnTimeout = 90 * time.Second
+	return &http.Client{Timeout: 15 * time.Second, Transport: transport}
+}
+
 // apiEnvelope 是 KOOK 的统一响应结构。
 type apiEnvelope struct {
 	Code    int             `json:"code"`
@@ -91,17 +104,26 @@ const maxAttempts = 3
 //
 // 说明：
 //   - POST 使用 JSON 请求体（KOOK 同时接受表单与 JSON，官方多语言 SDK 均使用 JSON）；
-//   - 遇到 429 会依据 Retry-After 退避重试，重试仍失败则返回 ErrRateLimited 包装的错误。
+//   - 请求前按「全局速率 + 该接口所属限流桶」排队；
+//   - 响应里的 X-Rate-Limit-* 只用于更新对应桶的额度，不会拖慢其它接口；
+//   - 遇到 429 会依据 Retry-After / X-Rate-Limit-Reset 退避重试。
 func (c *Client) call(ctx context.Context, method, endpoint string, params map[string]any, out any) error {
 	var lastErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if err := c.limiter.wait(ctx); err != nil {
+		key := c.limiter.keyFor(endpoint)
+		if err := c.limiter.acquire(ctx, key); err != nil {
 			return err
 		}
 
-		err := c.do(ctx, method, endpoint, params, out)
+		info, err := c.do(ctx, method, endpoint, params, out)
+		if info.found {
+			c.limiter.observe(endpoint, key, info)
+		} else {
+			c.limiter.release(key)
+		}
 		if err == nil {
+			c.limiter.success()
 			return nil
 		}
 		lastErr = err
@@ -111,11 +133,22 @@ func (c *Client) call(ctx context.Context, method, endpoint string, params map[s
 			return err
 		}
 
-		// 被限流：惩罚性降速后重试
+		// 被限流：临时降速后重试。等待时间取平台给出的窗口与指数退避中的较大者，
+		// 但不超过惩罚上限；惩罚只影响全局速率，不会永久压低。
 		backoff := time.Duration(attempt) * 2 * time.Second
+		if info.retryAfter > backoff {
+			backoff = info.retryAfter
+		}
+		if info.reset > backoff {
+			backoff = info.reset
+		}
+		if backoff > maxPenalty {
+			backoff = maxPenalty
+		}
 		c.limiter.penalize(backoff)
 		c.log.Warn("KOOK 接口被限流，稍后重试",
-			"endpoint", endpoint, "attempt", attempt, "backoff", backoff.String())
+			"endpoint", endpoint, "attempt", attempt, "backoff", backoff.String(),
+			"bucket", info.bucket, "global", info.global, "rate", c.limiter.currentRate())
 
 		select {
 		case <-ctx.Done():
@@ -126,17 +159,18 @@ func (c *Client) call(ctx context.Context, method, endpoint string, params map[s
 	return fmt.Errorf("%w: %v", ErrRateLimited, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, method, endpoint string, params map[string]any, out any) error {
+func (c *Client) do(ctx context.Context, method, endpoint string, params map[string]any, out any) (rateInfo, error) {
 	var (
-		req *http.Request
-		err error
+		req  *http.Request
+		err  error
+		info rateInfo
 	)
 
 	fullURL := c.baseURL + "/api/v3/" + strings.TrimPrefix(endpoint, "/")
 	if method == http.MethodPost {
 		payload, marshalErr := json.Marshal(nonNilMap(params))
 		if marshalErr != nil {
-			return fmt.Errorf("序列化请求参数失败: %w", marshalErr)
+			return info, fmt.Errorf("序列化请求参数失败: %w", marshalErr)
 		}
 		req, err = http.NewRequestWithContext(ctx, method, fullURL, bytes.NewReader(payload))
 		if err == nil {
@@ -156,7 +190,7 @@ func (c *Client) do(ctx context.Context, method, endpoint string, params map[str
 		req, err = http.NewRequestWithContext(ctx, method, fullURL, nil)
 	}
 	if err != nil {
-		return fmt.Errorf("构造请求失败: %w", err)
+		return info, fmt.Errorf("构造请求失败: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bot "+c.token)
@@ -164,24 +198,24 @@ func (c *Client) do(ctx context.Context, method, endpoint string, params map[str
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("请求 KOOK 接口失败: %w", err)
+		return info, fmt.Errorf("请求 KOOK 接口失败: %w", err)
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		_ = resp.Body.Close()
 	}()
 
-	c.observeRateHeaders(resp.Header)
+	info = extractRateInfo(resp.Header)
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return fmt.Errorf("读取响应失败: %w", err)
+		return info, fmt.Errorf("读取响应失败: %w", err)
 	}
 
 	var envelope apiEnvelope
 	if len(body) > 0 {
 		if err := json.Unmarshal(body, &envelope); err != nil {
-			return &APIError{
+			return info, &APIError{
 				HTTPStatus: resp.StatusCode,
 				Code:       -1,
 				Message:    fmt.Sprintf("响应不是合法 JSON（前 120 字节：%s）", truncateForLog(body)),
@@ -191,7 +225,7 @@ func (c *Client) do(ctx context.Context, method, endpoint string, params map[str
 	}
 
 	if resp.StatusCode >= 400 || envelope.Code != 0 {
-		return &APIError{
+		return info, &APIError{
 			HTTPStatus: resp.StatusCode,
 			Code:       envelope.Code,
 			Message:    strings.TrimSpace(envelope.Message),
@@ -201,25 +235,41 @@ func (c *Client) do(ctx context.Context, method, endpoint string, params map[str
 
 	if out != nil && len(envelope.Data) > 0 {
 		if err := json.Unmarshal(envelope.Data, out); err != nil {
-			return fmt.Errorf("解析 %s 响应失败: %w", endpoint, err)
+			return info, fmt.Errorf("解析 %s 响应失败: %w", endpoint, err)
 		}
 	}
-	return nil
+	return info, nil
 }
 
-// observeRateHeaders 读取 KOOK 的限流响应头（若存在），据此动态降速。
-func (c *Client) observeRateHeaders(header http.Header) {
-	limit, errLimit := strconv.ParseFloat(header.Get("X-Rate-Limit-Limit"), 64)
-	remaining, errRemaining := strconv.ParseFloat(header.Get("X-Rate-Limit-Remaining"), 64)
-	reset, errReset := strconv.ParseFloat(header.Get("X-Rate-Limit-Reset"), 64)
-	if errLimit != nil || errRemaining != nil {
-		return
+// extractRateInfo 解析 KOOK 的限流响应头。
+//
+// 平台文档给出的字段：Limit / Remaining / Reset（秒）/ Bucket，429 时还会有 Global。
+func extractRateInfo(header http.Header) rateInfo {
+	info := rateInfo{remaining: -1}
+	if raw := strings.TrimSpace(header.Get("X-Rate-Limit-Bucket")); raw != "" {
+		info.bucket = raw
+		info.found = true
 	}
-	window := 3 * time.Second
-	if errReset == nil && reset > 0 {
-		window = time.Duration(reset * float64(time.Second))
+	if limit, err := strconv.ParseFloat(header.Get("X-Rate-Limit-Limit"), 64); err == nil {
+		info.limit = limit
+		info.found = true
 	}
-	c.limiter.observeRemaining(remaining, limit, window)
+	if remaining, err := strconv.ParseFloat(header.Get("X-Rate-Limit-Remaining"), 64); err == nil {
+		info.remaining = remaining
+		info.found = true
+	}
+	if reset, err := strconv.ParseFloat(header.Get("X-Rate-Limit-Reset"), 64); err == nil && reset >= 0 {
+		info.reset = time.Duration(reset * float64(time.Second))
+		info.found = true
+	}
+	if raw := strings.TrimSpace(header.Get("X-Rate-Limit-Global")); raw != "" && raw != "0" && !strings.EqualFold(raw, "false") {
+		info.global = true
+		info.found = true
+	}
+	if retry, err := strconv.ParseFloat(header.Get("Retry-After"), 64); err == nil && retry > 0 {
+		info.retryAfter = time.Duration(retry * float64(time.Second))
+	}
+	return info
 }
 
 // asAPIError 是 errors.As 的薄封装，便于在包内直接判断错误类别。

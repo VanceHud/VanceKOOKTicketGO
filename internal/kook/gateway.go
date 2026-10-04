@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,14 +41,40 @@ type GatewayOptions struct {
 	// OnStatus 在连接状态变化时被调用。
 	OnStatus func(status GatewayStatus)
 
+	// SessionStore 可选：持久化 session_id 与已处理到的 sn。
+	//
+	// KOOK 的事件按会话投递：进程重启（升级、重建容器）时若不带上旧会话 resume，
+	// 平台会新建一个会话，而离线期间的事件仍会继续投递到尚未过期的旧会话，
+	// 表现为「WebUI 显示已连接，但点击按钮、发消息都没有任何反应」。
+	// 官方文档同样建议把 session_id 与 sn 落盘，以便代码升级重启后恢复会话。
+	// 传 nil 表示不做持久化（仅进程内断线续传）。
+	SessionStore SessionStore
+
 	// HeartbeatInterval 默认 30s（与官方文档一致）。
 	HeartbeatInterval time.Duration
 	// PongTimeout 默认 6s：超过该时间未收到 PONG 视为断线。
 	PongTimeout time.Duration
+	// ResumeSilenceTimeout 默认 60s：带旧会话续传时，若这段时间内既没有事件也收不到
+	// 平台的 resumeOK(s=6)，就认为这次续传并未生效（事件仍在旧会话里），
+	// 主动断开并改用全新会话重连。
+	ResumeSilenceTimeout time.Duration
+	// BaseBackoff 默认 2s：重连退避序列 2s、4s、8s…（与官方文档一致）。
+	BaseBackoff time.Duration
 	// MaxBackoff 默认 60s。
 	MaxBackoff time.Duration
 	// DialTimeout 默认 15s。
 	DialTimeout time.Duration
+}
+
+// SessionStore 持久化网关会话，用于跨进程重启（升级、重建容器）恢复会话。
+//
+// 网关在 HELLO 之后、以及每次 OnEvent 回调返回后写入 sn；续传时平台从该 sn
+// 之后补发事件。注意：若 OnEvent 只做入队（异步处理，见 bot 包的事件分发），
+// 崩溃时队列里尚未处理的事件不会被平台重新投递，这个取舍由调用方决定。
+type SessionStore interface {
+	LoadGatewaySession() (sessionID string, sn int64, err error)
+	// SaveGatewaySession 写入会话；sessionID 为空表示清空（会话已失效）。
+	SaveGatewaySession(sessionID string, sn int64) error
 }
 
 // Gateway 是 KOOK WebSocket 网关客户端。
@@ -56,7 +83,8 @@ type GatewayOptions struct {
 //  1. 获取网关地址（可带压缩）
 //  2. 连接后等待 HELLO，从中取得 session_id
 //  3. 每 30s 发送一次心跳 PING，6s 内未收到 PONG 视为超时
-//  4. 断线时使用 resume=1&session_id=..&sn=.. 续传，避免丢事件
+//  4. 断线时使用 resume=1&session_id=..&sn=.. 续传，避免丢事件；
+//     会话可通过 SessionStore 落库，进程重启后同样续传
 //  5. 失败按 2s、4s、8s… 指数退避重试，上限 60s
 type Gateway struct {
 	opts GatewayOptions
@@ -69,6 +97,14 @@ type Gateway struct {
 	eventsReceived atomic.Int64
 	attempt        atomic.Int32
 	lastError      atomic.Value // string
+
+	// 以下三个字段只服务于「续传是否真的生效」的检测，每次连接前重置：
+	// resumeAck 表示已收到平台补发完成信号 resumeOK(s=6)；
+	// lastEventAt 是最近一次收到事件或 resumeOK 的时间（心跳 PONG 不算）；
+	// resumeSilent 由看门狗置位，表示续传连接长时间没有任何下行数据。
+	resumeAck    atomic.Bool
+	lastEventAt  atomic.Int64
+	resumeSilent atomic.Bool
 
 	pongCh chan struct{}
 }
@@ -87,6 +123,12 @@ func NewGateway(opts GatewayOptions) (*Gateway, error) {
 	if opts.PongTimeout <= 0 {
 		opts.PongTimeout = 6 * time.Second
 	}
+	if opts.ResumeSilenceTimeout <= 0 {
+		opts.ResumeSilenceTimeout = 60 * time.Second
+	}
+	if opts.BaseBackoff <= 0 {
+		opts.BaseBackoff = 2 * time.Second
+	}
 	if opts.MaxBackoff <= 0 {
 		opts.MaxBackoff = 60 * time.Second
 	}
@@ -95,7 +137,25 @@ func NewGateway(opts GatewayOptions) (*Gateway, error) {
 	}
 	g := &Gateway{opts: opts, pongCh: make(chan struct{}, 1)}
 	g.lastError.Store("")
+	g.restoreSession()
 	return g, nil
+}
+
+// restoreSession 载入上次持久化的会话，让进程重启后仍能续传。
+func (g *Gateway) restoreSession() {
+	if g.opts.SessionStore == nil {
+		return
+	}
+	sessionID, sn, err := g.opts.SessionStore.LoadGatewaySession()
+	if err != nil {
+		g.opts.Logger.Warn("读取持久化的网关会话失败，将以全新会话连接", "err", err)
+		return
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	g.sessionID, g.lastSN = sessionID, sn
+	g.opts.Logger.Info("已恢复上次的网关会话，将断点续传", "session_id", sessionID, "sn", sn)
 }
 
 // Status 返回当前连接状态。
@@ -159,15 +219,91 @@ func (g *Gateway) backoff() time.Duration {
 	if attempt > 5 {
 		attempt = 5
 	}
-	d := 2 * time.Second * time.Duration(1<<uint(attempt))
+	d := g.opts.BaseBackoff * time.Duration(1<<uint(attempt))
 	if d > g.opts.MaxBackoff {
 		d = g.opts.MaxBackoff
 	}
 	return d
 }
 
+// persistSession 把当前会话与已处理到的 sn 写入持久化存储。
+//
+// 失败只记日志：落库是「重启后仍能收到事件」的增强，不应影响当前连接。
+func (g *Gateway) persistSession() {
+	if g.opts.SessionStore == nil {
+		return
+	}
+	g.mu.Lock()
+	sessionID, sn := g.sessionID, g.lastSN
+	g.mu.Unlock()
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	if err := g.opts.SessionStore.SaveGatewaySession(sessionID, sn); err != nil {
+		g.opts.Logger.Warn("持久化网关会话失败", "session_id", sessionID, "sn", sn, "err", err)
+	}
+}
+
+// clearSession 清空本地与持久化的会话记录。
+//
+// 使用场景：平台要求重连（s=5）、续传被平台拒绝（会话已过期）。
+// 此时必须彻底丢弃旧会话，否则每次重连都会带着同一个失效会话，
+// 平台侧看起来「已连接」，却永远收不到任何事件。
+func (g *Gateway) clearSession() {
+	g.mu.Lock()
+	g.sessionID, g.lastSN = "", 0
+	g.mu.Unlock()
+	if g.opts.SessionStore != nil {
+		if err := g.opts.SessionStore.SaveGatewaySession("", 0); err != nil {
+			g.opts.Logger.Warn("清空持久化的网关会话失败", "err", err)
+		}
+	}
+}
+
+// watchResumeSilence 监控一次续传是否真的生效。
+//
+// 平台受理 resume 后会补发离线事件，并以 resumeOK(s=6) 收尾。如果整条连接
+// 长时间连一个事件、一个 resumeOK 都没有，说明续传实际上挂在了旧会话上，
+// 平台侧依旧是「已连接」但永远不会投递事件（线上表现为点击按钮毫无反应）。
+// 这里只负责断开连接：清空会话与重建连接由 serve / Run 完成，
+// 这样即使看门狗晚一步醒来，也只会关掉自己那条已经废弃的连接。
+func (g *Gateway) watchResumeSilence(ctx context.Context, conn *websocket.Conn) {
+	interval := g.opts.ResumeSilenceTimeout / 4
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if g.resumeAck.Load() {
+			return
+		}
+		last := g.lastEventAt.Load()
+		if last > 0 && time.Since(time.Unix(0, last)) < g.opts.ResumeSilenceTimeout {
+			continue
+		}
+		g.resumeSilent.Store(true)
+		_ = conn.Close()
+		return
+	}
+}
+
 // serve 建立一次连接并处理消息，直到连接断开。
 func (g *Gateway) serve(ctx context.Context) error {
+	// 重置续传检测状态：resumeOK 与事件都会刷新 lastEventAt。
+	g.resumeAck.Store(false)
+	g.resumeSilent.Store(false)
+	g.lastEventAt.Store(time.Now().UnixNano())
+
 	gatewayURL, err := g.opts.Client.GatewayURL(ctx, g.opts.Compress)
 	if err != nil {
 		return fmt.Errorf("获取网关地址失败: %w", err)
@@ -220,12 +356,21 @@ func (g *Gateway) serve(ctx context.Context) error {
 		_ = json.Unmarshal(hello.Data, &helloData)
 	}
 	if helloData.Code != 0 {
+		if sessionID != "" {
+			// 续传被拒（会话已过期、sn 无效等）：清空本地会话，
+			// 下一次连接改用全新会话，否则会永远带着同一个失效会话重试。
+			g.opts.Logger.Warn("续传网关会话被平台拒绝，将改用全新会话",
+				"session_id", sessionID, "code", helloData.Code)
+			g.clearSession()
+		}
 		return fmt.Errorf("握手被平台拒绝：code=%d", helloData.Code)
 	}
 
 	g.mu.Lock()
 	g.sessionID = helloData.SessionID
 	g.mu.Unlock()
+	// 握手成功即落库：此时起的任何事件丢失都能靠下一次 resume 补回来。
+	g.persistSession()
 
 	g.connectedAt.Store(time.Now().UnixNano())
 	g.attempt.Store(0)
@@ -238,14 +383,28 @@ func (g *Gateway) serve(ctx context.Context) error {
 	defer cancelHeartbeat()
 	go g.heartbeatLoop(heartbeatCtx, conn)
 
+	// 续传保护：平台受理 resume 后会补发离线事件并以 resumeOK 收尾。
+	// 若一直什么都没有，说明续传没生效，主动断开改用全新会话。
+	if sessionID != "" {
+		watchCtx, stopWatch := context.WithCancel(ctx)
+		defer stopWatch()
+		go g.watchResumeSilence(watchCtx, conn)
+	}
+
 	for {
 		frame, err := g.readFrame(conn)
 		if err != nil {
+			if g.resumeSilent.Load() {
+				g.opts.Logger.Warn("续传会话长时间没有任何下行数据，改用全新会话重连",
+					"session_id", sessionID, "silence_timeout", g.opts.ResumeSilenceTimeout.String())
+				g.clearSession()
+			}
 			return err
 		}
 
 		switch frame.Signal {
 		case SignalEvent:
+			g.lastEventAt.Store(time.Now().UnixNano())
 			g.mu.Lock()
 			if frame.SN > g.lastSN {
 				g.lastSN = frame.SN
@@ -264,6 +423,9 @@ func (g *Gateway) serve(ctx context.Context) error {
 			if g.opts.OnEvent != nil {
 				g.opts.OnEvent(ctx, event)
 			}
+			// 回调返回后立即落库：崩溃/重启时从这条事件之后续传。
+			// （OnEvent 若只是入队异步处理，见 SessionStore 的说明。）
+			g.persistSession()
 
 		case SignalPong:
 			select {
@@ -272,10 +434,16 @@ func (g *Gateway) serve(ctx context.Context) error {
 			}
 
 		case SignalReconnect:
-			// 平台要求重连，保留 session 以便续传
+			// 平台要求重连：按官方文档清空 sn 与会话后回到第 1 步。
+			// 带着已失效的会话反复 resume，平台侧依旧显示已连接，
+			// 但不会再有任何事件——必须彻底重建会话。
+			g.opts.Logger.Warn("平台要求重新建立连接，已清空本地网关会话")
+			g.clearSession()
 			return fmt.Errorf("平台要求重连（s=5）")
 
 		case SignalResumeAck:
+			g.resumeAck.Store(true)
+			g.lastEventAt.Store(time.Now().UnixNano())
 			g.opts.Logger.Info("断线续传成功")
 
 		case SignalHello:

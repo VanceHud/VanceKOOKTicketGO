@@ -60,7 +60,12 @@ func Open(path string) (*Store, error) {
 		}
 	}
 
-	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)", path)
+	// _txlock=immediate：让每个写事务在 BEGIN 时就拿到写锁。
+	// WAL 下默认的 deferred 事务会在「先读后写」时因期间已有其它连接提交而直接报
+	// SQLITE_BUSY_SNAPSHOT（database is locked 517），busy_timeout 对它是无效的。
+	// 机器人现在会并发处理多个工单流程（开单权限下发 / 消息归档 / 关闭），这个参数
+	// 让写入竞争回到可重试的 busy 等待上。
+	dsn := fmt.Sprintf("%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate", path)
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		// 把 SQLite 的唯一约束错误翻译成 gorm.ErrDuplicatedKey，编号冲突重试依赖它。
 		TranslateError: true,

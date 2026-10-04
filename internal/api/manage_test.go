@@ -551,6 +551,13 @@ func TestStatsAnalyticsAggregates(t *testing.T) {
 	now := store.Now()
 	loc := env.config.Location
 
+	// 样例按「本地自然日」摆放，而不是相对 now 的偏移：
+	// 在凌晨（本地时间 0～3 点）跑测试时，now-3h 这类时间会落到昨天，
+	// 让「今日/昨日」断言随机失败。这里以今天零点为基准，偏移量固定。
+	localNow := now.In(loc)
+	dayStart := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, loc)
+	at := func(offset time.Duration) time.Time { return dayStart.Add(offset) }
+
 	// 构造 4 个工单：3 个已关闭（两个由“客服小林”关闭）、1 个进行中
 	type seedSpec struct {
 		status       string
@@ -560,14 +567,15 @@ func TestStatsAnalyticsAggregates(t *testing.T) {
 		closedBy     string
 		source       string
 	}
-	closedAt1 := now.Add(-2 * time.Hour)
-	closedAt2 := now.Add(-5 * time.Hour)
-	replyAt := now.Add(-time.Hour)
+	closedAt1 := at(25 * time.Minute)
+	closedAt2 := at(40 * time.Minute)
+	closedAt3 := at(-1 * time.Hour)
+	replyAt := at(15 * time.Minute)
 	specs := []seedSpec{
-		{store.TicketClosed, now.Add(-3 * time.Hour), &closedAt1, &replyAt, "客服小林", "30001"},
-		{store.TicketClosed, now.Add(-8 * time.Hour), &closedAt2, nil, "客服小林", "30001"},
-		{store.TicketClosed, now.Add(-26 * time.Hour), &closedAt2, nil, "客服小张", "30002"},
-		{store.TicketOpen, now.Add(-30 * time.Minute), nil, nil, "", "30001"},
+		{store.TicketClosed, at(5 * time.Minute), &closedAt1, &replyAt, "客服小林", "30001"},
+		{store.TicketClosed, at(30 * time.Minute), &closedAt2, nil, "客服小林", "30001"},
+		{store.TicketClosed, at(-2 * time.Hour), &closedAt3, nil, "客服小张", "30002"},
+		{store.TicketOpen, at(50 * time.Minute), nil, nil, "", "30001"},
 	}
 
 	for i, spec := range specs {

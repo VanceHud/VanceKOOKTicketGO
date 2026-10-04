@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"vancekookticket/internal/eventbus"
+	"vancekookticket/internal/keyedlock"
 	"vancekookticket/internal/kook"
 	"vancekookticket/internal/store"
 	"vancekookticket/internal/ticket"
@@ -103,9 +104,14 @@ type Bot struct {
 	roleCache    *ttlCache
 	channelCache *ttlCache
 
-	// ticketLocks 保证同一频道/用户的工单操作串行执行。
-	openLock  sync.Mutex
-	closeLock sync.Mutex
+	// openLocks 保证「同一个用户同时只开一单」：按用户加锁，不同用户可以并行开单。
+	openLocks keyedlock.Locks
+
+	// events 把网关事件从读取协程解耦到分片处理协程（见 dispatch.go）。
+	events *eventDispatcher
+
+	// gatewayDone 在网关协程退出时关闭，供 Stop 等待连接真正断开。
+	gatewayDone chan struct{}
 }
 
 // New 创建机器人实例。
@@ -137,6 +143,21 @@ func New(deps Deps) (*Bot, error) {
 		roleCache:    newTTLCache(30 * time.Second),
 		channelCache: newTTLCache(60 * time.Second),
 	}, nil
+}
+
+// 网关事件的分片处理见 dispatch.go。
+
+// enqueueEvent 是网关的 OnEvent 回调：只做入队，绝不阻塞读取协程。
+func (b *Bot) enqueueEvent(ctx context.Context, event kook.Event) {
+	b.mu.RLock()
+	dispatcher := b.events
+	b.mu.RUnlock()
+	if dispatcher == nil {
+		// 尚未初始化（理论上不会发生）：退化为同步处理，保证不丢事件。
+		b.handleEvent(ctx, event)
+		return
+	}
+	dispatcher.enqueue(ctx, event)
 }
 
 // Start 建立连接并开始处理事件。
@@ -194,7 +215,11 @@ func (b *Bot) Start(ctx context.Context) error {
 		Compress:          true,
 		Logger:            b.deps.Logger,
 		HeartbeatInterval: b.deps.HeartbeatTick,
-		OnEvent:           b.handleEvent,
+		OnEvent:           b.enqueueEvent,
+		// 会话落库：升级/重建容器后仍带旧会话 resume。
+		// 若不以旧会话续传，平台会把事件继续投递到尚未过期的旧会话上，
+		// 表现为「WebUI 显示已连接，但点击按钮没有任何反应」。
+		SessionStore: b.deps.Store.Settings,
 		OnStatus: func(status kook.GatewayStatus) {
 			b.setStatus(func(s *Status) {
 				s.Connected = status.Connected
@@ -221,11 +246,16 @@ func (b *Bot) Start(ctx context.Context) error {
 	// 建连准备工作已完成，从调用方上下文中“解绑”取消信号（保留其取值）：
 	// 连接的存活只由 Stop 决定，不再随触发启动的请求结束而中断。
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	gatewayDone := make(chan struct{})
+	dispatcher := newEventDispatcher(eventShards, eventQueueSize, b.handleEvent, nil, b.deps.Logger)
+	dispatcher.start(runCtx)
 
 	b.mu.Lock()
 	b.client = client
 	b.gateway = gateway
 	b.stop = cancel
+	b.gatewayDone = gatewayDone
+	b.events = dispatcher
 	b.botUser = *me
 	b.guild = guild
 	b.config = cfg
@@ -246,6 +276,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	b.deps.Tickets.SetPlatform(&platform{b: b})
 
 	go func() {
+		defer close(gatewayDone)
 		defer func() {
 			b.deps.Tickets.SetPlatform(ticket.NewNoopPlatform(b.deps.Logger))
 			b.setStatus(func(s *Status) {
@@ -265,13 +296,27 @@ func (b *Bot) Start(ctx context.Context) error {
 }
 
 // Stop 断开连接。
+//
+// 会等到网关协程真正退出（socket 已关闭）再返回：WebUI 的「重新连接」
+// 紧随其后就会建立新连接，若旧连接仍在，平台上会同时存在两个会话，
+// 事件可能被投递到即将消失的那一个。超时（5s）只记录日志，不阻塞退出。
 func (b *Bot) Stop() {
 	b.mu.Lock()
 	stop := b.stop
+	done := b.gatewayDone
 	b.stop = nil
+	b.gatewayDone = nil
 	b.mu.Unlock()
 	if stop != nil {
 		stop()
+	}
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		b.deps.Logger.Warn("等待网关断开超时，继续后续操作")
 	}
 }
 
@@ -582,11 +627,13 @@ func (b *Bot) decodeButton(raw, channelID string) (*buttonValue, error) {
 // 权限判定
 // ---------------------------------------------------------------------------
 
-// userRoles 返回用户在服务器中的角色 ID（30s 缓存）。
-func (b *Bot) userRoles(ctx context.Context, userID string) ([]int64, error) {
+// userInfo 返回用户在服务器中的信息（30s 缓存）。
+//
+// 权限判定与卡片文案都要用到它，缓存后一次工单操作只需一次 user/view。
+func (b *Bot) userInfo(ctx context.Context, userID string) (*kook.User, error) {
 	key := "user:" + userID
 	if cached, ok := b.roleCache.get(key); ok {
-		return cached.([]int64), nil
+		return cached.(*kook.User), nil
 	}
 	client, cfg, err := b.ready()
 	if err != nil {
@@ -596,7 +643,16 @@ func (b *Bot) userRoles(ctx context.Context, userID string) ([]int64, error) {
 	if err != nil {
 		return nil, err
 	}
-	b.roleCache.set(key, user.Roles)
+	b.roleCache.set(key, user)
+	return user, nil
+}
+
+// userRoles 返回用户在服务器中的角色 ID（30s 缓存）。
+func (b *Bot) userRoles(ctx context.Context, userID string) ([]int64, error) {
+	user, err := b.userInfo(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
 	return user.Roles, nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"vancekookticket/internal/eventbus"
+	"vancekookticket/internal/keyedlock"
 	"vancekookticket/internal/store"
 )
 
@@ -67,6 +68,9 @@ type Service struct {
 	loc      *time.Location
 	// outdateHours 返回工单空闲锁定阈值（小时），从配置实时读取。
 	outdateHours func() int
+	// locks 按工单编号串行化状态变更：KOOK 按钮与 WebUI 可能同时操作同一张工单，
+	// 而不同工单之间互不阻塞（旧实现在机器人侧用一把全局锁，第二个工单要等第一个跑完）。
+	locks keyedlock.Locks
 }
 
 // NewService 创建工单服务。
@@ -173,6 +177,9 @@ func (s *Service) logWarn(message, no string, err error) {
 // 顺序说明：通知与删除失败会直接返回错误、不改数据库状态，
 // 避免出现“记录已关闭但频道仍在”的不一致；重复点击关闭会被状态校验拦下。
 func (s *Service) Close(ctx context.Context, no string, actor Actor, note string) (*store.Ticket, error) {
+	unlock := s.locks.Lock("ticket:" + no)
+	defer unlock()
+
 	t, err := s.store.Tickets.ByNo(no)
 	if err != nil {
 		return nil, err
@@ -229,6 +236,9 @@ func (s *Service) Close(ctx context.Context, no string, actor Actor, note string
 // Lock 锁定工单：开单人不可发言，工单仍可见。
 // reason 取 store.LockReasonManual 或 store.LockReasonTimeout。
 func (s *Service) Lock(ctx context.Context, no string, actor Actor, reason string) (*store.Ticket, error) {
+	unlock := s.locks.Lock("ticket:" + no)
+	defer unlock()
+
 	if reason == "" {
 		reason = store.LockReasonManual
 	}
@@ -279,6 +289,9 @@ func (s *Service) Lock(ctx context.Context, no string, actor Actor, reason strin
 
 // Reopen 重新激活已锁定的工单。
 func (s *Service) Reopen(ctx context.Context, no string, actor Actor) (*store.Ticket, error) {
+	unlock := s.locks.Lock("ticket:" + no)
+	defer unlock()
+
 	t, err := s.store.Tickets.ByNo(no)
 	if err != nil {
 		return nil, err

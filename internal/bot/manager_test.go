@@ -14,7 +14,7 @@ import (
 )
 
 // newManagerEnv 搭好「模拟平台 + 数据库 + Manager」，用于验证连接生命周期。
-func newManagerEnv(t *testing.T) (*Manager, *kooktest.Server) {
+func newManagerEnv(t *testing.T) (*Manager, *kooktest.Server, *store.Store) {
 	t.Helper()
 
 	st, err := store.Open(t.TempDir() + "/ticket.db")
@@ -58,7 +58,7 @@ func newManagerEnv(t *testing.T) (*Manager, *kooktest.Server) {
 		t.Fatalf("创建机器人管理器失败: %v", err)
 	}
 	t.Cleanup(manager.Stop)
-	return manager, mock
+	return manager, mock, st
 }
 
 // waitForStatus 轮询等待状态满足条件。
@@ -82,7 +82,7 @@ func waitForStatus(t *testing.T, read func() Status, description string, conditi
 // “获取网关地址失败: 请求 KOOK 接口失败: Get .../gateway/index: context canceled”，
 // 且连接不会再自行恢复。
 func TestManagerStartIgnoresRequestContextCancel(t *testing.T) {
-	manager, mock := newManagerEnv(t)
+	manager, mock, _ := newManagerEnv(t)
 
 	// 模拟一次 HTTP 请求触发的重连。
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
@@ -117,7 +117,7 @@ func TestManagerStartIgnoresRequestContextCancel(t *testing.T) {
 // TestManagerStopStillClosesGateway 确认「与请求上下文解绑」不等于无法停止：
 // Stop 之后网关必须真正退出，平台再推送事件也不会被处理。
 func TestManagerStopStillClosesGateway(t *testing.T) {
-	manager, mock := newManagerEnv(t)
+	manager, mock, _ := newManagerEnv(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -140,5 +140,43 @@ func TestManagerStopStillClosesGateway(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	if got := instance.Status().EventsHandled; got != handled {
 		t.Fatalf("Stop 之后仍在处理事件：%d → %d", handled, got)
+	}
+}
+
+// TestManagerRestartResumesPersistedSession 是回归测试：
+//
+// 重新连接（WebUI「重新连接」或容器重建）必须带上次的 session_id 续传。
+// 否则平台会新建一个会话，而离线期间的事件依旧投递给尚未过期的旧会话，
+// 线上表现为「WebUI 显示已连接，但点击创建工单没有任何反应」——
+// 手工点一次「重新连接」又恢复正常。
+func TestManagerRestartResumesPersistedSession(t *testing.T) {
+	manager, mock, st := newManagerEnv(t)
+
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("启动失败: %v", err)
+	}
+	t.Cleanup(manager.Stop)
+	waitForStatus(t, manager.Status, "网关连接建立", func(s Status) bool { return s.Connected })
+
+	sessionID, _, err := st.Settings.LoadGatewaySession()
+	if err != nil {
+		t.Fatalf("读取网关会话失败: %v", err)
+	}
+	if sessionID == "" {
+		t.Fatal("连接建立后应把会话落库，供重启后续传")
+	}
+
+	if err := manager.Restart(context.Background()); err != nil {
+		t.Fatalf("重连失败: %v", err)
+	}
+	waitForStatus(t, manager.Status, "重连完成", func(s Status) bool { return s.Connected })
+
+	connects := mock.WSConnects()
+	if len(connects) < 2 {
+		t.Fatalf("应观察到至少两次网关连接，实际 %d 次", len(connects))
+	}
+	last := connects[len(connects)-1]
+	if last.Get("resume") != "1" || last.Get("session_id") != sessionID {
+		t.Fatalf("重连应续传旧会话 %s，实际连接参数: %v", sessionID, last)
 	}
 }

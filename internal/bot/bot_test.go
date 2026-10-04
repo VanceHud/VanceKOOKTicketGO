@@ -159,6 +159,38 @@ func (e *botEnv) waitFor(description string, condition func() bool) {
 	e.t.Fatalf("等待超时：%s", description)
 }
 
+// waitTicketOpened 等待开单流程完整跑完，并返回工单记录。
+//
+// 工单在「建频道 → 下发权限 → 发卡片 → 激活」之后就已经是 open，
+// 但收尾还有「仅本人可见的完成提示」「面板自定义开单提示」与审计写入。
+// 只等 status == open 会在这些副作用落库前提前返回，让断言读到半成品状态
+// （-race 等较慢环境下必现）。审计里 ticket.open 有两条记录，
+// 只有流程末尾的「创建工单频道 …」才代表开单全部完成。
+func (e *botEnv) waitTicketOpened() *store.Ticket {
+	e.t.Helper()
+	var opened *store.Ticket
+	e.waitFor("开单流程完成", func() bool {
+		ticket := e.firstTicket()
+		if ticket == nil || ticket.Status != store.TicketOpen {
+			return false
+		}
+		opened = ticket
+		entries, _, err := e.store.Audit.List(store.AuditFilter{
+			Action: "ticket.open", Target: ticket.No, Page: 1, PageSize: 5,
+		})
+		if err != nil {
+			return false
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Detail, "创建工单频道") {
+				return true
+			}
+		}
+		return false
+	})
+	return opened
+}
+
 func (e *botEnv) user(id string) kook.User {
 	e.mock.AddUser(e.mockUser(id))
 	return e.mockUser(id)
@@ -208,17 +240,31 @@ func (e *botEnv) firstTicket() *store.Ticket {
 // 开单
 // ---------------------------------------------------------------------------
 
+// TestOpenTicketGrantsPermissionsConcurrently 是性能回归测试：
+//
+// 开单原本是纯串行的：建频道 → 每个主体「create + update + sleep 120ms」→ 发卡片 →
+// 发提示，一个开单要好几秒（线上实测 3～8 秒）。现在建完频道就置为 open，
+// 卡片、权限下发、面板提示并发执行，并发度交给平台限流头决定。
+// 这里用模拟平台记录的最大并发数把这一行为固定下来。
+func TestOpenTicketGrantsPermissionsConcurrently(t *testing.T) {
+	env := newBotEnv(t)
+	// 让每次调用慢一点，否则并发窗口太短、看不出来。
+	env.mock.Delay = 40 * time.Millisecond
+	env.mock.ResetConcurrency()
+
+	env.openTicketForTest()
+
+	if got := env.mock.MaxInFlight(); got < 2 {
+		t.Fatalf("权限下发应与其它接口并发执行，实际最大并发 %d", got)
+	}
+}
+
 func TestOpenTicketCreatesChannelPermissionsAndCard(t *testing.T) {
 	env := newBotEnv(t)
 
 	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
 
-	env.waitFor("工单创建完成", func() bool {
-		ticket := env.firstTicket()
-		return ticket != nil && ticket.Status == store.TicketOpen
-	})
-
-	opened := env.firstTicket()
+	opened := env.waitTicketOpened()
 	if !strings.HasPrefix(opened.No, "TK-") {
 		t.Fatalf("工单编号格式异常: %s", opened.No)
 	}
@@ -324,12 +370,7 @@ func TestOpenTicketSendsPanelOpenMessage(t *testing.T) {
 
 	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
 
-	env.waitFor("工单创建完成", func() bool {
-		ticket := env.firstTicket()
-		return ticket != nil && ticket.Status == store.TicketOpen
-	})
-
-	opened := env.firstTicket()
+	opened := env.waitTicketOpened()
 	sent := env.panelOpenMessageCalls(opened.ChannelID)
 	if len(sent) != 1 {
 		t.Fatalf("应在新频道发送 1 条开单提示，实际 %d 条: %v", len(sent), sent)
@@ -364,11 +405,7 @@ func TestOpenTicketSendsEphemeralCreatedNotice(t *testing.T) {
 
 	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
 
-	env.waitFor("工单创建完成", func() bool {
-		ticket := env.firstTicket()
-		return ticket != nil && ticket.Status == store.TicketOpen
-	})
-	opened := env.firstTicket()
+	opened := env.waitTicketOpened()
 
 	var notices []string
 	for _, call := range env.mock.CallsOf("message/create") {
@@ -433,12 +470,9 @@ func TestOpenTicketOpenMessageEscapesNickname(t *testing.T) {
 
 	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), asker))
 
-	env.waitFor("工单创建完成", func() bool {
-		ticket := env.firstTicket()
-		return ticket != nil && ticket.Status == store.TicketOpen
-	})
+	opened := env.waitTicketOpened()
 
-	sent := env.panelOpenMessageCalls(env.firstTicket().ChannelID)
+	sent := env.panelOpenMessageCalls(opened.ChannelID)
 	if len(sent) != 1 {
 		t.Fatalf("应发送 1 条开单提示，实际 %v", sent)
 	}
@@ -453,12 +487,9 @@ func TestOpenTicketWithoutPanelOpenMessageSendsNoText(t *testing.T) {
 
 	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
 
-	env.waitFor("工单创建完成", func() bool {
-		ticket := env.firstTicket()
-		return ticket != nil && ticket.Status == store.TicketOpen
-	})
+	opened := env.waitTicketOpened()
 
-	if sent := env.panelOpenMessageCalls(env.firstTicket().ChannelID); len(sent) != 0 {
+	if sent := env.panelOpenMessageCalls(opened.ChannelID); len(sent) != 0 {
 		t.Fatalf("未配置开单提示时不应发送文本消息，实际 %v", sent)
 	}
 }
@@ -483,6 +514,15 @@ func TestOpenTicketFromSecondPanelUsesItsOwnRoles(t *testing.T) {
 	env.waitFor("工单创建完成", func() bool {
 		ticket := env.firstTicket()
 		return ticket != nil && ticket.Status == store.TicketOpen
+	})
+	// 权限下发在工单置为 open 之后并发执行，需单独等它出现。
+	env.waitFor("第二张面板角色已下发", func() bool {
+		for _, call := range env.mock.CallsOf("channel-role/update") {
+			if fmt.Sprint(call.Params["type"]) == "role_id" && fmt.Sprint(call.Params["value"]) == secondRole {
+				return true
+			}
+		}
+		return false
 	})
 
 	subjects := map[string]bool{}
@@ -565,10 +605,7 @@ func TestOpenTicketSendsNoDirectMessageProbe(t *testing.T) {
 
 	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
 
-	env.waitFor("开单完成", func() bool {
-		ticket := env.firstTicket()
-		return ticket != nil && ticket.Status == store.TicketOpen
-	})
+	env.waitTicketOpened()
 
 	if calls := env.mock.CallsOf("direct-message/create"); len(calls) != 0 {
 		t.Fatalf("开单不应发送私信探测消息，实际发送 %d 条", len(calls))
@@ -1501,10 +1538,7 @@ func TestReactionFailureNotifiesUser(t *testing.T) {
 func (e *botEnv) openTicketForTest() string {
 	e.t.Helper()
 	e.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, e.openValue(), e.user(userAsker)))
-	e.waitFor("工单创建完成", func() bool {
-		ticket := e.firstTicket()
-		return ticket != nil && ticket.Status == store.TicketOpen
-	})
+	e.waitTicketOpened()
 	return e.ticketChannel()
 }
 

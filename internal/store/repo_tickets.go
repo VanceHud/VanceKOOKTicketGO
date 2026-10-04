@@ -101,11 +101,30 @@ func (r *TicketsRepo) UpdateFields(no string, fields map[string]any) error {
 	if _, ok := fields["updated_at"]; !ok {
 		fields["updated_at"] = Now()
 	}
-	return r.db.Model(&Ticket{}).Where("no = ?", no).Updates(fields).Error
+	return r.db.Model(&Ticket{}).Where("no = ?", no).Updates(normalizeTimes(fields)).Error
 }
 
-// Delete 删除工单记录（仅用于占号回收：建频道失败且编号未对外暴露）。
-// 已对外暴露的工单不允许删除，避免审计链断裂。
+// normalizeTimes 把 map 里的时间字段统一转成 UTC。
+//
+// 必须做这一步：SQLite 没有原生时间类型，时间以文本存储并按字典序比较。
+// 若写入的是带 +08:00 偏移的本地时间，它与 UTC 边界（统计的“今日/昨日”等）
+// 比较时会整体偏移一个时区，虽然文本看起来“更晚”，实际却可能是昨天。
+func normalizeTimes(fields map[string]any) map[string]any {
+	for key, value := range fields {
+		switch v := value.(type) {
+		case time.Time:
+			fields[key] = v.UTC()
+		case *time.Time:
+			if v != nil {
+				utc := v.UTC()
+				fields[key] = &utc
+			}
+		}
+	}
+	return fields
+}
+
+// Delete 删除工单记录（仅用于占号回收：建频道失败且编号未对外暴露）。// 已对外暴露的工单不允许删除，避免审计链断裂。
 func (r *TicketsRepo) Delete(no string) error {
 	return r.db.Where("no = ? AND status = ?", no, TicketPending).Delete(&Ticket{}).Error
 }

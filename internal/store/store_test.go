@@ -223,6 +223,37 @@ func TestTicketLifecycleFiltersAndStats(t *testing.T) {
 	}
 }
 
+func TestGatewaySessionRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+
+	// 初始没有会话：首次启动应建立全新连接
+	sessionID, sn, err := st.Settings.LoadGatewaySession()
+	if err != nil {
+		t.Fatalf("读取网关会话失败: %v", err)
+	}
+	if sessionID != "" || sn != 0 {
+		t.Fatalf("初始应无网关会话，实际 session=%q sn=%d", sessionID, sn)
+	}
+
+	// 连接建立后落库，供进程重启续传
+	if err := st.Settings.SaveGatewaySession("sess-1", 42); err != nil {
+		t.Fatalf("写入网关会话失败: %v", err)
+	}
+	sessionID, sn, err = st.Settings.LoadGatewaySession()
+	if err != nil || sessionID != "sess-1" || sn != 42 {
+		t.Fatalf("网关会话读取不符: session=%q sn=%d err=%v", sessionID, sn, err)
+	}
+
+	// 会话失效（续传被拒 / 平台要求重连）时必须能彻底清空
+	if err := st.Settings.SaveGatewaySession("", 0); err != nil {
+		t.Fatalf("清空网关会话失败: %v", err)
+	}
+	sessionID, sn, err = st.Settings.LoadGatewaySession()
+	if err != nil || sessionID != "" || sn != 0 {
+		t.Fatalf("清空后不应再读到会话: session=%q sn=%d err=%v", sessionID, sn, err)
+	}
+}
+
 func TestSettingsSecretRoundTripAndWrongKey(t *testing.T) {
 	st := newTestStore(t)
 	secret := []byte("app-secret-for-tests-0123456789abcdef")
