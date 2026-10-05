@@ -351,8 +351,17 @@ func (b *Bot) issueCode(ctx context.Context, event kook.Event, purpose, roleHint
 }
 
 // ResolveWebRole 依据 KOOK 角色计算 WebUI 权限（供 WebUI 登录时校验权限）。
-func (b *Bot) ResolveWebRole(ctx context.Context, userID string) (string, bool) {
-	return b.resolveWebRole(ctx, userID)
+func (b *Bot) ResolveWebRole(ctx context.Context, userID string) (string, bool, error) {
+	client, cfg, err := b.ready()
+	if err != nil {
+		return "", false, err
+	}
+	// Web 登录授予持久会话，必须绕过操作流程使用的 30 秒角色缓存。
+	user, err := client.UserView(ctx, userID, cfg.GuildID)
+	if err != nil {
+		return "", false, err
+	}
+	return b.webRoleFor(userID, user.Roles)
 }
 
 // resolveWebRole 依据 KOOK 角色计算 WebUI 权限。
@@ -362,6 +371,14 @@ func (b *Bot) resolveWebRole(ctx context.Context, userID string) (string, bool) 
 		b.deps.Logger.Warn("读取用户角色失败", "user_id", userID, "err", err)
 		return "", false
 	}
+	role, ok, err := b.webRoleFor(userID, roles)
+	if err != nil {
+		b.deps.Logger.Error("解析角色映射失败", "err", err)
+	}
+	return role, ok && err == nil
+}
+
+func (b *Bot) webRoleFor(userID string, roles []int64) (string, bool, error) {
 	roleIDs := make([]string, 0, len(roles))
 	for _, roleID := range roles {
 		roleIDs = append(roleIDs, strconv.FormatInt(roleID, 10))
@@ -372,15 +389,10 @@ func (b *Bot) resolveWebRole(ctx context.Context, userID string) (string, bool) 
 	masterID := b.guild.MasterID
 	b.mu.RUnlock()
 	if masterID != "" && userID == masterID {
-		return store.RoleAdmin, true
+		return store.RoleAdmin, true, nil
 	}
 
-	role, ok, err := b.deps.Store.Roles.ResolveWebRole(roleIDs)
-	if err != nil {
-		b.deps.Logger.Error("解析角色映射失败", "err", err)
-		return "", false
-	}
-	return role, ok
+	return b.deps.Store.Roles.ResolveWebRole(roleIDs)
 }
 
 // ---------------------------------------------------------------------------

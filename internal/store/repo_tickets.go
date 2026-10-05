@@ -221,6 +221,22 @@ func (r *TicketsRepo) Messages(no string, limit, offset int) ([]TicketMessage, e
 // MaxExportMessages 是导出聊天记录时的消息条数上限。
 const MaxExportMessages = 20000
 
+var ErrExportTooLarge = errors.New("工单消息超过导出上限")
+
+// ExportMessages 独立于分页接口的 2,000 条上限，额外读取一条检测超限，禁止静默截断。
+func (r *TicketsRepo) ExportMessages(no string) ([]TicketMessage, error) {
+	var messages []TicketMessage
+	err := r.db.Where("ticket_no = ?", no).Order("created_at ASC, id ASC").
+		Limit(MaxExportMessages + 1).Find(&messages).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(messages) > MaxExportMessages {
+		return nil, ErrExportTooLarge
+	}
+	return messages, nil
+}
+
 // AddMessage 写入一条工单消息，并维护工单的消息数与首次响应时间。
 //
 // 首次响应时间定义：首条既非开单人、也非机器人发送的消息时间（即人工客服的第一次回复）。
@@ -339,9 +355,6 @@ type Overview struct {
 	StatusCounts         map[string]int64 `json:"statusCounts"`
 }
 
-// maxStatRows 限制统计扫描的行数，避免极端数据量下内存膨胀。
-const maxStatRows = 50000
-
 // Overview 汇总仪表盘所需的全部指标。
 // 统计在 Go 侧按天分桶，避免依赖 SQLite 的日期函数（驱动以文本存储时间）。
 func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Overview, error) {
@@ -368,23 +381,6 @@ func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Ov
 		Trend:        make([]TrendPoint, 0, days),
 	}
 
-	if err := r.db.Model(&Ticket{}).Count(&ov.Total).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&Ticket{}).
-		Where("status IN ?", []string{TicketPending, TicketOpen, TicketLocked}).
-		Count(&ov.Active).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&Ticket{}).Where("status = ?", TicketOpen).Count(&ov.Open).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&Ticket{}).Where("status = ?", TicketLocked).Count(&ov.Locked).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&Ticket{}).Where("status = ?", TicketClosed).Count(&ov.Closed).Error; err != nil {
-		return nil, err
-	}
 	if err := r.db.Model(&Ticket{}).Where("started_at >= ?", todayStart.UTC()).Count(&ov.OpenedToday).Error; err != nil {
 		return nil, err
 	}
@@ -409,22 +405,27 @@ func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Ov
 	}
 	for _, row := range statusRows {
 		ov.StatusCounts[row.Status] = row.Count
+		ov.Total += row.Count
 	}
+	ov.Open = ov.StatusCounts[TicketOpen]
+	ov.Locked = ov.StatusCounts[TicketLocked]
+	ov.Closed = ov.StatusCounts[TicketClosed]
+	ov.Active = ov.StatusCounts[TicketPending] + ov.Open + ov.Locked
 
 	type statRow struct {
 		StartedAt    time.Time
 		ClosedAt     *time.Time
 		FirstReplyAt *time.Time
 	}
-	var rows []statRow
-	err := r.db.Model(&Ticket{}).
+	// 流式读取，避免把所有工单装入内存，也不能用固定条数上限静默漏算。
+	rows, err := r.db.Model(&Ticket{}).
 		Select("started_at, closed_at, first_reply_at").
-		Where("started_at >= ? OR closed_at >= ?", rangeStart.UTC(), rangeStart.UTC()).
-		Limit(maxStatRows).
-		Find(&rows).Error
+		Where("started_at >= ? OR closed_at >= ? OR first_reply_at >= ?", rangeStart.UTC(), rangeStart.UTC(), rangeStart.UTC()).
+		Rows()
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
 	type bucket struct{ opened, closed int64 }
 	buckets := make(map[string]*bucket, days)
@@ -438,7 +439,11 @@ func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Ov
 	var replySum, resolutionSum float64
 	var replyCount, resolutionCount int64
 
-	for _, row := range rows {
+	for rows.Next() {
+		var row statRow
+		if err := r.db.ScanRows(rows, &row); err != nil {
+			return nil, err
+		}
 		if !row.StartedAt.IsZero() && !row.StartedAt.Before(rangeStart.UTC()) {
 			if b, ok := buckets[row.StartedAt.In(loc).Format("2006-01-02")]; ok {
 				b.opened++
@@ -459,6 +464,9 @@ func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Ov
 				replyCount++
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	for _, key := range order {

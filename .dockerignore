@@ -5,6 +5,7 @@
 
 # 运行时数据与密钥（绝不能进镜像）
 data
+backups
 *.db
 *.db-wal
 *.db-shm
@@ -23,5 +24,6 @@ web/frontend/.vite
 .DS_Store
 .env
 .env.local
+.env.*
 .vscode
 .idea

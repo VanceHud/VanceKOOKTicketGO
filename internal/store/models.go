@@ -96,7 +96,7 @@ type Ticket struct {
 	// PanelID 关联面板，面板删除后置空。
 	PanelID *uint `gorm:"index" json:"panelId,omitempty"`
 
-	Status     string     `gorm:"index;size:16;not null" json:"status"`
+	Status     string     `gorm:"index;index:idx_tickets_timeout,priority:1;size:16;not null" json:"status"`
 	StartedAt  time.Time  `gorm:"index" json:"startedAt"`
 	LockedAt   *time.Time `json:"lockedAt,omitempty"`
 	LockReason string     `gorm:"size:16" json:"lockReason,omitempty"`
@@ -105,7 +105,7 @@ type Ticket struct {
 
 	ClosedByName string `gorm:"size:128" json:"closedByName,omitempty"`
 	// FirstReplyAt 记录首条非开单人、非机器人消息的时间，用于统计响应时长。
-	FirstReplyAt *time.Time `json:"firstReplyAt,omitempty"`
+	FirstReplyAt *time.Time `gorm:"index" json:"firstReplyAt,omitempty"`
 	// MessageCount 冗余字段，避免列表页统计每条工单的消息数时产生 N+1 查询。
 	MessageCount int `json:"messageCount"`
 
@@ -114,7 +114,7 @@ type Ticket struct {
 	LogUserMsgID    string `gorm:"size:64" json:"-"`
 
 	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	UpdatedAt time.Time `gorm:"index:idx_tickets_timeout,priority:2" json:"updatedAt"`
 }
 
 // IsActive 表示工单仍在处理中（频道存在）。
@@ -125,7 +125,7 @@ func (t Ticket) IsActive() bool {
 // TicketMessage 是工单频道内的一条聊天记录。
 type TicketMessage struct {
 	ID       uint   `gorm:"primaryKey" json:"id"`
-	TicketNo string `gorm:"index;size:20;not null" json:"ticketNo"`
+	TicketNo string `gorm:"index;index:idx_ticket_messages_timeline,priority:1;size:20;not null" json:"ticketNo"`
 	// MsgID 是 KOOK 消息 ID，可为空（系统生成的事件）。
 	MsgID     string `gorm:"index;size:64" json:"msgId"`
 	ChannelID string `gorm:"size:64" json:"channelId"`
@@ -149,7 +149,7 @@ type TicketMessage struct {
 	// 事件的卡片消息 content 为空，归档时会异步调用 message/view 补全。
 	CardJSON string `gorm:"type:text" json:"cardJson,omitempty"`
 
-	CreatedAt time.Time `gorm:"index" json:"createdAt"`
+	CreatedAt time.Time `gorm:"index;index:idx_ticket_messages_timeline,priority:2" json:"createdAt"`
 }
 
 // TicketNote 是管理员对工单写下的备注（对应原项目的 /tkcm）。

@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
+import { createRealtimeBatch } from "@/lib/realtime-batch"
 
 /** 后端推送的事件类型（与 internal/eventbus 保持一致）。 */
 const EVENT_TYPES = [
@@ -35,11 +36,27 @@ export function useRealtimeEvents(enabled: boolean): boolean {
     }
 
     const source = new EventSource("/api/v1/events", { withCredentials: true })
+    const batch = createRealtimeBatch((queryKey) => {
+      void queryClient.invalidateQueries({ queryKey })
+    })
+    let opened = false
 
-    const onOpen = () => setConnected(true)
+    const onOpen = () => {
+      setConnected(true)
+      // 重连时补拉可能在断线期间丢失的数据。
+      if (opened) void queryClient.invalidateQueries()
+      opened = true
+    }
     const onError = () => setConnected(false)
     source.addEventListener("open", onOpen)
     source.addEventListener("error", onError)
+    const onExpired = () => {
+      source.close()
+      batch.dispose()
+      setConnected(false)
+      void queryClient.invalidateQueries({ queryKey: ["me"] })
+    }
+    source.addEventListener("auth.expired", onExpired)
 
     const invalidate = (event: Event) => {
       const message = event as MessageEvent<string>
@@ -51,30 +68,7 @@ export function useRealtimeEvents(enabled: boolean): boolean {
       }
       const type = payload.type ?? message.type
 
-      switch (type) {
-        case "ticket.created":
-        case "ticket.updated":
-          void queryClient.invalidateQueries({ queryKey: ["tickets"] })
-          void queryClient.invalidateQueries({ queryKey: ["stats"] })
-          if (payload.ticketNo) {
-            void queryClient.invalidateQueries({ queryKey: ["ticket", payload.ticketNo] })
-          }
-          break
-        case "ticket.message":
-          void queryClient.invalidateQueries({ queryKey: ["tickets"] })
-          if (payload.ticketNo) {
-            void queryClient.invalidateQueries({ queryKey: ["messages", payload.ticketNo] })
-            void queryClient.invalidateQueries({ queryKey: ["ticket", payload.ticketNo] })
-          }
-          break
-        case "ticket.note":
-          if (payload.ticketNo) {
-            void queryClient.invalidateQueries({ queryKey: ["notes", payload.ticketNo] })
-          }
-          break
-        default:
-          void queryClient.invalidateQueries({ queryKey: ["stats"] })
-      }
+      batch.push(type, typeof payload.ticketNo === "string" ? payload.ticketNo : undefined)
     }
 
     for (const type of EVENT_TYPES) {
@@ -87,6 +81,8 @@ export function useRealtimeEvents(enabled: boolean): boolean {
       }
       source.removeEventListener("open", onOpen)
       source.removeEventListener("error", onError)
+      source.removeEventListener("auth.expired", onExpired)
+      batch.dispose()
       source.close()
       setConnected(false)
     }

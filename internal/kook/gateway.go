@@ -333,6 +333,10 @@ func (g *Gateway) serve(ctx context.Context) error {
 		return fmt.Errorf("连接网关失败: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	conn.SetReadLimit(maxGatewayFrameBytes)
+	if err := conn.SetReadDeadline(time.Now().Add(g.opts.DialTimeout)); err != nil {
+		return err
+	}
 
 	// ctx 结束时主动关闭连接：ReadMessage 在没有读超时的情况下不会因 ctx
 	// 被取消而返回，不主动关闭的话，Stop/重连后旧连接会一直挂着
@@ -364,6 +368,9 @@ func (g *Gateway) serve(ctx context.Context) error {
 			g.clearSession()
 		}
 		return fmt.Errorf("握手被平台拒绝：code=%d", helloData.Code)
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return err
 	}
 
 	g.mu.Lock()
@@ -501,6 +508,8 @@ type rawFrame struct {
 	Data   json.RawMessage `json:"d"`
 }
 
+const maxGatewayFrameBytes = 8 << 20
+
 // readFrame 读取并解析一帧（必要时解压）。
 func (g *Gateway) readFrame(conn *websocket.Conn) (rawFrame, error) {
 	messageType, payload, err := conn.ReadMessage()
@@ -531,13 +540,22 @@ func (g *Gateway) readFrame(conn *websocket.Conn) (rawFrame, error) {
 func decompress(payload []byte) ([]byte, error) {
 	if reader, err := zlib.NewReader(bytes.NewReader(payload)); err == nil {
 		defer func() { _ = reader.Close() }()
-		if data, err := io.ReadAll(io.LimitReader(reader, 8<<20)); err == nil {
-			return data, nil
-		}
+		return readGatewayPayload(reader)
 	}
 	reader := flate.NewReader(bytes.NewReader(payload))
 	defer func() { _ = reader.Close() }()
-	return io.ReadAll(io.LimitReader(reader, 8<<20))
+	return readGatewayPayload(reader)
+}
+
+func readGatewayPayload(reader io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, maxGatewayFrameBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxGatewayFrameBytes {
+		return nil, fmt.Errorf("网关数据超过 %d 字节上限", maxGatewayFrameBytes)
+	}
+	return data, nil
 }
 
 func (g *Gateway) setDisconnected(reason string) {

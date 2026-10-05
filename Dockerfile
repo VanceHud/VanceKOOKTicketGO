@@ -21,7 +21,7 @@ RUN npm run build
 
 
 # ---------- 阶段 2：编译后端 ----------
-FROM golang:1.26-alpine AS backend
+FROM golang:1.26.8-alpine AS backend
 WORKDIR /src
 
 COPY go.mod go.sum ./

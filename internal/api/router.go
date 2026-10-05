@@ -41,7 +41,7 @@ func NewRouter(d Deps) *gin.Engine {
 	// 健康检查不需要认证。
 	engine.GET("/healthz", server.handleHealth)
 
-	api := engine.Group("/api/v1")
+	api := engine.Group("/api/v1", requestBodyLimit())
 
 	// —— 认证相关 ——
 	api.POST("/auth/login", server.handleLogin)
@@ -50,7 +50,7 @@ func NewRouter(d Deps) *gin.Engine {
 	api.POST("/auth/password", server.loadSession(), auth.RequireAuth(), d.Sessions.RequireCSRF(), server.handleChangePassword)
 	// KOOK 一次性码：接口已就位，具体逻辑在里程碑 4 实现。
 	api.POST("/auth/login-code", server.handleLoginCode)
-	api.POST("/auth/bind-code", server.loadSession(), auth.RequireAuth(), d.Sessions.RequireCSRF(), server.handleBindCode)
+	api.POST("/auth/bind-code", server.loadSession(), auth.RequireAuth(), d.Sessions.RequireCSRF(), auth.RequirePasswordChanged(), server.handleBindCode)
 
 	// —— 已登录（且已完成强制改密）——
 	secured := api.Group("",

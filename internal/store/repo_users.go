@@ -1,11 +1,48 @@
 package store
 
 import (
+	"errors"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+var ErrLastAdmin = errors.New("系统必须保留至少一个可用管理员")
+var ErrAlreadyBound = errors.New("账号已绑定其它 KOOK 身份")
+var ErrAuthenticationChanged = errors.New("账号认证信息已变更，请重新登录")
+
+func checkAuthenticatedUser(tx *gorm.DB, verified *WebUser) error {
+	var current WebUser
+	if err := tx.First(&current, verified.ID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrAuthenticationChanged
+		}
+		return err
+	}
+	if current.Disabled || current.PasswordHash != verified.PasswordHash || current.Role != verified.Role || current.MustChangePassword != verified.MustChangePassword {
+		return ErrAuthenticationChanged
+	}
+	return nil
+}
+
+func ensureAdminRemains(tx *gorm.DB, id uint) error {
+	var user WebUser
+	if err := tx.First(&user, id).Error; err != nil {
+		return mapNotFound(err)
+	}
+	if user.Role != RoleAdmin || user.Disabled {
+		return nil
+	}
+	var count int64
+	if err := tx.Model(&WebUser{}).Where("id <> ? AND role = ? AND disabled = ?", id, RoleAdmin, false).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrLastAdmin
+	}
+	return nil
+}
 
 // UsersRepo 负责 WebUI 账号。
 type UsersRepo struct {
@@ -78,12 +115,50 @@ func (r *UsersRepo) Save(u *WebUser) error {
 
 // UpdateFields 局部更新指定字段。
 func (r *UsersRepo) UpdateFields(id uint, fields map[string]any) error {
-	return r.db.Model(&WebUser{}).Where("id = ?", id).Updates(fields).Error
+	return r.updateFields(id, fields, nil)
+}
+
+// UpdateVerified 用于用户改密，避免在旧密码校验后覆盖管理员刚重置的新密码。
+func (r *UsersRepo) UpdateVerified(verified *WebUser, fields map[string]any) error {
+	return r.updateFields(verified.ID, fields, verified)
+}
+
+func (r *UsersRepo) updateFields(id uint, fields map[string]any, verified *WebUser) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if verified != nil {
+			if err := checkAuthenticatedUser(tx, verified); err != nil {
+				return err
+			}
+		}
+		role, roleChanged := fields["role"]
+		if (roleChanged && role != RoleAdmin) || fields["disabled"] == true {
+			if err := ensureAdminRemains(tx, id); err != nil {
+				return err
+			}
+		}
+		res := tx.Model(&WebUser{}).Where("id = ?", id).Updates(fields)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		// 安全字段变更与会话吊销必须同事务提交，失败时不能只更新账号。
+		for _, field := range []string{"password_hash", "role", "disabled", "must_change_password"} {
+			if _, ok := fields[field]; ok {
+				return tx.Where("user_id = ?", id).Delete(&Session{}).Error
+			}
+		}
+		return nil
+	})
 }
 
 // Delete 删除账号；同时清理其会话，避免残留会话继续可用。
 func (r *UsersRepo) Delete(id uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := ensureAdminRemains(tx, id); err != nil {
+			return err
+		}
 		if err := tx.Where("user_id = ?", id).Delete(&Session{}).Error; err != nil {
 			return err
 		}
@@ -106,6 +181,35 @@ func (r *SessionsRepo) Create(s *Session) error {
 	return r.db.Create(s).Error
 }
 
+// CreateLimited 把创建与淘汰合并为一个事务，并发登录也不会突破会话数上限。
+func (r *SessionsRepo) CreateLimited(s *Session, keep int) error {
+	return r.createLimited(s, keep, nil)
+}
+
+// CreateLimitedForUser 保证密码校验期间发生的改密/禁用/角色变更不能被在途登录绕过。
+func (r *SessionsRepo) CreateLimitedForUser(s *Session, keep int, verified *WebUser) error {
+	return r.createLimited(s, keep, verified)
+}
+
+func (r *SessionsRepo) createLimited(s *Session, keep int, verified *WebUser) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if verified != nil {
+			if s.UserID != verified.ID {
+				return ErrAuthenticationChanged
+			}
+			if err := checkAuthenticatedUser(tx, verified); err != nil {
+				return err
+			}
+		}
+		if err := tx.Create(s).Error; err != nil {
+			return err
+		}
+		old := tx.Model(&Session{}).Select("id").Where("user_id = ?", s.UserID).
+			Order("last_seen_at DESC, id DESC").Offset(keep).Limit(-1)
+		return tx.Where("id IN (?)", old).Delete(&Session{}).Error
+	})
+}
+
 // ByTokenHash 按 token 哈希查询会话。
 func (r *SessionsRepo) ByTokenHash(hash string) (*Session, error) {
 	var s Session
@@ -118,7 +222,7 @@ func (r *SessionsRepo) ByTokenHash(hash string) (*Session, error) {
 // Touch 刷新会话的最近活跃时间。
 // 注意：绝对过期时间（ExpiresAt）建立后不再延长，避免“一直在线”导致会话永不过期。
 func (r *SessionsRepo) Touch(id uint, seenAt time.Time) error {
-	return r.db.Model(&Session{}).Where("id = ?", id).Update("last_seen_at", seenAt.UTC()).Error
+	return r.db.Model(&Session{}).Where("id = ? AND last_seen_at < ?", id, seenAt.UTC()).Update("last_seen_at", seenAt.UTC()).Error
 }
 
 // DeleteOldestForUser 仅保留最近 keep 个会话，删除更旧的会话（含已过期者）。
@@ -178,7 +282,7 @@ func (r *AuthCodesRepo) ByCodeHash(hash string) (*AuthCode, error) {
 
 // MarkUsed 标记为已使用（一次性）。
 func (r *AuthCodesRepo) MarkUsed(id uint, at time.Time, ip string) error {
-	res := r.db.Model(&AuthCode{}).Where("id = ? AND used_at IS NULL", id).Updates(map[string]any{
+	res := r.db.Model(&AuthCode{}).Where("id = ? AND used_at IS NULL AND expires_at > ?", id, at.UTC()).Updates(map[string]any{
 		"used_at": at.UTC(),
 		"used_ip": ip,
 	})
@@ -190,6 +294,26 @@ func (r *AuthCodesRepo) MarkUsed(id uint, at time.Time, ip string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// BindToUser 在事务内检查身份关联并消费绑定码，防止两个绑定请求覆盖同一账号。
+func (r *AuthCodesRepo) BindToUser(id, userID uint, at time.Time, ip string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var code AuthCode
+		if err := tx.Where("id = ? AND purpose = ? AND used_at IS NULL AND expires_at > ?", id, CodePurposeBind, at.UTC()).First(&code).Error; err != nil {
+			return mapNotFound(err)
+		}
+		res := tx.Model(&WebUser{}).
+			Where("id = ? AND disabled = ? AND must_change_password = ? AND (kook_user_id IS NULL OR kook_user_id = ?)", userID, false, false, code.KookUserID).
+			Updates(map[string]any{"kook_user_id": code.KookUserID, "kook_user_name": code.KookUserName, "updated_at": at.UTC()})
+		if errors.Is(res.Error, gorm.ErrDuplicatedKey) || (res.Error == nil && res.RowsAffected == 0) {
+			return ErrAlreadyBound
+		}
+		if res.Error != nil {
+			return res.Error
+		}
+		return tx.Model(&AuthCode{}).Where("id = ?", id).Updates(map[string]any{"used_at": at.UTC(), "used_ip": ip}).Error
+	})
 }
 
 // Latest 返回某 KOOK 用户最近签发的一次性码，用于生成频率限制。

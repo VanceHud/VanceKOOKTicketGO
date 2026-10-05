@@ -121,14 +121,13 @@ func (m *Manager) GuildChannels(ctx context.Context) ([]kook.Channel, error) {
 }
 
 // ResolveWebRole 用当前 KOOK 角色解析用户应得的 WebUI 权限。
-// 未连接时返回 ok=false，调用方应回退到签发验证码时的角色快照。
+// 未连接或上游校验失败时返回错误，调用方必须拒绝本次登录。
 func (m *Manager) ResolveWebRole(ctx context.Context, kookUserID string) (string, bool, error) {
 	instance, err := m.requireInstance()
 	if err != nil {
 		return "", false, err
 	}
-	role, ok := instance.ResolveWebRole(ctx, kookUserID)
-	return role, ok, nil
+	return instance.ResolveWebRole(ctx, kookUserID)
 }
 
 // SendPanelCard 让机器人发送/重发某个面板的卡片。

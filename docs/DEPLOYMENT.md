@@ -591,7 +591,7 @@ data/
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `KOOK_DRYRUN` | `0` | `1` = 演示模式，不连 KOOK |
 | `KOOK_TOKEN` / `KOOK_GUILD_ID` | 空 | 也可在 WebUI 里填；环境变量优先 |
-| `APP_SECRET` | 自动生成 | 加密密钥；留空则写入 `DATA_DIR/app_secret` |
+| `APP_SECRET` | 自动生成 | 原始输入至少 32 字节，建议 `openssl rand -hex 32`；留空则写入 `DATA_DIR/app_secret` |
 | `COOKIE_SECURE` | `auto` | `auto` / `always` / `never` |
 | `TRUSTED_PROXIES` | 空 | 可信反代地址（CIDR 逗号分隔） |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / 随机 | 仅首次初始化生效 |

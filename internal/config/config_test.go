@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,9 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"Cookie 策略非法", "COOKIE_SECURE", "sometimes"},
 		{"端口非法", "PORT", "not-a-port"},
 		{"限流次数非法", "LOGIN_MAX_FAILS", "0"},
+		{"限流窗口为负", "LOGIN_WINDOW_MINUTES", "-1"},
+		{"锁定时长为零", "LOGIN_LOCK_MINUTES", "0"},
+		{"弱密钥", "APP_SECRET", "short-secret"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,6 +221,52 @@ func TestSecretFileLifecycle(t *testing.T) {
 	}
 	if string(third.AppSecret) == string(first.AppSecret) {
 		t.Fatal("环境变量密钥应覆盖文件密钥")
+	}
+}
+
+func TestSecretFileRejectsWeakInputWithoutOverwriting(t *testing.T) {
+	for _, raw := range []string{"", "short-secret"} {
+		t.Run(fmt.Sprintf("length-%d", len(raw)), func(t *testing.T) {
+			clearEnv(t)
+			dataDir := t.TempDir()
+			t.Setenv("DATA_DIR", dataDir)
+			path := filepath.Join(dataDir, secretFileName)
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatal("哈希后的固定长度不能掩盖弱密钥")
+			}
+			contents, err := os.ReadFile(path)
+			if err != nil || string(contents) != raw {
+				t.Fatalf("弱密钥不能被自动覆盖: %v", err)
+			}
+		})
+	}
+}
+
+func TestExistingSecretFilePermissionsAreHardened(t *testing.T) {
+	clearEnv(t)
+	dataDir := t.TempDir()
+	t.Setenv("DATA_DIR", dataDir)
+	path := filepath.Join(dataDir, secretFileName)
+	raw := strings.Repeat("random-secret-example-", 3)
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("密钥文件权限未收紧: %v", err)
+	}
+	if string(cfg.AppSecret) != string(deriveSecret(raw)) {
+		t.Fatal("收紧权限不能更换原密钥")
 	}
 }
 

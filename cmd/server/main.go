@@ -107,9 +107,11 @@ func run(resetUser, newPassword string) error {
 	}
 
 	bus := eventbus.New()
-	// 默认使用空实现：未配置 Token（或 DryRun）时，工单操作只更新数据库并广播事件。
-	// 机器人连接成功后会自动注入真实平台实现（见 bot.Bot.Start）。
-	platform := ticket.NewNoopPlatform(logger)
+	// 空平台只用于显式演示模式；生产环境未连接时不能伪造 KOOK 操作成功。
+	var platform ticket.Platform
+	if cfg.DryRun {
+		platform = ticket.NewNoopPlatform(logger)
+	}
 	ticketService := ticket.NewService(st, bus, platform, cfg.Location, st.Settings.OutdateHours)
 
 	sessions := auth.NewSessionManager(st, cfg.SessionIdleTTL, cfg.SessionMaxTTL, cfg.AppSecret)
@@ -245,10 +247,7 @@ func resetPassword(st *store.Store, username, newPassword string, logger *slog.L
 	}); err != nil {
 		return err
 	}
-	// 密码已变更：吊销该账号的全部会话，避免旧会话继续可用。
-	if err := st.Sessions.DeleteForUser(user.ID); err != nil {
-		logger.Warn("吊销旧会话失败", "user", user.Username, "err", err)
-	}
+	// UpdateFields 已在同一事务内吊销该账号的全部会话。
 	_ = st.Audit.Write(&store.AuditLog{
 		Actor:     "cli",
 		ActorType: store.ActorTypeBot,

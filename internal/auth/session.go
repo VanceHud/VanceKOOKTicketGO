@@ -51,6 +51,15 @@ func (m *SessionManager) IdleTTL() time.Duration { return m.idleTTL }
 
 // Create 新建会话。
 func (m *SessionManager) Create(userID uint, ip, userAgent string) (*CreatedSession, error) {
+	user, err := m.store.Users.ByID(userID)
+	if err != nil {
+		return nil, err
+	}
+	return m.CreateForUser(user, ip, userAgent)
+}
+
+// CreateForUser 将经过认证的账号快照与创建会话时的状态作事务内比较。
+func (m *SessionManager) CreateForUser(user *store.WebUser, ip, userAgent string) (*CreatedSession, error) {
 	token, err := secure.RandomHex(SessionTokenBytes)
 	if err != nil {
 		return nil, err
@@ -59,19 +68,14 @@ func (m *SessionManager) Create(userID uint, ip, userAgent string) (*CreatedSess
 	now := store.Now()
 	sess := &store.Session{
 		TokenHash:  secure.HashToken(token),
-		UserID:     userID,
+		UserID:     user.ID,
 		IP:         ip,
 		UserAgent:  truncate(userAgent, 256),
 		ExpiresAt:  now.Add(m.maxTTL),
 		LastSeenAt: now,
 	}
-	if err := m.store.Sessions.Create(sess); err != nil {
+	if err := m.store.Sessions.CreateLimitedForUser(sess, MaxSessionsPerUser, user); err != nil {
 		return nil, err
-	}
-	// 并发会话上限：保留最近 MaxSessionsPerUser 个，其余淘汰。
-	if _, err := m.store.Sessions.DeleteOldestForUser(userID, MaxSessionsPerUser); err != nil {
-		// 淘汰失败不影响本次登录，交由调用方决定是否记录日志。
-		return &CreatedSession{Token: token, Session: sess}, err
 	}
 	return &CreatedSession{Token: token, Session: sess}, nil
 }
@@ -81,7 +85,16 @@ func (m *SessionManager) Create(userID uint, ip, userAgent string) (*CreatedSess
 // 校验顺序：token 摘要存在 → 绝对过期 → 空闲过期 → 账号未禁用。
 // 过期会话会被直接删除，避免残留可用记录。
 func (m *SessionManager) Authenticate(token string) (*store.Session, *store.WebUser, error) {
-	if token == "" {
+	return m.authenticate(token, true)
+}
+
+// Check 校验长连接的权限与有效期，不把服务器推送当作用户活跃操作。
+func (m *SessionManager) Check(token string) (*store.Session, *store.WebUser, error) {
+	return m.authenticate(token, false)
+}
+
+func (m *SessionManager) authenticate(token string, touch bool) (*store.Session, *store.WebUser, error) {
+	if len(token) != SessionTokenBytes*2 {
 		return nil, nil, ErrSessionExpired
 	}
 	hash := secure.HashToken(token)
@@ -94,7 +107,7 @@ func (m *SessionManager) Authenticate(token string) (*store.Session, *store.WebU
 	}
 
 	now := store.Now()
-	if now.After(sess.ExpiresAt) || now.After(sess.LastSeenAt.Add(m.idleTTL)) {
+	if !now.Before(sess.ExpiresAt) || !now.Before(sess.LastSeenAt.Add(m.idleTTL)) {
 		_ = m.store.Sessions.DeleteByTokenHash(hash)
 		return nil, nil, ErrSessionExpired
 	}
@@ -112,11 +125,15 @@ func (m *SessionManager) Authenticate(token string) (*store.Session, *store.WebU
 		return nil, nil, ErrUserDisabled
 	}
 
-	// 空闲续期：只刷新 last_seen_at，绝对过期时间保持不变。
-	if err := m.store.Sessions.Touch(sess.ID, now); err != nil {
-		return nil, nil, err
+	// 按分钟续期，避免首屏多个并发 GET 都争抢 SQLite 的单写锁。
+	// 短 TTL 时使用其 1/4，保持空闲过期误差有界；每次仍读库校验吊销与禁用。
+	interval := min(time.Minute, m.idleTTL/4)
+	if touch && now.Sub(sess.LastSeenAt) >= interval {
+		if err := m.store.Sessions.Touch(sess.ID, now); err != nil {
+			return nil, nil, err
+		}
+		sess.LastSeenAt = now
 	}
-	sess.LastSeenAt = now
 	return sess, user, nil
 }
 

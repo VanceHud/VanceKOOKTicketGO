@@ -161,6 +161,9 @@ func (c *Config) validate() error {
 	if c.LoginMaxFails < 1 {
 		return fmt.Errorf("LOGIN_MAX_FAILS 必须 >= 1")
 	}
+	if c.LoginWindow <= 0 || c.LoginLockFor <= 0 {
+		return fmt.Errorf("LOGIN_WINDOW_MINUTES 与 LOGIN_LOCK_MINUTES 必须为正数")
+	}
 	if c.SessionIdleTTL <= 0 || c.SessionMaxTTL <= 0 {
 		return fmt.Errorf("会话有效期必须为正数")
 	}
@@ -177,16 +180,22 @@ func (c *Config) validate() error {
 // 两者都不存在时生成一个随机密钥并以 0600 权限落盘，保证重启后仍能解密已存储的 token。
 func loadSecret(dataDir string) ([]byte, string, error) {
 	if raw := strings.TrimSpace(os.Getenv("APP_SECRET")); raw != "" {
-		secret := deriveSecret(raw)
-		return secret, "env:APP_SECRET", nil
+		if len(raw) < 32 {
+			return nil, "", fmt.Errorf("APP_SECRET 原始值太短，至少需要 32 字节随机内容")
+		}
+		return deriveSecret(raw), "env:APP_SECRET", nil
 	}
 
 	path := filepath.Join(dataDir, secretFileName)
 	if data, err := os.ReadFile(path); err == nil {
-		if secret := deriveSecret(strings.TrimSpace(string(data))); len(secret) >= 32 {
-			return secret, "file:" + path, nil
+		raw := strings.TrimSpace(string(data))
+		if len(raw) < 32 {
+			return nil, "", fmt.Errorf("%s 原始内容太短，至少需要 32 字节随机内容；请先备份，密钥更换后需重新配置 KOOK Token", path)
 		}
-		return nil, "", fmt.Errorf("%s 内容过短，请删除该文件后重新启动以生成新密钥", path)
+		if err := os.Chmod(path, secretFileMode); err != nil {
+			return nil, "", fmt.Errorf("收紧 %s 权限失败: %w", path, err)
+		}
+		return deriveSecret(raw), "file:" + path, nil
 	} else if !os.IsNotExist(err) {
 		return nil, "", fmt.Errorf("读取 %s 失败: %w", path, err)
 	}
@@ -205,7 +214,7 @@ func loadSecret(dataDir string) ([]byte, string, error) {
 	return deriveSecret(encoded), "file:" + path + " (本次生成)", nil
 }
 
-// deriveSecret 把任意长度的口令拉伸成 32 字节密钥。
+// deriveSecret 将已经校验的随机输入规范化为 32 字节密钥；哈希不会增加输入熵。
 func deriveSecret(raw string) []byte {
 	sum := sha256.Sum256([]byte(raw))
 	return sum[:]

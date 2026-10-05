@@ -147,7 +147,7 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 | `KOOK_TOKEN` | 空 | 机器人 Token；也可稍后在 WebUI 填写（两者都加密入库） |
 | `KOOK_GUILD_ID` | 空 | 服务器 ID |
 | `KOOK_API_BASE` | 官方地址 | 覆盖 KOOK API 地址（自建代理/本地模拟平台） |
-| `APP_SECRET` | 自动生成 | 加密密钥；生成后写入 `$DATA_DIR/app_secret`（0600） |
+| `APP_SECRET` | 自动生成 | 原始输入至少 32 字节，建议随机生成；留空时写入 `$DATA_DIR/app_secret`（0600） |
 | `COOKIE_SECURE` | `auto` | 会话 Cookie 的 Secure 策略：`auto` / `always` / `never` |
 | `TRUSTED_PROXIES` | 空 | 可信反代地址（支持 CIDR），决定是否采信 `X-Forwarded-For` |
 | `ADMIN_USERNAME` | `admin` | 初始管理员用户名 |
@@ -162,9 +162,9 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 
 ## 4. 安全设计
 
-安全不是"以后再加"，以下每条都有实现与测试覆盖——`go test ./...` 共 80+ 个用例，
-其中包含 HTTP 层集成测试，以及用**进程内模拟 KOOK 平台**（REST + WebSocket，含 zlib 压缩与网关握手）
-跑通的完整工单链路测试。
+测试包含 HTTP 层集成测试，以及用**进程内模拟 KOOK 平台**（REST + WebSocket，含 zlib 压缩与网关握手）
+跑通的工单链路测试。2026-10-05 的安全与效率审查已修复认证竞态、角色校验、导出注入与资源边界问题，
+具体发现、性能验证和部署影响见 [审查报告](docs/SECURITY_REVIEW_2026-10-05.md)。本地测试不代表已验证真实 KOOK 或生产部署。
 
 | # | 设计 | 验证方式 |
 |---|---|---|
@@ -178,7 +178,7 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 | 8 | 服务端强制 RBAC：只读账号不能执行任何工单写操作，也不能访问管理接口 | `TestReadonlyRoleCannotOperateTickets`、`TestStaffCannotManageAccounts` |
 | 9 | 管理员保护：不能修改/禁用/删除自己，且系统必须保留至少一个可用管理员 | `TestAdminCannotLockSelfOut`、`TestCannotRemoveLastActiveAdmin` |
 | 10 | 安全响应头：`nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy`、`Permissions-Policy`、CSP（`script-src 'self'`，无 inline script）、HTTPS 下 HSTS | `TestHealthzIsPublicAndSetsSecurityHeaders` |
-| 11 | XSS 防护：前端不使用 `dangerouslySetInnerHTML`；HTML 导出对聊天内容做转义 | `TestTicketExportFormats` |
+| 11 | XSS 防护：KMarkdown 先转义再渲染；卡片/附件链接仅接受 HTTP(S)；HTML 导出转义聊天内容，CSV 中的潜在公式强制作为文本 | `TestExportMediaRejectsActiveSchemes`、`TestExportsDoNotTruncateAndEscapeSpreadsheetFormulas`、前端 `npm test` |
 | 12 | panic 统一 recover：堆栈只进服务端日志，响应仅返回错误码 + 请求 ID | `TestPanicIsRecoveredWithoutLeakingDetails` |
 | 13 | 反代可信：未配置 `TRUSTED_PROXIES` 时忽略 `X-Forwarded-For`，限流与审计拿不到伪造 IP | `internal/auth` 中间件实现 |
 | 14 | KOOK Token 以 AES-GCM 加密入库，接口只返回掩码（`****a1b2`），审计不含内容 | `TestKookTokenIsWriteOnly` |
@@ -190,7 +190,7 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 | 16e | KOOK 身份唯一绑定：同一 KOOK 账号不能绑定多个控制台账号，同一账号不能绑定多个 KOOK 身份 | `TestBindCodeLinksKookIdentity` |
 | 16f | 用户内容中的 KMarkdown 提及语法会被转义，避免通过备注/消息伪造 @全体成员 | `internal/kook` 卡片构造 |
 | 17 | 数据文件权限：目录 0700、数据库与密钥 0600 | `internal/store` 测试 + 容器验证 |
-| 18 | 依赖供应链：前端仅从官方 shadcn registry 取组件、`npm ci` 可复现、`npm audit` 为 0 漏洞，运行镜像不含 Node/npm | `docker history` 可见 |
+| 18 | 依赖供应链：锁定依赖版本、`npm ci` 可复现；使用 `govulncheck` 与 `npm audit` 按当前漏洞库检查；运行镜像不含 Node/npm | 本次扫描结果见审查报告，容器结构见 `Dockerfile` |
 
 注意事项：
 * 暴露到公网请务必放在反向代理之后启用 HTTPS，并把代理地址写入 `TRUSTED_PROXIES`；
@@ -281,7 +281,7 @@ npm run build   # 产物输出到 dist（再由 make build 同步到 web/dist �
 技术栈：React 19 · Vite · TypeScript · Tailwind v4 · shadcn/ui（官方 registry，Radix 基座）·
 React Router · TanStack Query · TanStack Table · Recharts · react-hook-form + zod · react-i18next（中文 / English）。
 
-后端：Go 1.26 · gin · GORM · `glebarez/sqlite`（纯 Go，无 CGO）· 唯一外部依赖仅 gin/gorm/sqlite 与 `golang.org/x/crypto`。
+后端：Go 1.26.8 或更新版本 · gin · GORM · `glebarez/sqlite`（纯 Go，无 CGO）· gorilla/websocket · `golang.org/x/crypto`。
 
 ---
 

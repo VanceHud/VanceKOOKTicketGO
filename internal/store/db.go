@@ -30,7 +30,8 @@ const (
 
 // Store 聚合数据库连接与各仓储。
 type Store struct {
-	db *gorm.DB
+	db   *gorm.DB
+	path string
 
 	Settings *SettingsRepo
 	Users    *UsersRepo
@@ -75,6 +76,7 @@ func Open(path string) (*Store, error) {
 			LogLevel:                  gormlogger.Warn,
 			IgnoreRecordNotFoundError: true,
 			Colorful:                  false,
+			ParameterizedQueries:      true,
 		}),
 		NowFunc: func() time.Time { return time.Now().UTC() },
 	})
@@ -91,7 +93,7 @@ func Open(path string) (*Store, error) {
 	sqlDB.SetMaxIdleConns(4)
 	sqlDB.SetConnMaxLifetime(0)
 
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	s.Settings = &SettingsRepo{db: db}
 	s.Users = &UsersRepo{db: db}
 	s.Sessions = &SessionsRepo{db: db}
@@ -118,7 +120,7 @@ func (s *Store) Migrate() error {
 	if err := s.migratePanelChannelIndex(); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
-	hardenSQLiteFiles(s.db.Name())
+	hardenSQLiteFiles(s.path)
 	return nil
 }
 

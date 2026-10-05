@@ -337,6 +337,10 @@ func TestUserUniquenessAndSessionRevocation(t *testing.T) {
 	}
 
 	// 删除账号会连带清理会话
+	// 删除管理员前保留另一可用管理员，符合仓储层的事务保护。
+	if err := st.Users.Create(&WebUser{Username: "backup-admin", PasswordHash: "z", Role: RoleAdmin}); err != nil {
+		t.Fatalf("创建备用管理员失败: %v", err)
+	}
 	if err := st.Sessions.Create(&Session{TokenHash: "hash-2", UserID: first.ID, ExpiresAt: Now().Add(time.Hour), LastSeenAt: Now()}); err != nil {
 		t.Fatalf("创建会话失败: %v", err)
 	}

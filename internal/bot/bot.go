@@ -278,7 +278,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	go func() {
 		defer close(gatewayDone)
 		defer func() {
-			b.deps.Tickets.SetPlatform(ticket.NewNoopPlatform(b.deps.Logger))
+			b.deps.Tickets.SetPlatform(nil)
 			b.setStatus(func(s *Status) {
 				s.Running = false
 				s.Connected = false
@@ -731,10 +731,13 @@ func (b *Bot) RefreshPanels() { b.channelCache.clear() }
 
 // ttlCache 是极简的带过期缓存。
 type ttlCache struct {
-	mu    sync.Mutex
-	ttl   time.Duration
-	items map[string]cacheItem
+	mu        sync.Mutex
+	ttl       time.Duration
+	items     map[string]cacheItem
+	nextSweep time.Time
 }
+
+const maxCacheItems = 2048
 
 type cacheItem struct {
 	value   any
@@ -749,7 +752,11 @@ func (c *ttlCache) get(key string) (any, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	item, ok := c.items[key]
-	if !ok || time.Now().After(item.expires) {
+	if !ok {
+		return nil, false
+	}
+	if !time.Now().Before(item.expires) {
+		delete(c.items, key)
 		return nil, false
 	}
 	return item.value, true
@@ -758,7 +765,26 @@ func (c *ttlCache) get(key string) (any, bool) {
 func (c *ttlCache) set(key string, value any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.items[key] = cacheItem{value: value, expires: time.Now().Add(c.ttl)}
+	now := time.Now()
+	if !now.Before(c.nextSweep) || len(c.items) >= maxCacheItems {
+		for k, item := range c.items {
+			if !now.Before(item.expires) {
+				delete(c.items, k)
+			}
+		}
+		c.nextSweep = now.Add(time.Minute)
+	}
+	if _, exists := c.items[key]; !exists && len(c.items) >= maxCacheItems {
+		var oldest string
+		var expires time.Time
+		for k, item := range c.items {
+			if expires.IsZero() || item.expires.Before(expires) {
+				oldest, expires = k, item.expires
+			}
+		}
+		delete(c.items, oldest)
+	}
+	c.items[key] = cacheItem{value: value, expires: now.Add(c.ttl)}
 }
 
 func (c *ttlCache) clear() {

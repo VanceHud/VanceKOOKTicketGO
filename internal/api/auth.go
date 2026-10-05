@@ -73,6 +73,18 @@ func (s *Server) buildMeResponse(c *gin.Context, user *store.WebUser, csrf strin
 
 // handleLogin 处理账号密码登录。
 func (s *Server) handleLogin(c *gin.Context) {
+	if !s.passwordAttempts.Allow(auth.ClientIPOf(c)) {
+		s.fail(c, http.StatusTooManyRequests, "too_many_attempts", "尝试过于频繁，请稍后再试")
+		return
+	}
+	// 在昂贵的 bcrypt 比对前限制并发，失败次数限流无法拦住同时到达的请求。
+	select {
+	case s.passwordSlots <- struct{}{}:
+		defer func() { <-s.passwordSlots }()
+	default:
+		s.fail(c, http.StatusTooManyRequests, "too_many_attempts", "登录请求过多，请稍后再试")
+		return
+	}
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "请求参数不合法")
@@ -82,6 +94,10 @@ func (s *Server) handleLogin(c *gin.Context) {
 	password := req.Password
 	if username == "" || password == "" {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "请输入用户名与密码")
+		return
+	}
+	if len(username) > 64 || len(password) > auth.MaxPasswordLength {
+		s.fail(c, http.StatusUnauthorized, "invalid_credentials", "用户名或密码错误")
 		return
 	}
 
@@ -118,8 +134,12 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	created, err := s.Sessions.Create(user.ID, ip, c.Request.UserAgent())
+	created, err := s.Sessions.CreateForUser(user, ip, c.Request.UserAgent())
 	if err != nil {
+		if errors.Is(err, store.ErrAuthenticationChanged) {
+			s.recordLoginFailure(c, keys, username, "账号认证信息已变更")
+			return
+		}
 		s.failInternal(c, err, "auth.login.session")
 		return
 	}
@@ -142,14 +162,15 @@ func (s *Server) handleLogin(c *gin.Context) {
 
 // recordLoginFailure 记录失败计数、审计并返回统一错误。
 func (s *Server) recordLoginFailure(c *gin.Context, keys []string, username, reason string) {
+	locked := false
 	for _, key := range keys {
-		if locked, remaining := s.Login.Failure(key); locked {
-			s.audit(c, "auth.login.locked", username, fmt.Sprintf("失败次数过多触发锁定（%s）", reason))
-			s.fail(c, http.StatusTooManyRequests, "too_many_attempts", "尝试次数过多，账号已临时锁定，请稍后重试")
-			return
-		} else {
-			_ = remaining
-		}
+		keyLocked, _ := s.Login.Failure(key)
+		locked = locked || keyLocked
+	}
+	if locked {
+		s.audit(c, "auth.login.locked", username, fmt.Sprintf("失败次数过多触发锁定（%s）", reason))
+		s.fail(c, http.StatusTooManyRequests, "too_many_attempts", "尝试次数过多，账号已临时锁定，请稍后重试")
+		return
 	}
 	s.audit(c, "auth.login.failed", username, "登录失败："+reason)
 	// 统一提示，不区分账号不存在与密码错误。
@@ -215,29 +236,35 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		return
 	}
 
-	if err := s.Store.Users.UpdateFields(user.ID, map[string]any{
+	if err := s.Store.Users.UpdateVerified(user, map[string]any{
 		"password_hash":        hash,
 		"must_change_password": false,
 		"updated_at":           store.Now(),
 	}); err != nil {
+		if errors.Is(err, store.ErrAuthenticationChanged) {
+			s.fail(c, http.StatusUnauthorized, "auth_state_changed", "账号信息已变更，请重新登录")
+			return
+		}
 		s.failInternal(c, err, "auth.password.update")
 		return
 	}
 	s.Login.Success(limitKey)
 
-	if err := s.Sessions.RevokeUser(user.ID); err != nil {
-		s.Log.Error("吊销旧会话失败", "user", user.Username, "err", err)
-	}
-	created, err := s.Sessions.Create(user.ID, auth.ClientIPOf(c), c.Request.UserAgent())
+	// UpdateFields 已在同一事务中完成旧会话吊销。
+	user.PasswordHash = hash
+	user.MustChangePassword = false
+	created, err := s.Sessions.CreateForUser(user, auth.ClientIPOf(c), c.Request.UserAgent())
 	if err != nil {
+		if errors.Is(err, store.ErrAuthenticationChanged) {
+			s.fail(c, http.StatusUnauthorized, "auth_state_changed", "账号信息已变更，请重新登录")
+			return
+		}
 		s.failInternal(c, err, "auth.password.session")
 		return
 	}
 	auth.SetSessionCookie(c, config.SessionCookieName, created.Token, s.Config.SessionMaxTTL)
 	auth.SetLoggedInMarker(c, s.Config.SessionMaxTTL)
 
-	user.PasswordHash = hash
-	user.MustChangePassword = false
 	s.audit(c, "auth.password.changed", user.Username, "修改密码，已吊销该账号其它会话")
 	c.JSON(http.StatusOK, s.buildMeResponse(c, user, s.Sessions.CSRFToken(created.Token)))
 }
@@ -264,7 +291,7 @@ type loginCodeRequest struct {
 //   - 验证码在数据库只存哈希，且一次性使用（MarkUsed 带 used_at IS NULL 条件，天然防并发重放）；
 //   - 按 IP 限流，避免暴力枚举；
 //   - 所有失败原因（不存在/已过期/已使用/用途不符）统一提示，不泄露细节；
-//   - 登录时的权限以**当前** KOOK 角色为准（机器人未连接时回退到签发时的角色快照）；
+//   - 登录时必须验证当前 KOOK 角色；只有显式 DryRun 且无机器人时才使用测试快照；
 //   - 未命中角色映射的账号一律拒绝，符合“未命中映射拒绝登录”的约定。
 func (s *Server) handleLoginCode(c *gin.Context) {
 	if !s.Codes.Allow("login-code:" + auth.ClientIPOf(c)) {
@@ -289,41 +316,52 @@ func (s *Server) handleLoginCode(c *gin.Context) {
 		s.fail(c, http.StatusUnauthorized, "invalid_code", "登录码无效或已过期")
 		return
 	}
-	if err := s.Store.Codes.MarkUsed(record.ID, store.Now(), auth.ClientIPOf(c)); err != nil {
-		// 并发下可能已被消费
-		s.audit(c, "auth.login.failed", "login-code", "一次性登录码已被使用")
-		s.fail(c, http.StatusUnauthorized, "invalid_code", "登录码无效或已过期")
-		return
-	}
-
-	// 角色以最新映射为准；机器人未连接时回退到签发快照
-	role := record.RoleHint
+	role := ""
 	if s.Bot != nil {
-		if resolved, ok, err := s.Bot.ResolveWebRole(c.Request.Context(), record.KookUserID); err == nil && ok {
+		resolved, ok, err := s.Bot.ResolveWebRole(c.Request.Context(), record.KookUserID)
+		if err != nil {
+			s.Log.Warn("登录码权限校验不可用", "err", err)
+			s.fail(c, http.StatusServiceUnavailable, "role_verification_unavailable", "暂时无法验证 KOOK 权限，请稍后重试或使用密码登录")
+			return
+		}
+		if ok {
 			role = resolved
 		}
+	} else if s.Config.DryRun {
+		role = record.RoleHint
+	} else {
+		s.fail(c, http.StatusServiceUnavailable, "role_verification_unavailable", "暂时无法验证 KOOK 权限，请稍后重试或使用密码登录")
+		return
 	}
 	if !validRole(role) {
 		s.audit(c, "auth.login.failed", record.KookUserID, "KOOK 账号未命中角色映射")
 		s.fail(c, http.StatusForbidden, "no_role_mapping", "该 KOOK 账号没有控制台权限，请联系管理员配置角色映射")
 		return
 	}
+	if err := s.Store.Codes.MarkUsed(record.ID, store.Now(), auth.ClientIPOf(c)); err != nil {
+		s.audit(c, "auth.login.failed", "login-code", "一次性登录码已被使用或过期")
+		s.fail(c, http.StatusUnauthorized, "invalid_code", "登录码无效或已过期")
+		return
+	}
 
 	user, err := s.Store.Users.ByKookID(record.KookUserID)
 	switch {
 	case err == nil:
+		if user.Disabled {
+			s.audit(c, "auth.login.failed", user.Username, "账号已被禁用")
+			s.fail(c, http.StatusForbidden, "account_disabled", "账号已被禁用，请联系管理员")
+			return
+		}
 		// 已绑定账号：同步最新角色与显示名
-		updates := map[string]any{"role": role, "updated_at": store.Now()}
+		updates := map[string]any{"updated_at": store.Now()}
+		if role != user.Role {
+			updates["role"] = role
+		}
 		if record.KookUserName != "" && record.KookUserName != user.KookUserName {
 			updates["kook_user_name"] = record.KookUserName
 		}
 		if err := s.Store.Users.UpdateFields(user.ID, updates); err != nil {
-			s.failInternal(c, err, "auth.login_code.update")
-			return
-		}
-		if user.Disabled {
-			s.audit(c, "auth.login.failed", user.Username, "账号已被禁用")
-			s.fail(c, http.StatusForbidden, "account_disabled", "账号已被禁用，请联系管理员")
+			s.failStore(c, err, "auth.login_code.update")
 			return
 		}
 		user.Role = role
@@ -361,8 +399,12 @@ func (s *Server) handleLoginCode(c *gin.Context) {
 		return
 	}
 
-	session, err := s.Sessions.Create(user.ID, auth.ClientIPOf(c), c.Request.UserAgent())
+	session, err := s.Sessions.CreateForUser(user, auth.ClientIPOf(c), c.Request.UserAgent())
 	if err != nil {
+		if errors.Is(err, store.ErrAuthenticationChanged) {
+			s.fail(c, http.StatusUnauthorized, "auth_state_changed", "账号信息已变更，请重新登录")
+			return
+		}
 		s.failInternal(c, err, "auth.login_code.session")
 		return
 	}
@@ -429,18 +471,12 @@ func (s *Server) handleBindCode(c *gin.Context) {
 		return
 	}
 
-	if err := s.Store.Codes.MarkUsed(record.ID, store.Now(), auth.ClientIPOf(c)); err != nil {
-		s.fail(c, http.StatusUnauthorized, "invalid_code", "绑定码无效或已过期")
-		return
-	}
-
-	kookID := record.KookUserID
-	if err := s.Store.Users.UpdateFields(current.ID, map[string]any{
-		"kook_user_id":   kookID,
-		"kook_user_name": record.KookUserName,
-		"updated_at":     store.Now(),
-	}); err != nil {
-		s.failStore(c, err, "auth.bind.update")
+	if err := s.Store.Codes.BindToUser(record.ID, current.ID, store.Now(), auth.ClientIPOf(c)); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.fail(c, http.StatusUnauthorized, "invalid_code", "绑定码无效或已过期")
+		} else {
+			s.failStore(c, err, "auth.bind.update")
+		}
 		return
 	}
 

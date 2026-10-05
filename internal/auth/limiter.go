@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const maxLimiterKeys = 16384
+
 // LoginLimiter 实现“IP + 账号”双维度登录失败限流与锁定。
 //
 // 判定逻辑：窗口内失败次数达到阈值即锁定一段时间；成功登录后清零。
@@ -16,6 +18,7 @@ type LoginLimiter struct {
 	lockFor time.Duration
 	entries map[string]*failureEntry
 	now     func() time.Time
+	nextGC  time.Time
 }
 
 type failureEntry struct {
@@ -63,8 +66,15 @@ func (l *LoginLimiter) Failure(key string) (locked bool, remaining int) {
 	defer l.mu.Unlock()
 
 	now := l.now()
+	if !now.Before(l.nextGC) {
+		l.gc(now)
+		l.nextGC = now.Add(min(time.Minute, l.window))
+	}
 	entry, ok := l.entries[key]
 	if !ok || now.Sub(entry.firstSeen) > l.window {
+		if !ok && len(l.entries) >= maxLimiterKeys {
+			return true, 0
+		}
 		entry = &failureEntry{firstSeen: now}
 		l.entries[key] = entry
 	}
@@ -90,7 +100,10 @@ func (l *LoginLimiter) Success(key string) {
 func (l *LoginLimiter) GC() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	now := l.now()
+	l.gc(l.now())
+}
+
+func (l *LoginLimiter) gc(now time.Time) {
 	for key, entry := range l.entries {
 		if now.Before(entry.lockedTil) {
 			continue
@@ -108,6 +121,7 @@ type WindowLimiter struct {
 	max     int
 	entries map[string][]time.Time
 	now     func() time.Time
+	nextGC  time.Time
 }
 
 // NewWindowLimiter 创建滑动窗口限流器。
@@ -129,6 +143,13 @@ func (l *WindowLimiter) Allow(key string) bool {
 	defer l.mu.Unlock()
 
 	now := l.now()
+	if !now.Before(l.nextGC) {
+		l.gc(now)
+		l.nextGC = now.Add(min(time.Minute, l.window))
+	}
+	if _, exists := l.entries[key]; !exists && len(l.entries) >= maxLimiterKeys {
+		return false
+	}
 	cutoff := now.Add(-l.window)
 	times := l.entries[key][:0]
 	for _, t := range l.entries[key] {
@@ -148,7 +169,11 @@ func (l *WindowLimiter) Allow(key string) bool {
 func (l *WindowLimiter) GC() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	cutoff := l.now().Add(-l.window)
+	l.gc(l.now())
+}
+
+func (l *WindowLimiter) gc(now time.Time) {
+	cutoff := now.Add(-l.window)
 	for key, times := range l.entries {
 		kept := times[:0]
 		for _, t := range times {

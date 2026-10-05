@@ -19,6 +19,7 @@ import { KMarkdownPreview } from "@/components/KMarkdownPreview"
 import { formatDateTime } from "@/lib/format"
 import { elementText, parseCards, textOf, type CardText, type KookElement, type KookModule } from "@/lib/kookcard"
 import { cn } from "@/lib/utils"
+import { safeMediaUrl } from "@/lib/media"
 
 /** 卡片主题对应的边框与底色（对齐 KOOK 客户端的主题色）。 */
 const CARD_THEMES: Record<string, string> = {
@@ -55,7 +56,7 @@ function RichText({ value, className }: { value: CardText | undefined; className
 function CardImage({ src, alt, className, circle }: { src?: string; alt?: string; className?: string; circle?: boolean }) {
   const { t } = useTranslation()
   const [failed, setFailed] = useState(false)
-  const url = (src ?? "").trim()
+  const url = safeMediaUrl(src)
   if (!url) return null
 
   if (failed) {
@@ -91,9 +92,10 @@ function CardButton({ element }: { element: KookElement }) {
     "inline-flex h-8 items-center rounded-md px-3 text-xs font-medium",
     BUTTON_THEMES[element.theme ?? "primary"] ?? BUTTON_THEMES.primary,
   )
-  if (element.click === "link" && element.value) {
+  const url = safeMediaUrl(element.value)
+  if (element.click === "link" && url) {
     return (
-      <a href={element.value} target="_blank" rel="noreferrer noopener" className={classes}>
+      <a href={url} target="_blank" rel="noreferrer noopener" className={classes}>
         {text.content}
       </a>
     )
@@ -179,7 +181,7 @@ function CardModuleView({ module }: { module: KookModule }) {
             .map((element, index) => (
               <a
                 key={index}
-                href={element.src ?? element.fallbackUrl}
+                href={safeMediaUrl(element.src ?? element.fallbackUrl) || undefined}
                 target="_blank"
                 rel="noreferrer noopener"
                 className="block"
@@ -219,7 +221,7 @@ function CardModuleView({ module }: { module: KookModule }) {
     case "file":
       return (
         <a
-          href={module.src}
+          href={safeMediaUrl(module.src) || undefined}
           target="_blank"
           rel="noreferrer noopener"
           download
@@ -240,7 +242,7 @@ function CardModuleView({ module }: { module: KookModule }) {
               {module.title}
             </p>
           ) : null}
-          <audio controls preload="metadata" src={module.src} className="w-full" />
+          <audio controls preload="metadata" src={safeMediaUrl(module.src) || undefined} className="w-full" />
         </div>
       )
 
@@ -253,7 +255,7 @@ function CardModuleView({ module }: { module: KookModule }) {
               {module.title}
             </p>
           ) : null}
-          <video controls preload="metadata" src={module.src} className="max-h-80 w-full rounded-md" />
+          <video controls preload="metadata" src={safeMediaUrl(module.src) || undefined} className="max-h-80 w-full rounded-md" />
         </div>
       )
 

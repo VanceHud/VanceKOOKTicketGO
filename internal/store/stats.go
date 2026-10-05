@@ -1,6 +1,7 @@
 package store
 
 import (
+	"math"
 	"sort"
 	"time"
 )
@@ -40,7 +41,7 @@ type Analytics struct {
 	GeneratedAt time.Time `json:"generatedAt"`
 	RangeDays   int       `json:"rangeDays"`
 
-	// Total / Closed 为区间内的工单总量与已关闭量
+	// Total / Closed 为区间内开单总量及其中当前已关闭的数量。
 	Total      int64   `json:"total"`
 	Closed     int64   `json:"closed"`
 	ClosedRate float64 `json:"closedRate"`
@@ -109,15 +110,14 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 		MessageCount    int
 	}
 
-	var rows []analyticsRow
-	err := r.db.Model(&Ticket{}).
+	rows, err := r.db.Model(&Ticket{}).
 		Select("status, source_channel_id, closed_by_name, started_at, closed_at, first_reply_at, message_count").
-		Where("started_at >= ? OR closed_at >= ?", rangeStart.UTC(), rangeStart.UTC()).
-		Limit(maxStatRows).
-		Find(&rows).Error
+		Where("started_at >= ? OR closed_at >= ? OR first_reply_at >= ?", rangeStart.UTC(), rangeStart.UTC(), rangeStart.UTC()).
+		Rows()
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
 	var (
 		replyDurations      []float64
@@ -129,24 +129,27 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 		messageSum          int64
 	)
 
-	for _, row := range rows {
-		result.Total++
-		messageSum += int64(row.MessageCount)
-
-		if !row.StartedAt.Before(rangeStart.UTC()) {
+	for rows.Next() {
+		var row analyticsRow
+		if err := r.db.ScanRows(rows, &row); err != nil {
+			return nil, err
+		}
+		// 开单量、关闭率、来源、单均消息数按同一批区间内开单计算。
+		inCohort := !row.StartedAt.Before(rangeStart.UTC())
+		if inCohort {
+			result.Total++
+			messageSum += int64(row.MessageCount)
 			hour := row.StartedAt.In(loc).Hour()
 			result.Hourly[hour].Opened++
 			sourceOpened[row.SourceChannelID]++
-		}
-		if row.Status == TicketClosed {
-			result.Closed++
+			if row.Status == TicketClosed {
+				result.Closed++
+				sourceClosed[row.SourceChannelID]++
+			}
 		}
 		if row.ClosedAt != nil && !row.ClosedAt.Before(rangeStart.UTC()) {
 			hour := row.ClosedAt.In(loc).Hour()
 			result.Hourly[hour].Closed++
-			if row.SourceChannelID != "" {
-				sourceClosed[row.SourceChannelID]++
-			}
 			if resolution := row.ClosedAt.Sub(row.StartedAt).Seconds(); resolution >= 0 {
 				resolutionDurations = append(resolutionDurations, resolution)
 				name := row.ClosedByName
@@ -162,6 +165,13 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 				replyDurations = append(replyDurations, reply)
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 后续还有 SQL 查询，主动释放持有的连接。
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
 
 	result.FirstReply = summarizeDurations(replyDurations)
@@ -237,8 +247,8 @@ func summarizeDurations(values []float64) DurationStats {
 	if len(values) == 0 {
 		return stats
 	}
-	sorted := make([]float64, len(values))
-	copy(sorted, values)
+	// values 由本次统计独占，直接原地排序，避免再复制全部时长样本。
+	sorted := values
 	sort.Float64s(sorted)
 
 	var sum float64
@@ -259,7 +269,7 @@ func percentile(sorted []float64, ratio float64) float64 {
 	if len(sorted) == 1 {
 		return sorted[0]
 	}
-	index := int(ratio*float64(len(sorted))+0.5) - 1
+	index := int(math.Ceil(ratio*float64(len(sorted)))) - 1
 	if index < 0 {
 		index = 0
 	}

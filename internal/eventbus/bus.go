@@ -38,26 +38,39 @@ type Bus struct {
 	mu     sync.RWMutex
 	nextID int
 	subs   map[int]chan Event
+	owners map[int]string
+	counts map[string]int
 }
 
 // New 创建事件总线。
 func New() *Bus {
-	return &Bus{subs: make(map[int]chan Event)}
+	return &Bus{subs: make(map[int]chan Event), owners: make(map[int]string), counts: make(map[string]int)}
 }
 
 // Subscribe 注册订阅者，返回订阅 ID 与只读通道。
 // buffer 决定单订阅者允许积压的事件数，超出后新事件被丢弃。
 func (b *Bus) Subscribe(buffer int) (int, <-chan Event) {
+	id, ch, _ := b.SubscribeLimited("", 0, buffer)
+	return id, ch
+}
+
+// SubscribeLimited 在同一把锁内检查并登记单账号订阅上限，避免并发连接绕过。
+func (b *Bus) SubscribeLimited(owner string, limit, buffer int) (int, <-chan Event, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if limit > 0 && b.counts[owner] >= limit {
+		return 0, nil, false
+	}
 	if buffer <= 0 {
 		buffer = 16
 	}
 	ch := make(chan Event, buffer)
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.nextID++
 	id := b.nextID
 	b.subs[id] = ch
-	return id, ch
+	b.owners[id] = owner
+	b.counts[owner]++
+	return id, ch, true
 }
 
 // Unsubscribe 注销订阅者并关闭其通道。
@@ -69,6 +82,12 @@ func (b *Bus) Unsubscribe(id int) {
 		return
 	}
 	delete(b.subs, id)
+	owner := b.owners[id]
+	delete(b.owners, id)
+	b.counts[owner]--
+	if b.counts[owner] == 0 {
+		delete(b.counts, owner)
+	}
 	close(ch)
 }
 

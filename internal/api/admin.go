@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"vancekookticket/internal/auth"
+	"vancekookticket/internal/config"
 	"vancekookticket/internal/kook"
 	"vancekookticket/internal/store"
 )
@@ -391,7 +393,6 @@ func (s *Server) handleUserUpdate(c *gin.Context) {
 	identity := auth.IdentityOf(c)
 
 	updates := map[string]any{"updated_at": store.Now()}
-	revokeSessions := false
 	details := make([]string, 0, 4)
 
 	if req.DisplayName != nil {
@@ -425,7 +426,6 @@ func (s *Server) handleUserUpdate(c *gin.Context) {
 			}
 		}
 		updates["role"] = *req.Role
-		revokeSessions = true
 		details = append(details, "角色 → "+*req.Role)
 	}
 
@@ -446,7 +446,6 @@ func (s *Server) handleUserUpdate(c *gin.Context) {
 			}
 		}
 		updates["disabled"] = *req.Disabled
-		revokeSessions = true
 		details = append(details, fmt.Sprintf("禁用=%t", *req.Disabled))
 	}
 
@@ -458,7 +457,6 @@ func (s *Server) handleUserUpdate(c *gin.Context) {
 		}
 		updates["password_hash"] = hash
 		updates["must_change_password"] = true
-		revokeSessions = true
 		details = append(details, "重置密码")
 	}
 
@@ -469,11 +467,6 @@ func (s *Server) handleUserUpdate(c *gin.Context) {
 	if err := s.Store.Users.UpdateFields(target.ID, updates); err != nil {
 		s.failStore(c, err, "users.update")
 		return
-	}
-	if revokeSessions {
-		if err := s.Sessions.RevokeUser(target.ID); err != nil {
-			s.Log.Error("吊销账号会话失败", "user", target.Username, "err", err)
-		}
 	}
 
 	updated, err := s.Store.Users.ByID(target.ID)
@@ -903,21 +896,40 @@ func readonlyEventTypes(eventType string) bool {
 // handleEvents 建立 SSE 长连接推送实时事件。
 func (s *Server) handleEvents(c *gin.Context) {
 	identity := auth.IdentityOf(c)
-	role := store.RoleReadonly
-	if identity != nil {
-		role = identity.Role
-	}
+	role := identity.Role
+	token, _ := c.Cookie(config.SessionCookieName)
 
-	subID, ch := s.Bus.Subscribe(64)
+	subID, ch, allowed := s.Bus.SubscribeLimited(strconv.FormatUint(uint64(identity.UserID), 10), 5, 64)
+	if !allowed {
+		s.fail(c, http.StatusTooManyRequests, "too_many_streams", "每个账号最多同时建立 5 条实时连接")
+		return
+	}
 	defer s.Bus.Unsubscribe(subID)
+	controller := http.NewResponseController(c.Writer)
+	defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
+	send := func(eventType string, data any) bool {
+		if err := controller.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return false
+		}
+		c.SSEvent(eventType, data)
+		return controller.Flush() == nil
+	}
+	check := func() bool {
+		_, user, err := s.Sessions.Check(token)
+		if err != nil || user.MustChangePassword || !store.RoleAtLeast(user.Role, store.RoleReadonly) {
+			send("auth.expired", gin.H{"at": store.Now()})
+			return false
+		}
+		role = user.Role
+		return true
+	}
 
 	c.Header("Cache-Control", "no-store")
 	c.Header("X-Accel-Buffering", "no")
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Flush()
-
-	c.SSEvent("ready", gin.H{"role": role, "subscriberId": subID, "at": store.Now()})
-	c.Writer.Flush()
+	if !send("ready", gin.H{"role": role, "subscriberId": subID, "at": store.Now()}) {
+		return
+	}
 
 	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
@@ -930,14 +942,19 @@ func (s *Server) handleEvents(c *gin.Context) {
 			if !ok {
 				return
 			}
+			if !check() {
+				return
+			}
 			if role == store.RoleReadonly && !readonlyEventTypes(event.Type) {
 				continue
 			}
-			c.SSEvent(event.Type, event)
-			c.Writer.Flush()
+			if !send(event.Type, event) {
+				return
+			}
 		case <-heartbeat.C:
-			c.SSEvent("ping", gin.H{"at": store.Now()})
-			c.Writer.Flush()
+			if !check() || !send("ping", gin.H{"at": store.Now()}) {
+				return
+			}
 		}
 	}
 }

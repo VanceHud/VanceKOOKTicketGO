@@ -84,6 +84,8 @@ type Deps struct {
 // Server 承载全部 HTTP handler。
 type Server struct {
 	Deps
+	passwordAttempts *auth.WindowLimiter
+	passwordSlots    chan struct{}
 }
 
 // NewServer 创建 API 服务。
@@ -91,7 +93,7 @@ func NewServer(d Deps) *Server {
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
-	return &Server{Deps: d}
+	return &Server{Deps: d, passwordAttempts: auth.NewWindowLimiter(20, time.Minute), passwordSlots: make(chan struct{}, 4)}
 }
 
 // botConnected 判断机器人是否在线。
@@ -139,6 +141,10 @@ func (s *Server) failInternal(c *gin.Context, err error, action string) {
 // failStore 把仓储层错误映射为合适的响应。
 func (s *Server) failStore(c *gin.Context, err error, action string) {
 	switch {
+	case errors.Is(err, store.ErrLastAdmin):
+		s.fail(c, http.StatusConflict, "last_admin", "系统必须保留至少一个可用管理员")
+	case errors.Is(err, store.ErrAlreadyBound):
+		s.fail(c, http.StatusConflict, "already_bound", "该账号已有其它身份绑定")
 	case errors.Is(err, store.ErrNotFound):
 		s.fail(c, http.StatusNotFound, "not_found", "资源不存在")
 	case errors.Is(err, gorm.ErrDuplicatedKey):

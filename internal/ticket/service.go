@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"vancekookticket/internal/eventbus"
@@ -62,10 +63,11 @@ func SystemActor() Actor {
 
 // Service 是工单业务服务。
 type Service struct {
-	store    *store.Store
-	bus      *eventbus.Bus
-	platform Platform
-	loc      *time.Location
+	store      *store.Store
+	bus        *eventbus.Bus
+	platform   Platform
+	platformMu sync.RWMutex
+	loc        *time.Location
 	// outdateHours 返回工单空闲锁定阈值（小时），从配置实时读取。
 	outdateHours func() int
 	// locks 按工单编号串行化状态变更：KOOK 按钮与 WebUI 可能同时操作同一张工单，
@@ -82,10 +84,16 @@ func NewService(st *store.Store, bus *eventbus.Bus, platform Platform, loc *time
 }
 
 // SetPlatform 在 KOOK 连接建立后注入真实平台实现。
-func (s *Service) SetPlatform(p Platform) { s.platform = p }
+func (s *Service) SetPlatform(p Platform) {
+	s.platformMu.Lock()
+	defer s.platformMu.Unlock()
+	s.platform = p
+}
 
 // WithPlatform 在给定平台实现下执行 fn，用于“本地事务 + 远端调用”的清晰边界。
 func (s *Service) platformOrErr() (Platform, error) {
+	s.platformMu.RLock()
+	defer s.platformMu.RUnlock()
 	if s.platform == nil {
 		return nil, ErrNoPlatform
 	}

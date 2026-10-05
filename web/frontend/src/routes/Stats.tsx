@@ -86,7 +86,7 @@ export function StatsPage() {
         <ErrorState error={query.error} onRetry={() => void query.refetch()} />
       ) : query.isPending ? (
         <InlineLoader />
-      ) : !query.data || query.data.total === 0 ? (
+      ) : !query.data || (query.data.total === 0 && query.data.resolution.count === 0 && query.data.firstReply.count === 0 && query.data.archivedMessages === 0) ? (
         <Card>
           <CardContent>
             <EmptyState title={t("stats.empty")} icon={<BarChart3 className="size-6" />} />

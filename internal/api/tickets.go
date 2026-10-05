@@ -3,10 +3,13 @@ package api
 import (
 	"bytes"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
+	"net/url"
 	"strings"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 
@@ -272,6 +275,8 @@ func (s *Server) failTicketError(c *gin.Context, err error, action string) {
 	switch {
 	case err == nil:
 		return
+	case errors.Is(err, ticket.ErrNoPlatform):
+		s.fail(c, http.StatusServiceUnavailable, "bot_unavailable", "机器人未连接，请连接后重试")
 	case isInvalidState(err):
 		s.fail(c, http.StatusConflict, "invalid_state", strings.TrimPrefix(err.Error(), "工单当前状态不允许该操作："))
 	default:
@@ -295,15 +300,22 @@ func (s *Server) handleTicketExport(c *gin.Context) {
 		return
 	}
 
-	messages, err := s.Store.Tickets.Messages(t.No, store.MaxExportMessages, 0)
+	messages, err := s.Store.Tickets.ExportMessages(t.No)
 	if err != nil {
+		if errors.Is(err, store.ErrExportTooLarge) {
+			s.fail(c, http.StatusUnprocessableEntity, "export_limit_exceeded", "工单消息超过 20,000 条，无法一次性导出")
+			return
+		}
 		s.failInternal(c, err, "ticket.export.messages")
 		return
 	}
-	notes, err := s.Store.Tickets.Notes(t.No)
-	if err != nil {
-		s.failInternal(c, err, "ticket.export.notes")
-		return
+	var notes []store.TicketNote
+	if format != "csv" {
+		notes, err = s.Store.Tickets.Notes(t.No)
+		if err != nil {
+			s.failInternal(c, err, "ticket.export.notes")
+			return
+		}
 	}
 
 	exporter := actorName(c)
@@ -332,7 +344,7 @@ func (s *Server) handleTicketExport(c *gin.Context) {
 			if m.IsBot {
 				source = "机器人"
 			}
-			_ = writer.Write([]string{
+			row := []string{
 				m.CreatedAt.Format("2006-01-02 15:04:05"),
 				m.MsgID,
 				m.UserID,
@@ -341,7 +353,11 @@ func (s *Server) handleTicketExport(c *gin.Context) {
 				source,
 				m.Content,
 				mediaURL(m),
-			})
+			}
+			for i := range row {
+				row[i] = csvText(row[i])
+			}
+			_ = writer.Write(row)
 		}
 		writer.Flush()
 		if err := writer.Error(); err != nil {
@@ -354,6 +370,16 @@ func (s *Server) handleTicketExport(c *gin.Context) {
 	}
 
 	s.audit(c, "ticket.export", t.No, fmt.Sprintf("导出聊天记录（格式：%s，消息数：%d）", format, len(messages)))
+}
+
+// csvText 把潜在公式强制作为文本，包括前置空白/控制符绕过。
+func csvText(value string) string {
+	trimmed := strings.TrimLeftFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+	if strings.HasPrefix(value, "\t") || strings.HasPrefix(value, "\r") || strings.HasPrefix(value, "\n") ||
+		strings.HasPrefix(trimmed, "=") || strings.HasPrefix(trimmed, "+") || strings.HasPrefix(trimmed, "-") || strings.HasPrefix(trimmed, "@") {
+		return "'" + value
+	}
+	return value
 }
 
 // renderTicketHTML 生成可离线查看的记录页。
@@ -434,8 +460,8 @@ func renderHTMLMessage(m store.TicketMessage) string {
 
 // mediaURL 返回富媒体消息的实际地址：优先结构化字段，兼容旧记录的「[类型] 地址」文本。
 func mediaURL(m store.TicketMessage) string {
-	if url := strings.TrimSpace(m.MediaURL); url != "" {
-		return url
+	if raw := strings.TrimSpace(m.MediaURL); raw != "" {
+		return safeMediaURL(raw)
 	}
 	content := strings.TrimSpace(m.Content)
 	for _, prefix := range []string{"[图片] ", "[视频] ", "[文件] ", "[语音] "} {
@@ -444,10 +470,18 @@ func mediaURL(m store.TicketMessage) string {
 			break
 		}
 	}
-	if fields := strings.Fields(content); len(fields) > 0 && strings.HasPrefix(fields[0], "http") {
-		return fields[0]
+	if fields := strings.Fields(content); len(fields) > 0 {
+		return safeMediaURL(fields[0])
 	}
 	return ""
+}
+
+func safeMediaURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	return u.String()
 }
 
 // mediaLabel 返回资源的展示名称（文件名优先，其次从地址推导）。
