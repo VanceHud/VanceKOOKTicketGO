@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/kook/kooktest"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook/kooktest"
 )
 
 // memorySessionStore 是 SessionStore 的内存实现，用于断言会话读写行为。

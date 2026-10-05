@@ -13,12 +13,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"vancekookticket/internal/auth"
-	"vancekookticket/internal/config"
-	"vancekookticket/internal/eventbus"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
-	"vancekookticket/web"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/config"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/web"
 )
 
 // ---------------------------------------------------------------------------

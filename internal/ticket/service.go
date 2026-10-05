@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"vancekookticket/internal/eventbus"
-	"vancekookticket/internal/keyedlock"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/keyedlock"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // Platform 抽象工单流程需要机器人执行的 KOOK 侧动作。

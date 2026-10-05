@@ -33,8 +33,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		t.Fatalf("装载配置失败: %v", err)
 	}
 
-	if cfg.Addr != ":8080" {
-		t.Errorf("默认端口应为 8080，得到 %s", cfg.Addr)
+	if cfg.Addr != ":9235" {
+		t.Errorf("默认端口应为 9235，得到 %s", cfg.Addr)
 	}
 	if cfg.TicketTZ != "Asia/Shanghai" || cfg.Location.String() != "Asia/Shanghai" {
 		t.Errorf("默认业务时区应为北京时间，得到 %s", cfg.TicketTZ)

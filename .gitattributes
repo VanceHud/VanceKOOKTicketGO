@@ -1,0 +1,39 @@
+# 统一换行符为 LF（仓库内文件），避免 Windows 贡献者提交出 CRLF 导致整文件 diff
+* text=auto eol=lf
+
+# Windows 上仍需要 CRLF 的脚本
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件：不做换行转换，也不要在 diff 里尝试按文本展示
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.db binary
+*.db-wal binary
+*.db-shm binary
+*.gz binary
+*.tar binary
+*.zip binary
+
+# 构建产物与二进制（防止被误判为文本而生成巨大 diff）
+/bin/* binary
+kook-ticket-* binary
+
+# 语言统计：这些目录不算进仓库的代码占比
+web/frontend/dist/** linguist-generated=true
+web/dist/** linguist-generated=true
+web/frontend/package-lock.json linguist-generated=true
+go.sum linguist-generated=true
+
+# 归档/文档类不计入代码统计
+docs/** linguist-documentation=true
+*.md linguist-documentation=true

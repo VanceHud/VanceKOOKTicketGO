@@ -17,17 +17,17 @@ import (
 	"syscall"
 	"time"
 
-	"vancekookticket/internal/api"
-	"vancekookticket/internal/auth"
-	"vancekookticket/internal/bootstrap"
-	"vancekookticket/internal/bot"
-	"vancekookticket/internal/config"
-	"vancekookticket/internal/dryrun"
-	"vancekookticket/internal/eventbus"
-	"vancekookticket/internal/secure"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
-	"vancekookticket/web"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/api"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/bootstrap"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/bot"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/config"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/dryrun"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/web"
 )
 
 // Version 是构建版本号，可在构建时通过 -ldflags "-X main.Version=..." 覆盖。

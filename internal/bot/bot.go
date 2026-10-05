@@ -21,11 +21,11 @@ import (
 	"sync"
 	"time"
 
-	"vancekookticket/internal/eventbus"
-	"vancekookticket/internal/keyedlock"
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/keyedlock"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
 )
 
 // ErrNotConnected 表示机器人当前没有可用的 KOOK 连接。

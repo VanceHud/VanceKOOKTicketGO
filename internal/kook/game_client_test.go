@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/kook/kooktest"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook/kooktest"
 )
 
 // newGameClient 启动模拟平台并返回指向它的客户端。

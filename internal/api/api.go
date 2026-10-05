@@ -19,14 +19,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
-	"vancekookticket/internal/auth"
-	"vancekookticket/internal/bot"
-	"vancekookticket/internal/config"
-	"vancekookticket/internal/eventbus"
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
-	"vancekookticket/web"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/bot"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/config"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/web"
 )
 
 // BotController 是 API 层对机器人的最小依赖（由 bot.Manager 实现）。

@@ -1,4 +1,4 @@
-module vancekookticket
+module github.com/VanceHud/VanceKOOKTicketGO
 
 go 1.26.8
 

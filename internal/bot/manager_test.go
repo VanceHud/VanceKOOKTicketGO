@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"vancekookticket/internal/eventbus"
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/kook/kooktest"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook/kooktest"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
 )
 
 // newManagerEnv 搭好「模拟平台 + 数据库 + Manager」，用于验证连接生命周期。

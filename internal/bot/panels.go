@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // 面板默认文案（WebUI 未填写时使用）。

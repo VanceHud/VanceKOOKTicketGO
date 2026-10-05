@@ -7,9 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
 )
 
 // platform 实现 ticket.Platform：把工单业务需要 KOOK 执行的动作落到真实接口上。

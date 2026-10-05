@@ -56,16 +56,16 @@ RUN mkdir -p /app/data && chown 10001:10001 /app/data
 # 以非 root 运行；数据目录是唯一需要写入的路径
 USER 10001
 
-ENV PORT=8080 \
+ENV PORT=9235 \
     DATA_DIR=/app/data \
     TICKET_TZ=Asia/Shanghai \
     LOG_LEVEL=info
 
-EXPOSE 8080
+EXPOSE 9235
 VOLUME ["/app/data"]
 
 # busybox wget 随 alpine 提供，无需额外安装工具
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1
+    CMD wget -qO- http://127.0.0.1:9235/healthz >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/app/kook-ticket"]

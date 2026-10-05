@@ -3,8 +3,8 @@ package bot
 import (
 	"testing"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // activityCalls 返回模拟平台上 game/activity 的调用次数。

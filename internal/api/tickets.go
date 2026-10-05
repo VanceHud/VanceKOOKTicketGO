@@ -13,10 +13,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"vancekookticket/internal/auth"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
-	"vancekookticket/internal/ticketno"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticketno"
 )
 
 // 备注与关闭说明的长度上限，避免超长文本破坏界面与日志。

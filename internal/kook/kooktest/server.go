@@ -26,7 +26,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"vancekookticket/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
 )
 
 // Call 记录一次平台调用。

@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"vancekookticket/internal/auth"
-	"vancekookticket/internal/config"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/config"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // Result 描述本次初始化的结果。

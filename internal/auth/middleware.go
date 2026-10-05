@@ -10,8 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"vancekookticket/internal/secure"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // gin.Context 中使用的键名集中定义，避免字符串散落各处。

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"vancekookticket/internal/secure"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // issueCode 直接在数据库中写入一次性码（等价于机器人在 KOOK 私聊中签发）。

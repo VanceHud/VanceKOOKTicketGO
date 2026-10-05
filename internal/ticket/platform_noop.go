@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // NoopPlatform 是 KOOK 不可用时的平台实现。

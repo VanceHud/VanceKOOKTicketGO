@@ -8,7 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"vancekookticket/internal/ticketno"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticketno"
 )
 
 // TicketsRepo 负责工单、消息、备注与统计。

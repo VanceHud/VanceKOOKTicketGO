@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"vancekookticket/internal/bot"
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/bot"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // ---------------------------------------------------------------------------

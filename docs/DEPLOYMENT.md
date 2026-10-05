@@ -145,7 +145,7 @@ sed -i "s/^ADMIN_PASSWORD=$/ADMIN_PASSWORD=改成你自己的强密码/" .env
 编辑 `.env` 时需要确认的几项：
 
 ```ini
-PORT=8080                 # 宿主机映射端口
+PORT=9235                 # WebUI 端口
 TICKET_TZ=Asia/Shanghai   # 业务时区（默认即北京时间，如无特殊需求不用改）
 KOOK_TOKEN=               # 可留空，稍后在 WebUI 里填
 COOKIE_SECURE=auto        # 走 HTTPS 反代时保持 auto 即可
@@ -160,12 +160,12 @@ docker compose ps          # 状态应为 Up (healthy)
 docker compose logs -f kook-ticket
 ```
 
-**关于端口**：默认 compose 只监听回环地址（`127.0.0.1:8080`），也就是只能从本机访问 —— 这是为了配合反向代理。
-如果你没有反向代理、想直接用 `http://服务器IP:8080` 访问，把 `docker-compose.yml` 里的端口改成：
+**关于端口**：默认 compose 只监听回环地址（`127.0.0.1:9235`），也就是只能从本机访问 —— 这是为了配合反向代理。
+如果你没有反向代理、想直接用 `http://服务器IP:9235` 访问，把 `docker-compose.yml` 里的端口改成：
 
 ```yaml
     ports:
-      - "${PORT:-8080}:8080"     # 去掉前面的 127.0.0.1:
+      - "${PORT:-9235}:9235"     # 去掉前面的 127.0.0.1:
 ```
 
 > ⚠️ 直接暴露到公网时，请务必先设置强密码与 `APP_SECRET`，并尽快按第 6 步加上 HTTPS。
@@ -182,7 +182,7 @@ docker compose logs kook-ticket | grep initial_password
 # time=... msg=已生成初始管理员账号，请立即登录并修改密码 username=admin initial_password=xxxxxxxx note=登录后会被强制要求修改密码
 ```
 
-浏览器打开 `http://服务器IP:8080`（或反向代理域名），用 `admin` + 上述密码登录。**首次登录会被强制要求修改密码**，改完才能使用其它功能。
+浏览器打开 `http://服务器IP:9235`（或反向代理域名），用 `admin` + 上述密码登录。**首次登录会被强制要求修改密码**，改完才能使用其它功能。
 
 ### 3.4 常用命令
 
@@ -282,7 +282,7 @@ sudo chmod 755 /opt/kook-ticket/kook-ticket
 
 ```bash
 sudo tee /opt/kook-ticket/.env > /dev/null <<'EOF'
-PORT=8080
+PORT=9235
 DATA_DIR=/opt/kook-ticket/data
 TICKET_TZ=Asia/Shanghai
 LOG_LEVEL=info
@@ -342,7 +342,7 @@ journalctl -u kook-ticket -f
 ### 4.5 健康检查与升级
 
 ```bash
-curl -s http://127.0.0.1:8080/healthz
+curl -s http://127.0.0.1:9235/healthz
 # {"db":"ok","status":"ok","uptimeSeconds":5,"version":"..."}
 
 # 升级：替换二进制后重启
@@ -372,13 +372,13 @@ sudo -u kookticket env $(grep -v '^#' /opt/kook-ticket/.env | xargs) \
 
 ```bash
 KOOK_DRYRUN=1 ADMIN_PASSWORD='DemoTicket@2026' go run ./cmd/server
-# 打开 http://127.0.0.1:8080，用 admin / DemoTicket@2026 登录
+# 打开 http://127.0.0.1:9235，用 admin / DemoTicket@2026 登录
 ```
 
 或者用 Docker：
 
 ```bash
-docker run --rm -p 127.0.0.1:8080:8080 \
+docker run --rm -p 127.0.0.1:9235:9235 \
   -e KOOK_DRYRUN=1 -e ADMIN_PASSWORD='DemoTicket@2026' \
   -v "$PWD/data:/app/data" kook-ticket:local
 ```
@@ -395,7 +395,7 @@ DryRun 模式下所有工单操作只更新数据库与界面，**不会**在 KO
 
 ```
 ticket.example.com {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:9235
 }
 ```
 
@@ -412,7 +412,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/ticket.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:9235;
         proxy_http_version 1.1;
 
         proxy_set_header Host              $host;
@@ -571,7 +571,7 @@ data/
 - [ ] 容器/服务以非 root 运行（本项目默认如此：容器 uid 10001；systemd 用 `kookticket` 账号）
 - [ ] 日志与审计中不出现 Token（界面/日志只显示掩码）
 - [ ] 定期备份 `data/`，并验证过恢复流程
-- [ ] 按需收敛暴露面：只开放 443 给公网，8080 仅本机监听
+- [ ] 按需收敛暴露面：只开放 443 给公网，9235 仅本机监听
 - [ ] KOOK 侧权限最小化：只给机器人必需的权限，管理员角色只给必要的人
 - [ ] 定期查看「审计日志」中的异常登录与权限变更
 
@@ -585,7 +585,7 @@ data/
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PORT` | `8080` | 监听端口 |
+| `PORT` | `9235` | WebUI 监听端口 |
 | `DATA_DIR` | `./data` | 数据目录 |
 | `TICKET_TZ` | `Asia/Shanghai` | 业务时区（编号日期段、统计口径、界面展示） |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
@@ -620,7 +620,7 @@ docker compose exec kook-ticket /app/kook-ticket -reset-password admin
 docker compose exec kook-ticket /app/kook-ticket -version
 
 # 健康检查
-curl -s http://127.0.0.1:8080/healthz
+curl -s http://127.0.0.1:9235/healthz
 
 # 备份
 tar czf backup-$(date +%F).tar.gz data/

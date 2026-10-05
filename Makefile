@@ -1,7 +1,7 @@
 # KOOK Ticket 开发与构建入口
 #
 # 常用：
-#   make dev-backend    以 DryRun 模式启动后端（默认 :8080，自动写入演示数据）
+#   make dev-backend    以 DryRun 模式启动后端（默认 :9235，自动写入演示数据）
 #   make dev-frontend   启动 Vite 开发服务器（代理 /api 到后端）
 #   make build          构建前端并编译单二进制到 bin/kook-ticket
 #   make docker         构建 Docker 镜像
@@ -10,7 +10,7 @@
 SHELL := /bin/bash
 BIN := bin/kook-ticket
 VERSION ?= 1.0.0
-PORT ?= 8080
+PORT ?= 9235
 DATA_DIR ?= ./data
 
 .PHONY: help
@@ -22,7 +22,7 @@ dev-backend: ## 以 DryRun 模式启动后端（假数据，不需要 KOOK token
 	KOOK_DRYRUN=1 PORT=$(PORT) DATA_DIR=$(DATA_DIR) LOG_LEVEL=debug go run ./cmd/server
 
 .PHONY: dev-frontend
-dev-frontend: ## 启动前端开发服务器（Vite 代理 /api 到 127.0.0.1:8080）
+dev-frontend: ## 启动前端开发服务器（Vite 代理 /api 到 127.0.0.1:9235）
 	cd web/frontend && npm run dev
 
 .PHONY: frontend

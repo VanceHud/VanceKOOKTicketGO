@@ -9,10 +9,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"vancekookticket/internal/auth"
-	"vancekookticket/internal/config"
-	"vancekookticket/internal/secure"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/config"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // notFoundHash 是账号不存在时用于比对的占位 bcrypt 哈希。

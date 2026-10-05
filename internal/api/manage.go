@@ -10,8 +10,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"vancekookticket/internal/bot"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/bot"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // 面板与表情规则的校验规则。

@@ -5,9 +5,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"vancekookticket/internal/auth"
-	"vancekookticket/internal/config"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/config"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // NewRouter 装配路由与中间件。
@@ -48,7 +48,7 @@ func NewRouter(d Deps) *gin.Engine {
 	api.POST("/auth/logout", server.loadSession(), auth.RequireAuth(), d.Sessions.RequireCSRF(), server.handleLogout)
 	api.GET("/auth/me", server.loadSession(), auth.RequireAuth(), server.handleMe)
 	api.POST("/auth/password", server.loadSession(), auth.RequireAuth(), d.Sessions.RequireCSRF(), server.handleChangePassword)
-	// KOOK 一次性码：接口已就位，具体逻辑在里程碑 4 实现。
+	// KOOK 一次性码：/login 签发的码在 KOOK 内产生，这里只负责校验与消费。
 	api.POST("/auth/login-code", server.handleLoginCode)
 	api.POST("/auth/bind-code", server.loadSession(), auth.RequireAuth(), d.Sessions.RequireCSRF(), auth.RequirePasswordChanged(), server.handleBindCode)
 

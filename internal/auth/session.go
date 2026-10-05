@@ -7,8 +7,8 @@ import (
 	"errors"
 	"time"
 
-	"vancekookticket/internal/secure"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // 会话参数。

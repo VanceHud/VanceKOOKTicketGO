@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"vancekookticket/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
 )
 
 // 网关事件的分片处理参数。

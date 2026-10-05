@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
 )
 
 // 机器人发送的卡片文案集中在这里，便于统一调整。

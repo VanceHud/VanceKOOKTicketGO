@@ -85,7 +85,7 @@ const secretFileName = "app_secret"
 
 // Load 解析环境变量并校验配置。
 func Load() (*Config, error) {
-	port, err := parsePort(env("PORT", "8080"))
+	port, err := parsePort(env("PORT", "9235"))
 	if err != nil {
 		return nil, err
 	}

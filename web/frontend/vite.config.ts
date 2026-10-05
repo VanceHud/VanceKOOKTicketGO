@@ -3,7 +3,7 @@ import tailwindcss from "@tailwindcss/vite"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
-// 开发期将 /api 与 /healthz 代理到本地后端（默认 127.0.0.1:8080），
+// 开发期将 /api 与 /healthz 代理到本地后端（默认 127.0.0.1:9235），
 // 生产环境由 Go 服务直接提供静态资源，无需代理。
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -16,11 +16,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: process.env.VITE_API_PROXY ?? "http://127.0.0.1:8080",
+        target: process.env.VITE_API_PROXY ?? "http://127.0.0.1:9235",
         changeOrigin: false,
       },
       "/healthz": {
-        target: process.env.VITE_API_PROXY ?? "http://127.0.0.1:8080",
+        target: process.env.VITE_API_PROXY ?? "http://127.0.0.1:9235",
         changeOrigin: false,
       },
     },

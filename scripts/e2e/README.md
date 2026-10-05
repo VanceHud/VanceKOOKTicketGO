@@ -17,7 +17,7 @@ npm install -g playwright        # 或 npm install playwright（在任意目录�
 
 ```bash
 # 1. 启动一个带演示数据的实例（另开一个终端，或在容器里运行）
-KOOK_DRYRUN=1 ADMIN_PASSWORD='SmokeTest@2026kt' PORT=8080 go run ./cmd/server
+KOOK_DRYRUN=1 ADMIN_PASSWORD='SmokeTest@2026kt' PORT=9235 go run ./cmd/server
 
 # 2. 运行流程验收
 ADMIN_PASSWORD='SmokeTest@2026kt' node scripts/e2e/01-core-flows.mjs
@@ -48,7 +48,7 @@ LOGIN_CODE='XYZ789' ADMIN_PASSWORD='SmokeTest@2026kt' node scripts/e2e/02-kook-a
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `BASE` | `http://127.0.0.1:8080` | 被测服务地址 |
+| `BASE` | `http://127.0.0.1:9235` | 被测服务地址 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `SmokeTest@2026kt` | 管理员凭据 |
 | `LOGIN_CODE` | `XYZ789` | 第二步使用的登录码（需与服务端库中一致） |
 | `OUT_DIR` | `/tmp/kook-ticket-e2e` | 截图输出目录 |
@@ -65,3 +65,19 @@ ADMIN_PASSWORD='SmokeTest@2026kt' node scripts/e2e/03-manage-and-stats.mjs
 重复运行同一个码会看到“登录码无效或已过期”，这是预期行为）。
 注意：`02` 脚本会**故意**触发一次“机器人重连失败”（DryRun 模式未配置 Token），
 因此浏览器控制台会出现一条 502 记录，这是预期行为。
+
+## 另：生成 README 截图
+
+`scripts/screenshots.mjs` 用同样的方式驱动浏览器，把各页面截图写入 `docs/screenshots/`，
+供 README 引用。它不做任何断言，只是便于界面改版后重新出图：
+
+```bash
+npm install playwright   # 仅需一次
+node scripts/screenshots.mjs
+```
+
+同样需要先启动一个带演示数据的实例（建议用**独立的临时 `DATA_DIR`**，避免污染真实数据）：
+
+```bash
+KOOK_DRYRUN=1 ADMIN_PASSWORD='DemoTicket@2026' PORT=9235 DATA_DIR=/tmp/kookshot go run ./cmd/server
+```

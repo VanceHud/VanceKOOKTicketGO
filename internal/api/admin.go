@@ -14,10 +14,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"vancekookticket/internal/auth"
-	"vancekookticket/internal/config"
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/config"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // kookIDPattern 校验 KOOK 的 ID（雪花 ID，十进制数字串）。

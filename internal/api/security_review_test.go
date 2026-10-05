@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"vancekookticket/internal/eventbus"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 func TestAPIBodyLimitsAndJSONContentType(t *testing.T) {

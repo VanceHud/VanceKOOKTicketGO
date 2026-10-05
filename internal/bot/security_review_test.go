@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
-	"vancekookticket/internal/ticket"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
 )
 
 func TestWebLoginRoleVerificationBypassesCachedRoles(t *testing.T) {

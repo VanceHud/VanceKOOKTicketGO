@@ -12,7 +12,7 @@ import (
 	"math/rand"
 	"time"
 
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // demoUserID 生成演示用的 KOOK 风格 ID（未接入 KOOK 时不存在冲突风险）。

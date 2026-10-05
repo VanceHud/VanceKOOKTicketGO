@@ -8,7 +8,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"vancekookticket/internal/secure"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
 )
 
 // settings 表中的键名。

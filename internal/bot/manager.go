@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // Manager 管理机器人实例的生命周期。

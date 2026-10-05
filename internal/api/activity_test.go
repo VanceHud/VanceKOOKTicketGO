@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // ---------------------------------------------------------------------------

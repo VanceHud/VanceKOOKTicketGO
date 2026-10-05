@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"vancekookticket/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
 )
 
 // TestEventDispatcherKeepsSameChannelOrdered 验证同一频道的事件严格按顺序处理。

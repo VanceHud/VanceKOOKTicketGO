@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"vancekookticket/internal/auth"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
 )
 
 // API 只接受小型 JSON，没有上传接口。完整读取有界请求体，同时覆盖分块请求

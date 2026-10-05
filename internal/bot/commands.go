@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"vancekookticket/internal/kook"
-	"vancekookticket/internal/secure"
-	"vancekookticket/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
 // roleMentionPattern 匹配 KMarkdown 中的角色提及：(rol)12345(rol)。

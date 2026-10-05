@@ -6,7 +6,7 @@
 
 import { chromium } from "playwright"
 
-const BASE = process.env.BASE ?? "http://127.0.0.1:8080"
+const BASE = process.env.BASE ?? "http://127.0.0.1:9235"
 const OUT_DIR = process.env.OUT_DIR ?? "/tmp/kook-ticket-e2e"
 const USER = process.env.ADMIN_USERNAME ?? "admin"
 const PASS = process.env.ADMIN_PASSWORD ?? "SmokeTest@2026kt"

@@ -1,9 +1,58 @@
 # KOOK Ticket · Go + WebUI
 
+[![CI](https://github.com/VanceHud/VanceKOOKTicketGO/actions/workflows/ci.yml/badge.svg)](https://github.com/VanceHud/VanceKOOKTicketGO/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.26.8+-00ADD8.svg?logo=go)](go.mod)
+[![React](https://img.shields.io/badge/React-19-61DAFB.svg?logo=react)](web/frontend/package.json)
+[![Docker](https://img.shields.io/badge/Docker-单容器-2496ED.svg?logo=docker)](Dockerfile)
+
 KOOK 工单（Ticket）机器人，带自托管 WebUI 与 SQLite 数据库，**单二进制 / 单容器部署**。
 
 参考并重写了 [musnows/Kook-Ticket-Bot](https://github.com/musnows/Kook-Ticket-Bot)（Python + 配置散落在多个 JSON 文件）的能力，
 把配置、工单状态与聊天记录全部收敛到 SQLite，并补齐了 WebUI、实时推送、审计日志与一套可验证的安全基线。
+
+**不需要写代码就能用**：申请一个 KOOK 机器人 → `./deploy.sh up` → 在 WebUI 里点几下即可上线。
+无需公网 IP、无需数据库运维、无需 Node 环境 —— `./deploy.sh` 也不在你的机器上安装任何东西，全部跑在 Docker 里。
+
+## 界面预览
+
+<table>
+<tr>
+<td width="50%" align="center"><b>仪表盘</b><br><a href="docs/screenshots/dashboard.png"><img src="docs/screenshots/dashboard.png" alt="仪表盘"></a></td>
+<td width="50%" align="center"><b>工单详情（富消息时间线）</b><br><a href="docs/screenshots/ticket-detail.png"><img src="docs/screenshots/ticket-detail.png" alt="工单详情"></a></td>
+</tr>
+<tr>
+<td width="50%" align="center"><b>统计看板</b><br><a href="docs/screenshots/stats.png"><img src="docs/screenshots/stats.png" alt="统计看板"></a></td>
+<td width="50%" align="center"><b>工单列表</b><br><a href="docs/screenshots/tickets.png"><img src="docs/screenshots/tickets.png" alt="工单列表"></a></td>
+</tr>
+</table>
+
+<details>
+<summary>更多界面截图（面板管理 / 表情上角色 / 机器人状态 / 机器人动态 / 系统设置 / 审计日志 / 账号管理 / 登录页）</summary>
+
+<table>
+<tr>
+<td width="50%" align="center"><b>面板管理</b><br><img src="docs/screenshots/panels.png" alt="面板管理"></td>
+<td width="50%" align="center"><b>表情上角色</b><br><img src="docs/screenshots/emoji-roles.png" alt="表情上角色"></td>
+</tr>
+<tr>
+<td width="50%" align="center"><b>机器人状态</b><br><img src="docs/screenshots/bot-status.png" alt="机器人状态"></td>
+<td width="50%" align="center"><b>机器人动态</b><br><img src="docs/screenshots/activity.png" alt="机器人动态"></td>
+</tr>
+<tr>
+<td width="50%" align="center"><b>系统设置</b><br><img src="docs/screenshots/settings.png" alt="系统设置"></td>
+<td width="50%" align="center"><b>审计日志</b><br><img src="docs/screenshots/audit.png" alt="审计日志"></td>
+</tr>
+<tr>
+<td width="50%" align="center"><b>账号管理</b><br><img src="docs/screenshots/users.png" alt="账号管理"></td>
+<td width="50%" align="center"><b>登录页</b><br><img src="docs/screenshots/login.png" alt="登录页"></td>
+</tr>
+</table>
+
+> 以上均为 `KOOK_DRYRUN=1` 离线演示模式下的真实截图（30 条演示工单），可直接复现：
+> `KOOK_DRYRUN=1 ADMIN_PASSWORD='DemoTicket@2026' go run ./cmd/server`
+
+</details>
 
 > **当前进度：里程碑 1–6 已完成**：骨架与安全基线、WebUI 全部页面、Docker 交付、离线演示模式、
 > 自研 KOOK 客户端（REST + WebSocket 网关）、真实工单流程（按钮开单 → 建频道 → 权限下发 → 关闭通知 → 删除频道）、
@@ -66,7 +115,7 @@ KOOK 工单（Ticket）机器人，带自托管 WebUI 与 SQLite 数据库，**�
 > 🚀 **一键部署**（推荐）：
 >
 > ```bash
-> git clone <仓库地址> kook-ticket && cd kook-ticket
+> git clone https://github.com/VanceHud/VanceKOOKTicketGO.git kook-ticket && cd kook-ticket
 > ./deploy.sh up            # 自动生成 .env、构建镜像、启动、健康检查、打印初始密码
 > ```
 >
@@ -85,7 +134,7 @@ KOOK 工单（Ticket）机器人，带自托管 WebUI 与 SQLite 数据库，**�
 ### 方式一：Docker（推荐）
 
 ```bash
-git clone <repo> kook-ticket && cd kook-ticket
+git clone https://github.com/VanceHud/VanceKOOKTicketGO.git kook-ticket && cd kook-ticket
 
 cp .env.example .env
 # 生成加密密钥（用于加密存储 KOOK Token）
@@ -95,7 +144,7 @@ docker compose up -d --build
 docker compose logs -f kook-ticket
 ```
 
-启动后访问 `http://127.0.0.1:8080`。
+启动后访问 `http://127.0.0.1:9235`。
 
 初始管理员账号：
 * 未设置 `ADMIN_PASSWORD` 时，会生成随机密码并打印在日志中（搜索 `initial_password`），**首次登录强制改密**；
@@ -126,7 +175,7 @@ KOOK_DRYRUN=1 ADMIN_PASSWORD='DemoTicket@2026' go run ./cmd/server
 ### 开发模式
 
 ```bash
-make dev-backend     # 后端跑在 :8080（DryRun）
+make dev-backend     # 后端跑在 :9235（DryRun）
 make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 ```
 
@@ -138,7 +187,7 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `PORT` | `8080` | WebUI 监听端口 |
+| `PORT` | `9235` | WebUI 端口（宿主机映射与容器内一致） |
 | `DATA_DIR` | `./data` | 数据目录（SQLite 与自动生成的密钥） |
 | `DB_PATH` | `$DATA_DIR/ticket.db` | 数据库文件路径 |
 | `TICKET_TZ` | `Asia/Shanghai` | 工单编号日期段与「今日」统计口径 |
@@ -240,6 +289,14 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 │  ├─ embed.go            # go:embed all:dist + SPA 兜底路由
 │  ├─ dist/               # 前端构建产物（仅 .gitkeep 入库）
 │  └─ frontend/           # React 19 + Vite + TS + Tailwind v4 + shadcn/ui
+├─ docs/
+│  ├─ DEPLOYMENT.md       # 从 KOOK 应用申请到反向代理的完整部署教程
+│  ├─ SECURITY_REVIEW_2026-10-05.md  # 安全与效率审查记录（含修复与回归用例）
+│  └─ screenshots/        # README 用的界面截图
+├─ scripts/
+│  ├─ e2e/                # Playwright 驱动的端到端 UI 验收（可选）
+│  └─ screenshots.mjs     # 重新生成 docs/screenshots 的脚本
+├─ .github/workflows/     # CI：gofmt / vet / test -race / oxlint / 前端构建
 ├─ Dockerfile             # 三阶段：Node 构建 → Go 编译 → alpine 运行
 ├─ docker-compose.yml     # 单容器部署（卷、健康检查、加固选项）
 └─ Makefile               # dev / build / check / test / docker
@@ -326,5 +383,19 @@ React Router · TanStack Query · TanStack Table · Recharts · react-hook-form 
 
 ## 10. 许可与致谢
 
-* 本项目参考 [musnows/Kook-Ticket-Bot](https://github.com/musnows/Kook-Ticket-Bot) 的产品形态与流程设计，代码为独立实现。
-* 前端组件来自 [shadcn/ui](https://ui.shadcn.com/)（MIT），详见 `THIRD-PARTY-NOTICES.md`。
+本项目以 [MIT 许可证](LICENSE) 开源，可自由用于商业项目、修改与再分发（保留版权声明即可）。
+
+* **上游关系**：[musnows/Kook-Ticket-Bot](https://github.com/musnows/Kook-Ticket-Bot)（MPL-2.0）为本项目提供了**产品形态与流程设计**的参考
+  （面板按钮开单、隐藏频道承载对话、关闭后删除频道、表情上角色等）。
+  本仓库的代码为**独立实现**，未复制上游源码，也不包含其配置文件或素材，因此不受 MPL-2.0 约束。
+  如果你认为某处存在疏漏，请开 issue 告知，会立即处理。
+* 前端组件来自 [shadcn/ui](https://ui.shadcn.com/)（MIT）。
+* 全部第三方依赖与内嵌文件的来源、许可证见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
+* 字体、图标、脚本均随二进制自托管，**运行时不请求任何第三方 CDN**。
+
+## 11. 参与贡献
+
+欢迎提 issue 与 PR。动手前请先看 [`CONTRIBUTING.md`](CONTRIBUTING.md)（代码约定、提交前必过的检查、测试要求）。
+
+* 报告安全漏洞请走 [`SECURITY.md`](SECURITY.md) 中的私密渠道，**不要开公开 issue**。
+* 变更记录见 [`CHANGELOG.md`](CHANGELOG.md)。

@@ -27,3 +27,6 @@ web/frontend/.vite
 .env.*
 .vscode
 .idea
+
+# 界面截图（仅用于 README，不进镜像）
+docs/screenshots

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 	"gorm.io/gorm"
-	"vancekookticket/internal/store"
 )
 
 func TestSessionReadBurstDoesNotWriteAndRevocationRemainsImmediate(t *testing.T) {
