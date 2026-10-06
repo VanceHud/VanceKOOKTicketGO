@@ -311,6 +311,12 @@ export function TicketDetailPage() {
                   <Separator />
                   <InfoRow label={t("ticket.closedAt")} value={formatDateTime(ticket.closedAt, i18n.language)} />
                   <InfoRow label={t("ticket.closedBy")} value={ticket.closedByName || ticket.closedBy || t("common.none")} />
+                  {ticket.closeNote ? (
+                    <div className="bg-muted/40 space-y-1 rounded-lg border p-3">
+                      <p className="text-muted-foreground text-xs">{t("ticket.closeNote")}</p>
+                      <p className="text-sm break-words whitespace-pre-wrap">{ticket.closeNote}</p>
+                    </div>
+                  ) : null}
                 </>
               ) : null}
             </CardContent>

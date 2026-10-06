@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,10 @@ var (
 	// ErrNoPlatform 表示没有可用的平台实现（KOOK 未连接且非 DryRun）。
 	ErrNoPlatform = errors.New("机器人未连接到 KOOK，操作已拒绝")
 )
+
+// MaxCloseNoteLen 是关闭说明的最大长度（字符数）。
+// WebUI 关闭弹窗与 KOOK 的 /tkclose 命令共用这一上限。
+const MaxCloseNoteLen = 1000
 
 // Actor 是操作发起者。
 //
@@ -218,6 +223,12 @@ func (s *Service) Close(ctx context.Context, no string, actor Actor, note string
 		return nil, fmt.Errorf("%w：工单频道尚未创建完成", ErrInvalidState)
 	}
 
+	// 说明长度由调用方先行校验；这里再兜底一次，避免其它入口写入超长文本。
+	note = strings.TrimSpace(note)
+	if len([]rune(note)) > MaxCloseNoteLen {
+		note = string([]rune(note)[:MaxCloseNoteLen])
+	}
+
 	platform, err := s.platformOrErr()
 	if err != nil {
 		return nil, err
@@ -239,6 +250,7 @@ func (s *Service) Close(ctx context.Context, no string, actor Actor, note string
 		"closed_at":      now,
 		"closed_by":      actor.ID,
 		"closed_by_name": actor.Name,
+		"close_note":     note,
 		"locked_at":      nil,
 		"lock_reason":    "",
 	}

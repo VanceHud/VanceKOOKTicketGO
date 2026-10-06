@@ -27,6 +27,8 @@ export interface Ticket {
   closedAt?: string | null
   closedBy?: string
   closedByName?: string
+  /** 关闭时填写的说明：WebUI 关闭弹窗或 KOOK 的 /tkclose 命令均可填写。 */
+  closeNote?: string
   firstReplyAt?: string | null
   messageCount: number
   createdAt: string

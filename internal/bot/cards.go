@@ -90,7 +90,7 @@ func (b *Bot) ticketCard(t *store.Ticket, adminRoleIDs []string, closeValue, loc
 			strings.TrimSpace(mentions.String()),
 		)).
 		Divider().
-		KMarkdownSection("处理结束后请点击「关闭」；也可先「锁定」暂停用户发言（用户仍可查看频道）。").
+		KMarkdownSection("处理结束后请点击「关闭」；需要填写关闭说明时，发送 `/tkclose 关闭说明`。也可先「锁定」暂停用户发言（用户仍可查看频道）。").
 		ActionGroup(
 			kook.Button{Text: "关闭", Value: closeValue, Theme: kook.CardThemeDanger},
 			kook.Button{Text: "锁定", Value: lockValue, Theme: kook.CardThemeWarning},
@@ -201,6 +201,12 @@ func (b *Bot) ticketLogCard(t *store.Ticket, notes []store.TicketNote) string {
 		kook.DisplayUser(t.ClosedBy, firstNonEmpty(t.ClosedByName, t.ClosedBy)),
 	)
 
+	// 关闭说明是关闭时写下的结论，必须随日志卡片一起刷新，
+	// 否则 /tkcm 添加备注时会把它从日志频道里抹掉。
+	if strings.TrimSpace(t.CloseNote) != "" {
+		text += "\n\n关闭说明：\n> " + kook.EscapeMentionText(t.CloseNote)
+	}
+
 	for _, note := range notes {
 		text += fmt.Sprintf("\n\n来自 %s 的备注：\n> %s",
 			kook.DisplayUser(note.AuthorID, note.AuthorName),
@@ -225,6 +231,7 @@ func (b *Bot) helpCard() string {
 	text := strings.Join([]string{
 		"`/ticket [类型名]` 在当前频道新建一张工单按钮卡片（同一频道可多张，省略类型名时复用本频道已有类型）",
 		"`/tkcm 工单编号 备注` 为已关闭的工单添加备注",
+		"`/tkclose 关闭说明` 在当前工单频道关闭工单（说明会写入关闭通知与记录；不写说明请点卡片上的「关闭」）",
 		"`/aar @角色` 把角色设为当前频道面板所属工单类型的管理员角色；加 `-g` 设为全局管理员角色",
 		"`/login`（私聊）获取 WebUI 一次性登录码",
 		"`/bind`（私聊）获取账号绑定码，用于把 KOOK 身份绑定到 WebUI 账号",

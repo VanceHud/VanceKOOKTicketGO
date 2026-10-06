@@ -19,10 +19,9 @@ import (
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticketno"
 )
 
-// 备注与关闭说明的长度上限，避免超长文本破坏界面与日志。
+// 备注与消息分页的长度上限，避免超长文本破坏界面与日志。
 const (
 	maxNoteLength   = 2000
-	maxCloseNoteLen = 1000
 	maxMessageLimit = 2000
 	defaultMsgLimit = 500
 )
@@ -227,8 +226,8 @@ func (s *Server) handleTicketClose(c *gin.Context) {
 		return
 	}
 	note := strings.TrimSpace(req.Note)
-	if len([]rune(note)) > maxCloseNoteLen {
-		s.fail(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("关闭说明不能超过 %d 个字符", maxCloseNoteLen))
+	if len([]rune(note)) > ticket.MaxCloseNoteLen {
+		s.fail(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("关闭说明不能超过 %d 个字符", ticket.MaxCloseNoteLen))
 		return
 	}
 
@@ -413,6 +412,10 @@ func renderTicketHTML(t *store.Ticket, messages []store.TicketMessage, notes []s
 	b.WriteString("开启时间(UTC)：" + t.StartedAt.Format("2006-01-02 15:04:05") + "<br>")
 	if t.ClosedAt != nil {
 		b.WriteString("关闭时间(UTC)：" + t.ClosedAt.Format("2006-01-02 15:04:05") + "，操作人：" + html.EscapeString(t.ClosedByName) + "<br>")
+	}
+	// 关闭说明可能多行：先转义再换行转 <br>，保持与 KOOK 通知一致的阅读效果。
+	if strings.TrimSpace(t.CloseNote) != "" {
+		b.WriteString("关闭说明：" + strings.ReplaceAll(html.EscapeString(t.CloseNote), "\n", "<br>") + "<br>")
 	}
 	b.WriteString("导出人：" + html.EscapeString(exporter) + "，导出时间(UTC)：" + store.Now().Format("2006-01-02 15:04:05") + "</p>")
 	b.WriteString("<h2>聊天记录（" + fmt.Sprint(len(messages)) + " 条）</h2><table><thead><tr><th>时间(UTC)</th><th>发送者</th><th>内容</th></tr></thead><tbody>")

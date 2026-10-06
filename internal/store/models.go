@@ -108,6 +108,9 @@ type Ticket struct {
 	ClosedBy   string     `gorm:"size:64" json:"closedBy,omitempty"`
 
 	ClosedByName string `gorm:"size:128" json:"closedByName,omitempty"`
+	// CloseNote 是关闭时填写的说明（WebUI 关闭弹窗或 KOOK 的 /tkclose 命令），
+	// 关闭后长期保留，供关闭通知、日志卡片、详情页与导出展示。
+	CloseNote string `gorm:"size:1000" json:"closeNote,omitempty"`
 	// FirstReplyAt 记录首条非开单人、非机器人消息的时间，用于统计响应时长。
 	FirstReplyAt *time.Time `gorm:"index" json:"firstReplyAt,omitempty"`
 	// MessageCount 冗余字段，避免列表页统计每条工单的消息数时产生 N+1 查询。

@@ -960,6 +960,157 @@ func TestCloseTicketNotifiesAndDeletesChannel(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 关闭命令（/tkclose）
+// ---------------------------------------------------------------------------
+
+// TestTicketCloseCommandClosesWithNote 验证 /tkclose：说明按原样落库（保留空格）、
+// 删除工单频道、日志卡片展示关闭说明，且说明中的提及语法被转义。
+func TestTicketCloseCommandClosesWithNote(t *testing.T) {
+	env := newBotEnv(t)
+	channelID := env.openTicketForTest()
+	opened := env.firstTicket()
+
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(
+		channelID, userStaff, "/tkclose 订单已核对 并发货 (met)all(met)", env.user(userStaff)))
+
+	env.waitFor("命令关闭工单", func() bool {
+		updated, err := env.store.Tickets.ByNo(opened.No)
+		return err == nil && updated.Status == store.TicketClosed
+	})
+
+	closed, err := env.store.Tickets.ByNo(opened.No)
+	if err != nil {
+		t.Fatalf("读取工单失败: %v", err)
+	}
+	if closed.CloseNote != "订单已核对 并发货 (met)all(met)" {
+		t.Fatalf("关闭说明应原样落库（含空格）: %q", closed.CloseNote)
+	}
+	if closed.ClosedBy != userStaff {
+		t.Fatalf("关闭人记录错误: %s", closed.ClosedBy)
+	}
+	if _, exists := env.mock.Channels()[channelID]; exists {
+		t.Fatal("命令关闭后应删除工单频道")
+	}
+
+	card := logCardContent(t, env)
+	if !strings.Contains(card, "关闭说明") || !strings.Contains(card, "订单已核对 并发货") {
+		t.Fatalf("日志卡片应包含关闭说明: %s", card)
+	}
+	if strings.Contains(card, "(met)all(met)") {
+		t.Fatalf("关闭说明中的提及语法应被转义: %s", card)
+	}
+}
+
+// TestTicketCloseCommandRejectsNonAdmin 验证非管理员不能通过 /tkclose 关闭工单。
+func TestTicketCloseCommandRejectsNonAdmin(t *testing.T) {
+	env := newBotEnv(t)
+	channelID := env.openTicketForTest()
+	opened := env.firstTicket()
+
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(
+		channelID, userAsker, "/tkclose 我想自己关", env.user(userAsker)))
+
+	env.waitFor("越权提示", func() bool {
+		return strings.Contains(ephemeralContentFor(env, userAsker), "只有管理员")
+	})
+
+	current, err := env.store.Tickets.ByNo(opened.No)
+	if err != nil || current.Status != store.TicketOpen {
+		t.Fatalf("越权关闭不应改变状态: %+v err=%v", current, err)
+	}
+	if _, exists := env.mock.Channels()[channelID]; !exists {
+		t.Fatal("越权关闭不应删除频道")
+	}
+}
+
+// TestTicketCloseCommandOnlyInTicketChannel 验证 /tkclose 只在工单频道生效。
+func TestTicketCloseCommandOnlyInTicketChannel(t *testing.T) {
+	env := newBotEnv(t)
+
+	// 面板频道不是工单频道。
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(
+		testPanelChan, userStaff, "/tkclose 说明", env.user(userStaff)))
+
+	env.waitFor("频道校验提示", func() bool {
+		return strings.Contains(ephemeralContentFor(env, userStaff), "只能在工单频道")
+	})
+
+	items, _, err := env.store.Tickets.List(store.TicketFilter{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("读取工单失败: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("面板频道执行 /tkclose 不应产生工单: %+v", items)
+	}
+}
+
+// TestTicketCloseCommandWithoutNoteShowsUsage 验证不带说明时只提示用法，不会误关工单。
+func TestTicketCloseCommandWithoutNoteShowsUsage(t *testing.T) {
+	env := newBotEnv(t)
+	channelID := env.openTicketForTest()
+	opened := env.firstTicket()
+
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(
+		channelID, userStaff, "/tkclose", env.user(userStaff)))
+
+	env.waitFor("用法提示", func() bool {
+		return strings.Contains(ephemeralContentFor(env, userStaff), "用法")
+	})
+
+	current, err := env.store.Tickets.ByNo(opened.No)
+	if err != nil || current.Status != store.TicketOpen {
+		t.Fatalf("不带说明的 /tkclose 不应关闭工单: %+v err=%v", current, err)
+	}
+}
+
+// TestTicketCloseCommandRejectsOverlongNote 验证超长说明被拒绝，工单保持打开。
+func TestTicketCloseCommandRejectsOverlongNote(t *testing.T) {
+	env := newBotEnv(t)
+	channelID := env.openTicketForTest()
+	opened := env.firstTicket()
+
+	overlong := strings.Repeat("字", ticket.MaxCloseNoteLen+1)
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(
+		channelID, userStaff, "/tkclose "+overlong, env.user(userStaff)))
+
+	env.waitFor("长度提示", func() bool {
+		return strings.Contains(ephemeralContentFor(env, userStaff), "不能超过")
+	})
+
+	current, err := env.store.Tickets.ByNo(opened.No)
+	if err != nil || current.Status != store.TicketOpen {
+		t.Fatalf("超长说明不应关闭工单: %+v err=%v", current, err)
+	}
+}
+
+// TestTicketCommentKeepsCloseNote 是回归测试：/tkcm 刷新日志卡片时不能丢掉关闭说明。
+func TestTicketCommentKeepsCloseNote(t *testing.T) {
+	env := newBotEnv(t)
+	channelID := env.openTicketForTest()
+	opened := env.firstTicket()
+
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(
+		channelID, userStaff, "/tkclose 已退款", env.user(userStaff)))
+	env.waitFor("工单关闭", func() bool {
+		updated, err := env.store.Tickets.ByNo(opened.No)
+		return err == nil && updated.Status == store.TicketClosed
+	})
+
+	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(
+		testPanelChan, userStaff, fmt.Sprintf("/tkcm %s 物流已同步", opened.No), env.user(userStaff)))
+
+	env.waitFor("刷新日志卡片", func() bool {
+		for _, call := range env.mock.CallsOf("message/update") {
+			content := fmt.Sprint(call.Params["content"])
+			if strings.Contains(content, "物流已同步") && strings.Contains(content, "关闭说明") && strings.Contains(content, "已退款") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func TestNonAdminCannotCloseOrLock(t *testing.T) {
 	env := newBotEnv(t)
 	channelID := env.openTicketForTest()
@@ -1380,6 +1531,9 @@ func TestWebUICloseCardShowsActorName(t *testing.T) {
 	if closed.ClosedByName != "客服小林" {
 		t.Fatalf("应记录关闭人昵称: %+v", closed)
 	}
+	if closed.CloseNote != "已处理完毕" {
+		t.Fatalf("应持久化关闭说明: %+v", closed)
+	}
 
 	content := logCardContent(t, env)
 	if strings.Contains(content, "(met)admin(met)") {
@@ -1387,6 +1541,9 @@ func TestWebUICloseCardShowsActorName(t *testing.T) {
 	}
 	if !strings.Contains(content, "关闭用户：客服小林") {
 		t.Fatalf("关闭用户应展示昵称: %s", content)
+	}
+	if !strings.Contains(content, "关闭说明：") || !strings.Contains(content, "已处理完毕") {
+		t.Fatalf("日志卡片应展示关闭说明: %s", content)
 	}
 
 	// /tkcm 刷新日志卡片时同样不能把账号名当提及。
@@ -1399,6 +1556,9 @@ func TestWebUICloseCardShowsActorName(t *testing.T) {
 	}
 	if !strings.Contains(card, "来自 客服小林 的备注") {
 		t.Fatalf("备注作者应展示昵称: %s", card)
+	}
+	if !strings.Contains(card, "关闭说明：") || !strings.Contains(card, "已处理完毕") {
+		t.Fatalf("刷新日志卡片不应丢失关闭说明: %s", card)
 	}
 }
 
@@ -1413,6 +1573,17 @@ func logCardContent(t *testing.T, env *botEnv) string {
 	}
 	if content == "" {
 		t.Fatal("日志频道没有收到卡片")
+	}
+	return content
+}
+
+// ephemeralContentFor 返回发送给指定用户的最后一条临时消息内容（仅本人可见的提示）。
+func ephemeralContentFor(env *botEnv, userID string) string {
+	content := ""
+	for _, call := range env.mock.CallsOf("message/create") {
+		if fmt.Sprint(call.Params["temp_target_id"]) == userID {
+			content = fmt.Sprint(call.Params["content"])
+		}
 	}
 	return content
 }

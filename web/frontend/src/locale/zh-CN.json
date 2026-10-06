@@ -178,6 +178,7 @@
     "firstReply": "首次响应",
     "messageCount": "消息数",
     "closedBy": "关闭人",
+    "closeNote": "关闭说明",
     "exportTitle": "导出记录",
     "exportJson": "JSON",
     "exportCsv": "CSV",

@@ -12,6 +12,7 @@ import (
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
 )
 
 // roleMentionPattern 匹配 KMarkdown 中的角色提及：(rol)12345(rol)。
@@ -56,6 +57,8 @@ func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
 		b.cmdTicketPanel(ctx, event, args)
 	case "tkcm":
 		b.cmdTicketComment(ctx, event, args)
+	case "tkclose":
+		b.cmdTicketClose(ctx, event, args)
 	case "aar", "add_admin_role":
 		b.cmdAddAdminRole(ctx, event, args)
 	case "kill":
@@ -223,6 +226,45 @@ func (b *Bot) cmdTicketComment(ctx context.Context, event kook.Event, args []str
 	}
 
 	b.replyEphemeral(ctx, event, fmt.Sprintf("工单「%s」备注成功", t.No))
+}
+
+// cmdTicketClose 在工单频道内关闭工单并可附带关闭说明（对应 /tkclose 命令）。
+//
+// 与工单卡片上的「关闭」按钮互为补充：按钮一键关闭（不写说明），
+// 本命令用于需要留下处理结论的场景。工单编号从当前频道推导，
+// 因此命令不会误关其它工单。不带说明时只提示用法，不会直接关闭。
+func (b *Bot) cmdTicketClose(ctx context.Context, event kook.Event, args []string) {
+	t, err := b.deps.Store.Tickets.ByChannel(event.TargetID)
+	if err != nil {
+		b.replyEphemeral(ctx, event, "该命令只能在工单频道内使用")
+		return
+	}
+	if !b.isTicketAdmin(ctx, event.AuthorID, t) {
+		b.replyEphemeral(ctx, event, "只有管理员可以关闭工单")
+		return
+	}
+	if t.Status == store.TicketClosed {
+		b.replyEphemeral(ctx, event, "工单已关闭")
+		return
+	}
+
+	note := strings.TrimSpace(strings.Join(args, " "))
+	if note == "" {
+		b.replyEphemeral(ctx, event, "用法：`/tkclose 关闭说明`\n不写说明时，请直接点击工单卡片上的「关闭」按钮。")
+		return
+	}
+	if len([]rune(note)) > ticket.MaxCloseNoteLen {
+		b.replyEphemeral(ctx, event, fmt.Sprintf("关闭说明不能超过 %d 个字符", ticket.MaxCloseNoteLen))
+		return
+	}
+
+	actor := b.ticketActor(ctx, event.AuthorID, event.TargetID)
+	if _, err := b.deps.Tickets.Close(ctx, t.No, actor, note); err != nil {
+		b.deps.Logger.Error("关闭工单失败", "ticket_no", t.No, "err", err)
+		b.replyEphemeral(ctx, event, "关闭工单失败："+friendlyError(err))
+		return
+	}
+	b.deps.Logger.Info("工单已关闭", "ticket_no", t.No, "by", actor.Name, "note_len", len([]rune(note)))
 }
 
 // cmdAddAdminRole 把角色加入面板管理员或全局管理员（对应 /aar）。

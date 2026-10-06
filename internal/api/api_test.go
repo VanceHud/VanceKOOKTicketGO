@@ -645,6 +645,13 @@ func TestTicketStateMachineThroughAPI(t *testing.T) {
 	if res.status != http.StatusOK || res.body["status"] != store.TicketClosed {
 		t.Fatalf("关闭失败: %d %s", res.status, res.raw)
 	}
+	if res.body["closeNote"] != "已解决" {
+		t.Fatalf("关闭说明应随工单返回: %v", res.body["closeNote"])
+	}
+	closed, err := env.store.Tickets.ByNo(ticket.No)
+	if err != nil || closed.CloseNote != "已解决" {
+		t.Fatalf("关闭说明应落库: %+v err=%v", closed, err)
+	}
 
 	// 重复关闭 → 409
 	res = env.do(t, http.MethodPost, "/api/v1/tickets/"+ticket.No+"/close",

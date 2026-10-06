@@ -178,6 +178,7 @@
     "firstReply": "First reply",
     "messageCount": "Messages",
     "closedBy": "Closed by",
+    "closeNote": "Closing note",
     "exportTitle": "Export transcript",
     "exportJson": "JSON",
     "exportCsv": "CSV",
