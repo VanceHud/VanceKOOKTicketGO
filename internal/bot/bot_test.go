@@ -1132,10 +1132,13 @@ func TestPanelCommandCreatesPanel(t *testing.T) {
 	}
 
 	// 管理员执行 → 创建面板
+	//
+	// 注意等待条件必须包含消息 ID：面板是先落库、再发卡片、最后回写 msg_id，
+	// 只等“记录出现”会在慢速 CI 上读到尚未回写的中间态。
 	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(newChannel, userStaff, "/ticket", env.user(userStaff)))
-	env.waitFor("面板创建", func() bool {
-		_, err := env.store.Panels.ByChannel(newChannel)
-		return err == nil
+	env.waitFor("面板创建并回写消息 ID", func() bool {
+		panel, err := env.store.Panels.ByChannel(newChannel)
+		return err == nil && panel.MsgID != ""
 	})
 
 	panel, err := env.store.Panels.ByChannel(newChannel)
@@ -1159,9 +1162,17 @@ func TestPanelCommandCreatesPanel(t *testing.T) {
 
 	// 再次执行 /ticket：同一频道应新增一张卡片，而不是覆盖上一张。
 	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(newChannel, userStaff, "/ticket", env.user(userStaff)))
-	env.waitFor("第二张面板创建", func() bool {
+	env.waitFor("第二张面板创建并回写消息 ID", func() bool {
 		panels, err := env.store.Panels.ListByChannel(newChannel)
-		return err == nil && len(panels) == 2
+		if err != nil || len(panels) != 2 {
+			return false
+		}
+		for _, panel := range panels {
+			if panel.MsgID == "" {
+				return false
+			}
+		}
+		return true
 	})
 	panels, err := env.store.Panels.ListByChannel(newChannel)
 	if err != nil {
