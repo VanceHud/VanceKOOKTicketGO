@@ -47,6 +47,8 @@ type botEnv struct {
 	loc     *time.Location
 	stopCh  atomic.Bool
 	panelID uint
+	// typeID 是默认面板所属的工单类型（带 rolePanel 类型角色）。
+	typeID uint
 }
 
 func newBotEnv(t *testing.T) *botEnv {
@@ -88,15 +90,22 @@ func newBotEnv(t *testing.T) *botEnv {
 		t.Fatalf("写入角色映射失败: %v", err)
 	}
 
-	// 面板（含面板级管理员角色）
+	// 工单类型（含类型级管理员角色）
+	seededType := &store.TicketType{Name: "工单面板", Enabled: true}
+	if err := st.Types.Create(seededType); err != nil {
+		t.Fatalf("写入工单类型失败: %v", err)
+	}
+	if err := st.Types.AddRole(seededType.ID, fmt.Sprint(rolePanel), "实习客服"); err != nil {
+		t.Fatalf("写入类型角色失败: %v", err)
+	}
+
+	// 面板（挂在上述工单类型下）
 	seededPanel := &store.Panel{
+		TypeID:    seededType.ID,
 		ChannelID: testPanelChan, ChannelName: "工单面板", MsgID: "msg-panel", Title: "点击按钮发起工单", Enabled: true,
 	}
 	if err := st.Panels.Create(seededPanel); err != nil {
 		t.Fatalf("写入面板失败: %v", err)
-	}
-	if err := st.Panels.AddRole(seededPanel.ID, fmt.Sprint(rolePanel), "实习客服"); err != nil {
-		t.Fatalf("写入面板角色失败: %v", err)
 	}
 
 	mock := kooktest.New()
@@ -105,7 +114,7 @@ func newBotEnv(t *testing.T) *botEnv {
 	bus := eventbus.New()
 	svc := ticket.NewService(st, bus, ticket.NewNoopPlatform(nil), loc, st.Settings.OutdateHours)
 
-	env := &botEnv{t: t, store: st, bus: bus, svc: svc, mock: mock, loc: loc, panelID: seededPanel.ID}
+	env := &botEnv{t: t, store: st, bus: bus, svc: svc, mock: mock, loc: loc, panelID: seededPanel.ID, typeID: seededType.ID}
 
 	b, err := New(Deps{
 		Store:     st,
@@ -272,7 +281,7 @@ func TestOpenTicketCreatesChannelPermissionsAndCard(t *testing.T) {
 		t.Fatalf("开单人记录错误: %s", opened.UserID)
 	}
 
-	// 频道应在配置的隐藏分组下创建，名称包含工单编号
+	// 频道应在配置的隐藏分组下创建，名称包含类型名与短编号（完整编号在卡片中）
 	channels := env.mock.Channels()
 	if len(channels) != 1 {
 		t.Fatalf("应创建 1 个频道，实际 %d 个", len(channels))
@@ -281,14 +290,17 @@ func TestOpenTicketCreatesChannelPermissionsAndCard(t *testing.T) {
 	for _, channel := range channels {
 		created = channel
 	}
-	if !strings.Contains(created.Name, opened.No) {
-		t.Fatalf("频道名应包含工单编号，实际: %s", created.Name)
+	if !strings.Contains(created.Name, "工单面板") || !strings.Contains(created.Name, ShortTicketCode(opened.No)) {
+		t.Fatalf("频道名应包含类型名与短编号，实际: %s", created.Name)
+	}
+	if len([]rune(created.Name)) > ChannelNameMaxLength {
+		t.Fatalf("频道名不应超过 %d 字符，实际 %d: %s", ChannelNameMaxLength, len([]rune(created.Name)), created.Name)
 	}
 	if created.ParentID != testCategory {
 		t.Fatalf("频道应创建在配置的分组下，实际: %s", created.ParentID)
 	}
 
-	// 权限：全局管理员角色、面板管理员角色、开单人各一次，且都是“可看可发”
+	// 权限：全局管理员角色、工单类型管理员角色、开单人各一次，且都是“可看可发”
 	updates := env.mock.CallsOf("channel-role/update")
 	if len(updates) < 3 {
 		t.Fatalf("权限下发次数不足: %d", len(updates))
@@ -320,6 +332,10 @@ func TestOpenTicketCreatesChannelPermissionsAndCard(t *testing.T) {
 			content := fmt.Sprint(call.Params["content"])
 			if !strings.Contains(content, actionClose) || !strings.Contains(content, actionLock) {
 				t.Fatalf("卡片应包含关闭与锁定按钮: %s", content)
+			}
+			// 工单开启时应展示类型，便于管理员分类
+			if !strings.Contains(content, "工单类型") || !strings.Contains(content, "工单面板") {
+				t.Fatalf("工单卡片应展示工单类型: %s", content)
 			}
 		}
 	}
@@ -363,7 +379,7 @@ func (e *botEnv) panelOpenMessageCalls(channelID string) []string {
 func TestOpenTicketSendsPanelOpenMessage(t *testing.T) {
 	env := newBotEnv(t)
 
-	template := "你好 {user}（{user_name}），工单 {ticket_no} 创建于 {time}。\n请提供订单号与截图。"
+	template := "你好 {user}（{user_name}），工单 {ticket_no} 创建于 {time}，类型为 {type}（{type_name}）。\n请提供订单号与截图。"
 	if err := env.store.Panels.UpdateFields(env.panelID, map[string]any{"open_message": template}); err != nil {
 		t.Fatalf("写入开单提示失败: %v", err)
 	}
@@ -375,7 +391,7 @@ func TestOpenTicketSendsPanelOpenMessage(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("应在新频道发送 1 条开单提示，实际 %d 条: %v", len(sent), sent)
 	}
-	for _, expected := range []string{kook.MentionUser(userAsker), "提问用户", opened.No, "请提供订单号与截图"} {
+	for _, expected := range []string{kook.MentionUser(userAsker), "提问用户", opened.No, "请提供订单号与截图", "工单面板"} {
 		if !strings.Contains(sent[0], expected) {
 			t.Fatalf("开单提示应包含 %q，实际: %s", expected, sent[0])
 		}
@@ -496,16 +512,22 @@ func TestOpenTicketWithoutPanelOpenMessageSendsNoText(t *testing.T) {
 
 // TestOpenTicketFromSecondPanelUsesItsOwnRoles 验证同一频道内多张面板卡片各自携带角色：
 // 点击第二张卡片的按钮时，只应下发第二张面板的管理员角色。
-func TestOpenTicketFromSecondPanelUsesItsOwnRoles(t *testing.T) {
+// TestOpenTicketFromSecondPanelUsesItsOwnType 验证同一频道内多张面板可以分属不同工单类型：
+// 点击第二张卡片的按钮时，只应下发第二张面板所属类型的类型角色。
+func TestOpenTicketFromSecondPanelUsesItsOwnType(t *testing.T) {
 	env := newBotEnv(t)
 
 	const secondRole = "3003"
-	second := &store.Panel{ChannelID: testPanelChan, ChannelName: "工单面板", Title: "第二张", Enabled: true}
+	secondType := &store.TicketType{Name: "二线工单", Enabled: true}
+	if err := env.store.Types.Create(secondType); err != nil {
+		t.Fatalf("创建第二个工单类型失败: %v", err)
+	}
+	if err := env.store.Types.AddRole(secondType.ID, secondRole, "二线客服"); err != nil {
+		t.Fatalf("写入第二个类型角色失败: %v", err)
+	}
+	second := &store.Panel{TypeID: secondType.ID, ChannelID: testPanelChan, ChannelName: "工单面板", Title: "第二张", Enabled: true}
 	if err := env.store.Panels.Create(second); err != nil {
 		t.Fatalf("创建第二张面板失败: %v", err)
-	}
-	if err := env.store.Panels.AddRole(second.ID, secondRole, "二线客服"); err != nil {
-		t.Fatalf("写入第二张面板角色失败: %v", err)
 	}
 
 	value := env.bot.encodeButton(actionOpen, "", testPanelChan, second.ID)
@@ -516,7 +538,7 @@ func TestOpenTicketFromSecondPanelUsesItsOwnRoles(t *testing.T) {
 		return ticket != nil && ticket.Status == store.TicketOpen
 	})
 	// 权限下发在工单置为 open 之后并发执行，需单独等它出现。
-	env.waitFor("第二张面板角色已下发", func() bool {
+	env.waitFor("第二个类型的角色已下发", func() bool {
 		for _, call := range env.mock.CallsOf("channel-role/update") {
 			if fmt.Sprint(call.Params["type"]) == "role_id" && fmt.Sprint(call.Params["value"]) == secondRole {
 				return true
@@ -530,15 +552,18 @@ func TestOpenTicketFromSecondPanelUsesItsOwnRoles(t *testing.T) {
 		subjects[fmt.Sprint(call.Params["type"])+":"+fmt.Sprint(call.Params["value"])] = true
 	}
 	if !subjects["role_id:"+secondRole] {
-		t.Fatalf("应下发第二张面板的角色 %s，实际 %v", secondRole, subjects)
+		t.Fatalf("应下发第二个类型的角色 %s，实际 %v", secondRole, subjects)
 	}
 	if subjects["role_id:"+fmt.Sprint(rolePanel)] {
-		t.Fatalf("不应下发第一张面板的角色，实际 %v", subjects)
+		t.Fatalf("不应下发第一个类型的角色，实际 %v", subjects)
 	}
 
 	opened := env.firstTicket()
 	if opened.PanelID == nil || *opened.PanelID != second.ID {
 		t.Fatalf("工单应关联第二张面板 %d，实际 %v", second.ID, opened.PanelID)
+	}
+	if opened.TypeID == nil || *opened.TypeID != secondType.ID || opened.TypeName != secondType.Name {
+		t.Fatalf("工单应记录第二个类型 %d/%s，实际 %v/%q", secondType.ID, secondType.Name, opened.TypeID, opened.TypeName)
 	}
 }
 
@@ -1165,7 +1190,7 @@ func TestPanelCommandCreatesPanel(t *testing.T) {
 // 不会因为调用方没传而回退成默认的 "ticket"。
 func TestSendPanelCardKeepsStoredButtonText(t *testing.T) {
 	env := newBotEnv(t)
-	panel := &store.Panel{ChannelID: "chan-btn", Title: "请联系我们", ButtonText: "联系客服", Enabled: true}
+	panel := &store.Panel{TypeID: env.typeID, ChannelID: "chan-btn", Title: "请联系我们", ButtonText: "联系客服", Enabled: true}
 	if err := env.store.Panels.Create(panel); err != nil {
 		t.Fatalf("创建面板失败: %v", err)
 	}
@@ -1257,19 +1282,23 @@ func TestPanelCardKeepsPlainTitleInSection(t *testing.T) {
 	}
 }
 
-func TestAdminRoleCommandAddsPanelAndGlobalRoles(t *testing.T) {
+// TestAdminRoleCommandAddsTypeAndGlobalRoles 验证 /aar 把角色加到当前频道面板所属工单类型上，
+// 加 -g 时则加为全局管理员角色。
+func TestAdminRoleCommandAddsTypeAndGlobalRoles(t *testing.T) {
 	env := newBotEnv(t)
 
 	env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(
 		testPanelChan, userStaff, "/aar (rol)3001(rol)", env.user(userStaff)))
-	env.waitFor("面板角色添加", func() bool {
-		panel, err := env.store.Panels.ByChannel(testPanelChan)
+	env.waitFor("类型角色添加", func() bool {
+		types, err := env.store.Types.ListByChannel(testPanelChan)
 		if err != nil {
 			return false
 		}
-		for _, role := range panel.Roles {
-			if role.RoleID == "3001" {
-				return true
+		for _, item := range types {
+			for _, role := range item.Roles {
+				if role.RoleID == "3001" {
+					return true
+				}
 			}
 		}
 		return false
@@ -1597,4 +1626,91 @@ func TestHelpCommandRepliesWithCard(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// TestOpenTicketRejectsDisabledType 验证类型停用后，其面板不再开单并给出明确提示。
+func TestOpenTicketRejectsDisabledType(t *testing.T) {
+	env := newBotEnv(t)
+	if err := env.store.Types.UpdateFields(env.typeID, map[string]any{"enabled": false}); err != nil {
+		t.Fatalf("停用类型失败: %v", err)
+	}
+
+	env.mock.Push(kook.EventTypeSystem, kooktest.ButtonClickEvent(testPanelChan, userAsker, env.openValue(), env.user(userAsker)))
+	env.waitFor("停用提示", func() bool {
+		for _, call := range env.mock.CallsOf("message/create") {
+			if fmt.Sprint(call.Params["temp_target_id"]) == userAsker &&
+				strings.Contains(fmt.Sprint(call.Params["content"]), "已停用") {
+				return true
+			}
+		}
+		return false
+	})
+	if ticket := env.firstTicket(); ticket != nil {
+		t.Fatalf("停用类型不应创建工单: %+v", ticket)
+	}
+}
+
+// TestTicketCommandBindsPanelToType 验证 /ticket 命令与工单类型的关系：
+//   - `/ticket 举报投诉` 创建（或复用）同名类型并把面板挂上去；
+//   - 省略类型名时复用当前频道已有面板的类型，保证旧习惯可用。
+func TestTicketCommandBindsPanelToType(t *testing.T) {
+	env := newBotEnv(t)
+	const channel = "chan-type-cmd"
+
+	click := func(content string) {
+		t.Helper()
+		env.mock.Push(kook.EventTypeText, kooktest.TextMessageEvent(channel, userStaff, content, env.user(userStaff)))
+	}
+
+	click("/ticket 举报投诉")
+	env.waitFor("第一个面板创建完成", func() bool {
+		panels, err := env.store.Panels.ListByChannel(channel)
+		return err == nil && len(panels) == 1
+	})
+	panels, err := env.store.Panels.ListByChannel(channel)
+	if err != nil || len(panels) != 1 {
+		t.Fatalf("读取面板失败: %v", err)
+	}
+	reportType, err := env.store.Types.ByID(panels[0].TypeID)
+	if err != nil {
+		t.Fatalf("面板应挂在类型上: %v", err)
+	}
+	if reportType.Name != "举报投诉" {
+		t.Fatalf("类型名应为命令参数，实际 %q", reportType.Name)
+	}
+
+	// 同名命令：复用类型，不重复创建。
+	click("/ticket 举报投诉")
+	env.waitFor("第二个面板创建完成", func() bool {
+		panels, err := env.store.Panels.ListByChannel(channel)
+		return err == nil && len(panels) == 2
+	})
+	panels, _ = env.store.Panels.ListByChannel(channel)
+	if panels[1].TypeID != reportType.ID {
+		t.Fatalf("同名类型应被复用（类型 %d），实际 %d", reportType.ID, panels[1].TypeID)
+	}
+	all, err := env.store.Types.List()
+	if err != nil {
+		t.Fatalf("读取类型失败: %v", err)
+	}
+	sameName := 0
+	for _, item := range all {
+		if item.Name == "举报投诉" {
+			sameName++
+		}
+	}
+	if sameName != 1 {
+		t.Fatalf("同名类型只应存在一个，实际 %d 个", sameName)
+	}
+
+	// 省略类型名：复用本频道已有类型。
+	click("/ticket")
+	env.waitFor("第三个面板创建完成", func() bool {
+		panels, err := env.store.Panels.ListByChannel(channel)
+		return err == nil && len(panels) == 3
+	})
+	panels, _ = env.store.Panels.ListByChannel(channel)
+	if panels[2].TypeID != reportType.ID {
+		t.Fatalf("省略类型名时应复用本频道已有类型 %d，实际 %d", reportType.ID, panels[2].TypeID)
+	}
 }

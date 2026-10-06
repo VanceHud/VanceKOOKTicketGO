@@ -16,6 +16,10 @@ export interface Ticket {
   sourceChannelId: string
   channelId: string
   panelId?: number | null
+  /** 所属工单类型；类型删除后为 null。 */
+  typeId?: number | null
+  /** 开单时的类型名快照：类型改名或删除后历史工单仍显示当时的分类。 */
+  typeName?: string
   status: TicketStatus
   startedAt: string
   lockedAt?: string | null
@@ -70,6 +74,8 @@ export interface ListResponse<T> {
 export interface TicketListParams {
   status?: string
   q?: string
+  /** 按工单类型筛选（传类型 ID 的字符串形式）。 */
+  typeId?: string
   from?: string
   to?: string
   page?: number
@@ -137,6 +143,14 @@ export interface SourceStat {
   closedRate: number
 }
 
+/** 按工单类型聚合的工单量（按开单时的类型名快照归集）。 */
+export interface TypeStat {
+  typeName: string
+  opened: number
+  closed: number
+  closedRate: number
+}
+
 export interface StatsAnalytics {
   generatedAt: string
   rangeDays: number
@@ -148,6 +162,7 @@ export interface StatsAnalytics {
   hourly: HourBucket[]
   closers: CloserStat[]
   sources: SourceStat[]
+  types: TypeStat[]
   archivedMessages: number
   avgMessagesPerTicket: number
   openedToday: number
@@ -241,16 +256,31 @@ export interface RuntimeInfo {
   }
 }
 
-export interface PanelRole {
+export interface TicketTypeRole {
   id: number
-  panelId: number
+  typeId: number
   roleId: string
   roleName: string
   createdAt: string
 }
 
+/** 工单类型：一个类型可对应多个面板，管理员角色挂在类型上。 */
+export interface TicketType {
+  id: number
+  name: string
+  /** 给管理员看的内部备注，不展示给开单人。 */
+  description: string
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+  roles?: TicketTypeRole[]
+  panels?: Panel[]
+}
+
 export interface Panel {
   id: number
+  /** 所属工单类型。 */
+  typeId: number
   channelId: string
   channelName: string
   msgId: string
@@ -261,7 +291,6 @@ export interface Panel {
   enabled: boolean
   createdAt: string
   updatedAt: string
-  roles?: PanelRole[]
 }
 
 export interface EmojiRule {

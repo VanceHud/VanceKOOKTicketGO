@@ -53,7 +53,7 @@ import { toastError } from "@/lib/toast"
 const NAV_ITEMS = [
   { to: "/", labelKey: "nav.dashboard", icon: LayoutDashboard },
   { to: "/tickets", labelKey: "nav.tickets", icon: Ticket },
-  { to: "/panels", labelKey: "nav.panels", icon: LayoutPanelLeft },
+  { to: "/types", labelKey: "nav.types", icon: LayoutPanelLeft },
   { to: "/emoji-roles", labelKey: "nav.emoji", icon: SmilePlus },
   { to: "/roles", labelKey: "nav.roles", icon: ShieldCheck },
   { to: "/bot", labelKey: "nav.bot", icon: Bot },

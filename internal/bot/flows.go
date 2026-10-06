@@ -101,9 +101,6 @@ func (b *Bot) handleButtonClick(ctx context.Context, event kook.Event) {
 // 开单
 // ---------------------------------------------------------------------------
 
-// maxChannelNameLength 是频道名中昵称部分的长度上限，避免超长频道名。
-const maxChannelNameLength = 20
-
 // grantTarget 描述一次频道权限下发。
 //
 // kind 只用于日志/提示文案（例如“全局管理员角色”），subjectType 是 KOOK 需要的
@@ -117,11 +114,11 @@ type grantTarget struct {
 // openTicket 执行开单流程。
 //
 // 步骤：
-//  1. 校验按钮来自已启用的面板；一人同时只能有一个未关闭工单
-//  2. 分配工单编号并落库（pending）
-//  3. 在配置的隐藏分组下创建工单频道，并把工单置为进行中
-//  4. 发含「关闭 / 锁定」按钮的卡片，同时并发下发频道权限（全局管理员角色、
-//     面板管理员角色、开单人）与面板开单提示
+//  1. 校验按钮来自已启用的面板与其工单类型；一人同时只能有一个未关闭工单
+//  2. 分配工单编号并落库（pending，带类型快照）
+//  3. 在配置的隐藏分组下创建工单频道（类型｜短编号｜昵称），并把工单置为进行中
+//  4. 发含「关闭 / 锁定」按钮的卡片（含工单类型），同时并发下发频道权限（全局管理员角色、
+//     类型管理员角色、开单人）与面板开单提示
 //  5. 回到按钮所在频道发「仅开单人可见」的完成提示
 //
 // 第 4 步之所以并发：这些动作互不依赖，串行执行会让用户白等好几个往返；
@@ -131,7 +128,8 @@ type grantTarget struct {
 // 用户会看到它一闪而过（删除失败时还会长期留在私信里）。
 // 私信送达问题改到关闭环节兜底，见 platform.NotifyClosed。
 //
-// panelID 来自按钮签名（旧卡片为 0），用于在同一频道的多张面板卡片中定位实际点击的那一张。
+// panelID 来自按钮签名（旧卡片为 0），用于在同一频道的多张面板卡片中定位实际点击的那一张，
+// 并据此确定工单类型（类型决定频道内展示、管理员角色与频道名）。
 func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, userInfo kook.User, panelID uint) {
 	started := time.Now()
 
@@ -149,6 +147,16 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 	panel, err := b.panelForOpen(panelChannelID, panelID)
 	if err != nil || !panel.Enabled {
 		b.sendEphemeral(ctx, panelChannelID, userID, "该频道没有可用的工单面板")
+		return
+	}
+	ticketType, err := b.deps.Store.Types.ByID(panel.TypeID)
+	if err != nil {
+		b.deps.Logger.Error("面板所属的工单类型不存在", "panel_id", panel.ID, "type_id", panel.TypeID, "err", err)
+		b.sendEphemeral(ctx, panelChannelID, userID, "该面板所属的工单类型不存在，请联系管理员重新创建面板")
+		return
+	}
+	if !ticketType.Enabled {
+		b.sendEphemeral(ctx, panelChannelID, userID, fmt.Sprintf("工单类型「%s」已停用，请选择其它入口", ticketType.Name))
 		return
 	}
 	if cfg.CategoryID == "" {
@@ -170,9 +178,16 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 	if name == "" {
 		name = userID
 	}
-	name = truncateRunes(name, maxChannelNameLength)
+	// 昵称不在这里截断：长度预算由 TicketChannelName 按「类型优先」统一分配。
 
-	pending, err := b.deps.Tickets.CreatePending(ctx, userID, userInfo.FullName(), panelChannelID, &panel.ID)
+	pending, err := b.deps.Tickets.CreatePending(ctx, ticket.OpenParams{
+		UserID:          userID,
+		UserName:        userInfo.FullName(),
+		SourceChannelID: panelChannelID,
+		PanelID:         &panel.ID,
+		TypeID:          &ticketType.ID,
+		TypeName:        ticketType.Name,
+	})
 	if err != nil {
 		b.deps.Logger.Error("分配工单编号失败", "user_id", userID, "err", err)
 		b.sendEphemeral(ctx, panelChannelID, userID, "创建工单失败，请稍后重试")
@@ -180,7 +195,7 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		return
 	}
 
-	channel, err := client.ChannelCreate(ctx, cfg.GuildID, cfg.CategoryID, fmt.Sprintf("%s | %s", pending.No, name))
+	channel, err := client.ChannelCreate(ctx, cfg.GuildID, cfg.CategoryID, TicketChannelName(ticketType.Name, pending.No, name))
 	if err != nil {
 		b.deps.Logger.Error("创建工单频道失败", "ticket_no", pending.No, "err", err)
 		if discardErr := b.deps.Tickets.DiscardPending(ctx, pending.No); discardErr != nil {
@@ -201,19 +216,19 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		return
 	}
 
-	// 权限下发目标：全局管理员角色 + 面板角色 + 开单人本身。
+	// 权限下发目标：全局管理员角色 + 该工单类型的类型角色 + 开单人本身。
 	adminRoles, err := b.deps.Store.Roles.ListAdmin()
 	if err != nil {
 		b.deps.Logger.Error("读取全局管理员角色失败", "err", err)
 	}
-	grants := make([]grantTarget, 0, len(adminRoles)+len(panel.Roles)+1)
-	roleIDs := make([]string, 0, len(adminRoles)+len(panel.Roles))
+	grants := make([]grantTarget, 0, len(adminRoles)+len(ticketType.Roles)+1)
+	roleIDs := make([]string, 0, len(adminRoles)+len(ticketType.Roles))
 	for _, role := range adminRoles {
 		grants = append(grants, grantTarget{"role_id", role.RoleID, "全局管理员角色"})
 		roleIDs = append(roleIDs, role.RoleID)
 	}
-	for _, role := range panel.Roles {
-		grants = append(grants, grantTarget{"role_id", role.RoleID, "面板角色"})
+	for _, role := range ticketType.Roles {
+		grants = append(grants, grantTarget{"role_id", role.RoleID, "工单类型管理员角色"})
 		roleIDs = append(roleIDs, role.RoleID)
 	}
 	grants = append(grants, grantTarget{"user_id", userID, "开单人"})
@@ -265,13 +280,14 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		CreatedAt: store.Now(),
 	})
 	b.deps.Logger.Info("工单已创建",
-		"ticket_no", activated.No, "channel_id", channel.ID, "user", userInfo.FullName(),
+		"ticket_no", activated.No, "ticket_type", ticketType.Name,
+		"channel_id", channel.ID, "user", userInfo.FullName(),
 		"roles", len(grants), "elapsed", time.Since(started).Round(time.Millisecond).String(),
 		"channel_ms", channelElapsed.Milliseconds(), "card_ms", cardElapsed.Milliseconds(),
 		"grants_ms", grantsElapsed.Milliseconds(), "notice_ms", (time.Since(started) - grantsElapsed).Milliseconds())
 }
 
-// panelForOpen 定位开单按钮所属的面板。
+// panelForOpen 定位开单按钮所属的面板（其 TypeID 决定工单类型）。
 //
 // panelID 非 0 时按主键查询，并校验其确实属于按钮所在频道；
 // 否则（升级前的旧卡片）回退到频道内第一条面板。
@@ -338,7 +354,7 @@ func (b *Bot) closeTicket(ctx context.Context, channelID, userID, ticketNo strin
 	if !ok {
 		return
 	}
-	if !b.isAdmin(ctx, userID, t.SourceChannelID) {
+	if !b.isTicketAdmin(ctx, userID, t) {
 		b.sendEphemeral(ctx, channelID, userID, "只有管理员可以关闭工单")
 		return
 	}
@@ -359,7 +375,7 @@ func (b *Bot) lockTicket(ctx context.Context, channelID, userID, ticketNo string
 	if !ok {
 		return
 	}
-	if !b.isAdmin(ctx, userID, t.SourceChannelID) {
+	if !b.isTicketAdmin(ctx, userID, t) {
 		b.sendEphemeral(ctx, channelID, userID, "只有管理员可以锁定工单")
 		return
 	}
@@ -377,7 +393,7 @@ func (b *Bot) reopenTicket(ctx context.Context, channelID, userID, ticketNo stri
 	if !ok {
 		return
 	}
-	if !b.isAdmin(ctx, userID, t.SourceChannelID) {
+	if !b.isTicketAdmin(ctx, userID, t) {
 		b.sendEphemeral(ctx, channelID, userID, "只有管理员可以重新激活工单")
 		return
 	}

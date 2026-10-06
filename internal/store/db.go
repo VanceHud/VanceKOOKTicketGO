@@ -39,6 +39,7 @@ type Store struct {
 	Codes    *AuthCodesRepo
 	Tickets  *TicketsRepo
 	Panels   *PanelsRepo
+	Types    *TypesRepo
 	Roles    *RolesRepo
 	Emoji    *EmojiRepo
 	Audit    *AuditRepo
@@ -100,6 +101,7 @@ func Open(path string) (*Store, error) {
 	s.Codes = &AuthCodesRepo{db: db}
 	s.Tickets = &TicketsRepo{db: db}
 	s.Panels = &PanelsRepo{db: db}
+	s.Types = &TypesRepo{db: db}
 	s.Roles = &RolesRepo{db: db}
 	s.Emoji = &EmojiRepo{db: db}
 	s.Audit = &AuditRepo{db: db}
@@ -120,8 +122,162 @@ func (s *Store) Migrate() error {
 	if err := s.migratePanelChannelIndex(); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
+	if err := s.migrateTicketTypes(); err != nil {
+		return fmt.Errorf("数据库迁移失败: %w", err)
+	}
 	hardenSQLiteFiles(s.path)
 	return nil
+}
+
+// migrateTicketTypes 把旧版「面板 + 面板级角色」升级为「工单类型 + 类型级角色」。
+//
+// 策略（行为兼容优先）：为每个尚未归属类型的面板建一个同名类型，
+// 并把该面板的角色复制为类型角色——升级前后“谁能处理这些工单”完全一致。
+// 管理员随后可以在 WebUI 里把面板挂到同一个类型下（多个面板共享一套角色）。
+//
+// 历史工单按 panel_id（已删除面板则退化为 source_channel_id 中最早的面板）
+// 回填 type_id / type_name 快照；角色表内容复制完成后删除，避免留下死数据。
+//
+// 幂等：已有类型的面板不会再处理；panel_roles 表不存在时跳过复制。
+func (s *Store) migrateTicketTypes() error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var panels []Panel
+		if err := tx.Where("type_id IS NULL OR type_id = 0").Order("id ASC").Find(&panels).Error; err != nil {
+			return err
+		}
+
+		hasPanelRoles, err := tableExists(tx, "panel_roles")
+		if err != nil {
+			return err
+		}
+
+		if len(panels) > 0 {
+			// 已有类型名参与去重，避免生成出重名类型（name 上有唯一索引）。
+			usedNames := map[string]struct{}{}
+			var existingNames []string
+			if err := tx.Model(&TicketType{}).Pluck("name", &existingNames).Error; err != nil {
+				return err
+			}
+			for _, name := range existingNames {
+				usedNames[name] = struct{}{}
+			}
+
+			created := 0
+			for _, panel := range panels {
+				name := uniqueTypeName(panel, usedNames)
+				typeRow := &TicketType{Name: name, Enabled: true, CreatedAt: Now(), UpdatedAt: Now()}
+				if err := tx.Create(typeRow).Error; err != nil {
+					return err
+				}
+
+				if hasPanelRoles {
+					if err := copyPanelRoles(tx, panel.ID, typeRow.ID); err != nil {
+						return err
+					}
+				}
+
+				if err := tx.Model(&Panel{}).Where("id = ?", panel.ID).
+					Update("type_id", typeRow.ID).Error; err != nil {
+					return err
+				}
+				// 该面板开出的历史工单回填类型快照。
+				if err := tx.Model(&Ticket{}).
+					Where("panel_id = ? AND (type_id IS NULL OR type_id = 0)", panel.ID).
+					Updates(map[string]any{"type_id": typeRow.ID, "type_name": name}).Error; err != nil {
+					return err
+				}
+				created++
+			}
+			slog.Info("已为存量面板创建工单类型", "panels", created)
+		}
+
+		// 面板已被删除的历史工单：退化为按来源频道匹配该频道最早的面板所属类型。
+		if err := tx.Exec(`
+			UPDATE tickets SET
+				type_id = (SELECT p.type_id FROM panels p WHERE p.channel_id = tickets.source_channel_id ORDER BY p.id ASC LIMIT 1),
+				type_name = (SELECT t.name FROM panels p JOIN ticket_types t ON t.id = p.type_id
+					WHERE p.channel_id = tickets.source_channel_id ORDER BY p.id ASC LIMIT 1)
+			WHERE (type_id IS NULL OR type_id = 0) AND source_channel_id <> ''`).Error; err != nil {
+			return err
+		}
+
+		if hasPanelRoles {
+			if err := tx.Exec("DROP TABLE IF EXISTS panel_roles").Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// uniqueTypeName 为迁移生成的类型挑选一个不与现有类型冲突的名称。
+func uniqueTypeName(panel Panel, used map[string]struct{}) string {
+	base := strings.TrimSpace(panel.ChannelName)
+	if base == "" {
+		base = fmt.Sprintf("工单面板 #%d", panel.ID)
+	}
+	base = truncateRunes(base, 64)
+
+	name := base
+	if _, taken := used[name]; taken {
+		name = truncateRunes(base, 48) + fmt.Sprintf(" #%d", panel.ID)
+	}
+	for index := 2; ; index++ {
+		if _, taken := used[name]; !taken {
+			break
+		}
+		name = truncateRunes(base, 48) + fmt.Sprintf(" #%d-%d", panel.ID, index)
+	}
+	used[name] = struct{}{}
+	return name
+}
+
+// copyPanelRoles 把某个面板的角色复制成类型角色（同一角色只保留一条）。
+func copyPanelRoles(tx *gorm.DB, panelID, typeID uint) error {
+	type panelRoleRow struct {
+		RoleID   string
+		RoleName string
+	}
+	var rows []panelRoleRow
+	if err := tx.Table("panel_roles").Where("panel_id = ?", panelID).Order("id ASC").Find(&rows).Error; err != nil {
+		return err
+	}
+	seen := map[string]struct{}{}
+	for _, row := range rows {
+		if _, ok := seen[row.RoleID]; ok {
+			continue
+		}
+		seen[row.RoleID] = struct{}{}
+		err := tx.Create(&TicketTypeRole{
+			TypeID: typeID, RoleID: row.RoleID, RoleName: row.RoleName, CreatedAt: Now(),
+		}).Error
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tableExists 判断表是否存在（迁移兼容旧版本时需要）。
+func tableExists(tx *gorm.DB, name string) (bool, error) {
+	var count int64
+	if err := tx.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", name).
+		Scan(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// truncateRunes 按字符截断字符串（超出时追加省略号）。
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit <= 1 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 // migratePanelChannelIndex 去掉历史版本在 panels.channel_id 上的唯一索引。

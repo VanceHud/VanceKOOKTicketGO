@@ -22,7 +22,7 @@ const DashboardPage = lazyPage(() => import("@/routes/Dashboard"), "DashboardPag
 const StatsPage = lazyPage(() => import("@/routes/Stats"), "StatsPage")
 const TicketsPage = lazyPage(() => import("@/routes/Tickets"), "TicketsPage")
 const TicketDetailPage = lazyPage(() => import("@/routes/TicketDetail"), "TicketDetailPage")
-const PanelsPage = lazyPage(() => import("@/routes/Panels"), "PanelsPage")
+const TicketTypesPage = lazyPage(() => import("@/routes/TicketTypes"), "TicketTypesPage")
 const EmojiRolesPage = lazyPage(() => import("@/routes/EmojiRoles"), "EmojiRolesPage")
 const RoleMappingPage = lazyPage(() => import("@/routes/RoleMapping"), "RoleMappingPage")
 const UsersPage = lazyPage(() => import("@/routes/Users"), "UsersPage")
@@ -66,7 +66,7 @@ export function App() {
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/tickets/:no" element={<TicketDetailPage />} />
             <Route path="/account" element={<AccountPage />} />
-            <Route path="/panels" element={<PanelsPage />} />
+            <Route path="/types" element={<TicketTypesPage />} />
             <Route path="/emoji-roles" element={<EmojiRolesPage />} />
             <Route path="/roles" element={<RoleMappingPage />} />
             <Route path="/users" element={<UsersPage />} />

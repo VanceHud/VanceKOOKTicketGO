@@ -36,6 +36,14 @@ type SourceStat struct {
 	ClosedRate float64 `json:"closedRate"`
 }
 
+// TypeStat 是按工单类型聚合的工单量（按开单时的类型名快照归集）。
+type TypeStat struct {
+	TypeName   string  `json:"typeName"`
+	Opened     int64   `json:"opened"`
+	Closed     int64   `json:"closed"`
+	ClosedRate float64 `json:"closedRate"`
+}
+
 // Analytics 是细化统计看板所需的聚合结果。
 type Analytics struct {
 	GeneratedAt time.Time `json:"generatedAt"`
@@ -55,6 +63,8 @@ type Analytics struct {
 	Closers []CloserStat `json:"closers"`
 	// Sources 按开单量降序
 	Sources []SourceStat `json:"sources"`
+	// Types 按开单量降序
+	Types []TypeStat `json:"types"`
 
 	ArchivedMessages     int64   `json:"archivedMessages"`
 	AvgMessagesPerTicket float64 `json:"avgMessagesPerTicket"`
@@ -95,6 +105,7 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 		Hourly:      make([]HourBucket, 24),
 		Closers:     []CloserStat{},
 		Sources:     []SourceStat{},
+		Types:       []TypeStat{},
 	}
 	for hour := 0; hour < 24; hour++ {
 		result.Hourly[hour].Hour = hour
@@ -103,6 +114,7 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 	type analyticsRow struct {
 		Status          string
 		SourceChannelID string
+		TypeName        string
 		ClosedByName    string
 		StartedAt       time.Time
 		ClosedAt        *time.Time
@@ -111,7 +123,7 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 	}
 
 	rows, err := r.db.Model(&Ticket{}).
-		Select("status, source_channel_id, closed_by_name, started_at, closed_at, first_reply_at, message_count").
+		Select("status, source_channel_id, type_name, closed_by_name, started_at, closed_at, first_reply_at, message_count").
 		Where("started_at >= ? OR closed_at >= ? OR first_reply_at >= ?", rangeStart.UTC(), rangeStart.UTC(), rangeStart.UTC()).
 		Rows()
 	if err != nil {
@@ -126,6 +138,8 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 		closerResolution    = map[string]float64{}
 		sourceOpened        = map[string]int64{}
 		sourceClosed        = map[string]int64{}
+		typeOpened          = map[string]int64{}
+		typeClosed          = map[string]int64{}
 		messageSum          int64
 	)
 
@@ -142,9 +156,15 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 			hour := row.StartedAt.In(loc).Hour()
 			result.Hourly[hour].Opened++
 			sourceOpened[row.SourceChannelID]++
+			typeName := row.TypeName
+			if typeName == "" {
+				typeName = UnnamedTypeLabel
+			}
+			typeOpened[typeName]++
 			if row.Status == TicketClosed {
 				result.Closed++
 				sourceClosed[row.SourceChannelID]++
+				typeClosed[typeName]++
 			}
 		}
 		if row.ClosedAt != nil && !row.ClosedAt.Before(rangeStart.UTC()) {
@@ -211,6 +231,21 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 			return result.Sources[i].ChannelID < result.Sources[j].ChannelID
 		}
 		return result.Sources[i].Opened > result.Sources[j].Opened
+	})
+
+	for typeName, opened := range typeOpened {
+		closed := typeClosed[typeName]
+		stat := TypeStat{TypeName: typeName, Opened: opened, Closed: closed}
+		if opened > 0 {
+			stat.ClosedRate = float64(closed) / float64(opened)
+		}
+		result.Types = append(result.Types, stat)
+	}
+	sort.Slice(result.Types, func(i, j int) bool {
+		if result.Types[i].Opened == result.Types[j].Opened {
+			return result.Types[i].TypeName < result.Types[j].TypeName
+		}
+		return result.Types[i].Opened > result.Types[j].Opened
 	})
 
 	// 归档消息量（区间内）

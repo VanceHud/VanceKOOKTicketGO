@@ -15,6 +15,7 @@ import { StatusBadge } from "@/components/Badges"
 import { PageHeader } from "@/components/PageHeader"
 import { Pagination } from "@/components/Pagination"
 import { EmptyState, ErrorState, InlineLoader } from "@/components/StateViews"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -22,7 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatDateTime } from "@/lib/format"
 import { timezoneLabel } from "@/lib/timezone"
-import { useTickets } from "@/lib/queries"
+import { useTickets, useTicketTypes } from "@/lib/queries"
 import type { Ticket } from "@/lib/types"
 
 const PAGE_SIZE = 20
@@ -36,6 +37,7 @@ export function TicketsPage() {
   const page = Math.max(1, Number(searchParams.get("page") ?? "1") || 1)
   const q = searchParams.get("q") ?? ""
   const status = searchParams.get("status") ?? ""
+  const typeId = searchParams.get("typeId") ?? ""
   const from = searchParams.get("from") ?? ""
   const to = searchParams.get("to") ?? ""
 
@@ -66,7 +68,9 @@ export function TicketsPage() {
     setSearchParams(next, { replace: true })
   }
 
-  const query = useTickets({ page, pageSize: PAGE_SIZE, q, status, from, to })
+  const query = useTickets({ page, pageSize: PAGE_SIZE, q, status, typeId, from, to })
+  const typesQuery = useTicketTypes()
+  const ticketTypes = typesQuery.data?.items ?? []
 
   const columns = useMemo<ColumnDef<Ticket>[]>(
     () => [
@@ -83,6 +87,18 @@ export function TicketsPage() {
         accessorKey: "userName",
         header: t("tickets.colUser"),
         cell: ({ row }) => <span className="block max-w-40 truncate">{row.original.userName}</span>,
+      },
+      {
+        accessorKey: "typeName",
+        header: t("tickets.colType"),
+        cell: ({ row }) =>
+          row.original.typeName ? (
+            <Badge variant="outline" className="font-normal">
+              {row.original.typeName}
+            </Badge>
+          ) : (
+            <span className="text-muted-foreground text-xs">{t("common.none")}</span>
+          ),
       },
       {
         accessorKey: "status",
@@ -134,7 +150,7 @@ export function TicketsPage() {
     manualPagination: true,
   })
 
-  const hasFilters = Boolean(q || status || from || to)
+  const hasFilters = Boolean(q || status || typeId || from || to)
 
   return (
     <div className="space-y-4">
@@ -147,7 +163,7 @@ export function TicketsPage() {
 
       {/* 筛选区 */}
       <Card>
-        <CardContent className="grid gap-3 pt-6 sm:grid-cols-2 lg:grid-cols-4">
+        <CardContent className="grid gap-3 pt-6 sm:grid-cols-2 lg:grid-cols-5">
           <div className="relative">
             <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
             <Input
@@ -167,6 +183,23 @@ export function TicketsPage() {
               {STATUS_FILTERS.map((value) => (
                 <SelectItem key={value} value={value}>
                   {t(`status.${value}`)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select
+            value={typeId || "all"}
+            onValueChange={(value) => updateParams({ typeId: value === "all" ? "" : value, page: "1" })}
+          >
+            <SelectTrigger aria-label={t("tickets.selectType")}>
+              <SelectValue placeholder={t("tickets.selectType")} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">{t("common.all")}</SelectItem>
+              {ticketTypes.map((item) => (
+                <SelectItem key={item.id} value={String(item.id)}>
+                  {item.name}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -247,7 +280,14 @@ export function TicketsPage() {
                 <Link key={ticket.no} to={`/tickets/${ticket.no}`} className="hover:bg-muted/50 block space-y-2 p-4">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-mono text-xs">{ticket.no}</span>
-                    <StatusBadge status={ticket.status} />
+                    <div className="flex items-center gap-1.5">
+                      {ticket.typeName ? (
+                        <Badge variant="outline" className="font-normal">
+                          {ticket.typeName}
+                        </Badge>
+                      ) : null}
+                      <StatusBadge status={ticket.status} />
+                    </div>
                   </div>
                   <div className="flex items-center justify-between gap-2 text-sm">
                     <span className="truncate font-medium">{ticket.userName}</span>

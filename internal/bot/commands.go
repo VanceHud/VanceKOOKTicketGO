@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -52,7 +53,7 @@ func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
 	case "tkhelp", "help":
 		b.replyEphemeralCard(ctx, event, b.helpCard())
 	case "ticket":
-		b.cmdTicketPanel(ctx, event)
+		b.cmdTicketPanel(ctx, event, args)
 	case "tkcm":
 		b.cmdTicketComment(ctx, event, args)
 	case "aar", "add_admin_role":
@@ -70,9 +71,13 @@ func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
 
 // cmdTicketPanel 在当前频道新建一张工单面板卡片。
 //
+// 用法：/ticket [类型名]
+//   - 指定类型名：面板挂在同名工单类型下，类型不存在时自动创建；
+//   - 省略类型名：优先复用当前频道已有面板的类型，否则使用「默认工单类型」。
+//
 // 同一频道允许存在多张卡片：每次执行都会新建一条面板记录并发送一张新卡片，
-// 各自携带独立的文案与面板管理员角色。
-func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event) {
+// 面板类型可在 WebUI 的「工单类型」页里随时调整。
+func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event, args []string) {
 	channelID := event.TargetID
 	if channelID == "" {
 		return
@@ -86,7 +91,18 @@ func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event) {
 		return
 	}
 
+	ticketType, err := b.ticketTypeForPanel(ctx, channelID, strings.Join(args, " "))
+	if err != nil {
+		b.replyEphemeral(ctx, event, err.Error())
+		return
+	}
+	if !ticketType.Enabled {
+		b.replyEphemeral(ctx, event, fmt.Sprintf("工单类型「%s」已停用，请先启用或换一个类型", ticketType.Name))
+		return
+	}
+
 	panel := &store.Panel{
+		TypeID:      ticketType.ID,
 		ChannelID:   channelID,
 		ChannelName: event.Extra.ChannelName,
 		Title:       DefaultPanelTitle,
@@ -118,10 +134,52 @@ func (b *Bot) cmdTicketPanel(ctx context.Context, event kook.Event) {
 		ActorType: store.ActorTypeKook,
 		Action:    "panel.create",
 		Target:    channelID,
-		Detail:    "创建工单面板，消息 " + msgID,
+		Detail:    fmt.Sprintf("创建面板（工单类型：%s），消息 %s", ticketType.Name, msgID),
 		CreatedAt: store.Now(),
 	})
-	b.replyEphemeral(ctx, event, "工单面板已创建，成员点击按钮即可开单")
+	b.replyEphemeral(ctx, event, fmt.Sprintf("已为工单类型「%s」创建面板，成员点击按钮即可开单", ticketType.Name))
+}
+
+// maxTicketTypeNameLength 是工单类型名称的长度上限（与数据库列宽一致）。
+const maxTicketTypeNameLength = 64
+
+// ticketTypeForPanel 解析 /ticket 命令要使用的工单类型。
+//
+// 显式给出名称时按名称复用、不存在则创建；省略时优先复用当前频道已有面板的类型，
+// 否则退化为「默认工单类型」，保证旧习惯的 `/ticket` 仍然可用。
+func (b *Bot) ticketTypeForPanel(ctx context.Context, channelID, rawName string) (*store.TicketType, error) {
+	name := strings.Join(strings.Fields(rawName), " ")
+	if name != "" {
+		if len([]rune(name)) > maxTicketTypeNameLength {
+			return nil, fmt.Errorf("类型名称不能超过 %d 个字符", maxTicketTypeNameLength)
+		}
+		return b.ensureTicketType(name)
+	}
+	if types, err := b.deps.Store.Types.ListByChannel(channelID); err == nil && len(types) > 0 {
+		return &types[0], nil
+	}
+	return b.ensureTicketType(store.DefaultTypeName)
+}
+
+// ensureTicketType 按名称取工单类型，不存在则创建（并发时依赖名称唯一索引兜底）。
+func (b *Bot) ensureTicketType(name string) (*store.TicketType, error) {
+	item, err := b.deps.Store.Types.ByName(name)
+	if err == nil {
+		return item, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+
+	created := &store.TicketType{Name: name, Enabled: true}
+	if err := b.deps.Store.Types.Create(created); err != nil {
+		// 并发创建同名类型：以库里的记录为准。
+		if again, lookupErr := b.deps.Store.Types.ByName(name); lookupErr == nil {
+			return again, nil
+		}
+		return nil, err
+	}
+	return created, nil
 }
 
 // cmdTicketComment 为已关闭的工单添加备注（对应 /tkcm）。
@@ -202,24 +260,24 @@ func (b *Bot) cmdAddAdminRole(ctx context.Context, event kook.Event, args []stri
 		return
 	}
 
-	// 同一频道可能有多张面板卡片，/aar 对它们全部生效。
-	panels, err := b.deps.Store.Panels.ListByChannel(event.TargetID)
-	if err != nil || len(panels) == 0 {
-		b.replyEphemeral(ctx, event, "当前频道还没有工单面板，无法设置面板管理员；若需全局管理员请在命令末尾加 `-g`")
+	// 类型级管理员：同一频道可能有多张面板，它们所属的类型全部生效。
+	types, err := b.deps.Store.Types.ListByChannel(event.TargetID)
+	if err != nil || len(types) == 0 {
+		b.replyEphemeral(ctx, event, "当前频道还没有工单面板，无法设置类型管理员；若需全局管理员请在命令末尾加 `-g`")
 		return
 	}
-	for _, panel := range panels {
-		if err := b.deps.Store.Panels.AddRole(panel.ID, roleID, roleName); err != nil {
-			b.replyEphemeral(ctx, event, "添加面板管理员角色失败："+friendlyError(err))
+	for _, item := range types {
+		if err := b.deps.Store.Types.AddRole(item.ID, roleID, roleName); err != nil {
+			b.replyEphemeral(ctx, event, "添加工单类型管理员角色失败："+friendlyError(err))
 			return
 		}
 	}
 	b.deps.Store.Audit.Write(&store.AuditLog{
 		Actor: event.Author.FullName(), ActorType: store.ActorTypeKook,
-		Action: "role.panel.add", Target: roleID, Detail: "新增面板管理员角色：" + event.TargetID,
+		Action: "role.type.add", Target: roleID, Detail: "新增工单类型管理员角色：" + event.TargetID,
 		CreatedAt: store.Now(),
 	})
-	b.replyEphemeral(ctx, event, fmt.Sprintf("已把「%s」设为当前频道 %d 张面板的管理员角色", roleName, len(panels)))
+	b.replyEphemeral(ctx, event, fmt.Sprintf("已把「%s」设为本频道 %d 个工单类型的管理员角色", roleName, len(types)))
 }
 
 // lookupRoleName 按 ID 查角色名（失败时退化为 ID）。

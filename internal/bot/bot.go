@@ -656,11 +656,47 @@ func (b *Bot) userRoles(ctx context.Context, userID string) ([]int64, error) {
 	return user.Roles, nil
 }
 
-// isAdmin 判断用户是否具备处理工单的权限。
+// isAdmin 判断用户是否具备处理某频道工单的权限。
 //
-// 命中任一条件即通过：服务器创建者、全局管理员角色、该面板的频道级管理员角色。
+// 命中任一条件即通过：服务器创建者、全局管理员角色、该频道内面板所属工单类型的类型角色。
 // panelChannelID 为开单按钮所在频道（面板），可为空（此时只检查全局管理员）。
 func (b *Bot) isAdmin(ctx context.Context, userID, panelChannelID string) bool {
+	var types []store.TicketType
+	if panelChannelID != "" {
+		items, err := b.deps.Store.Types.ListByChannel(panelChannelID)
+		if err != nil {
+			b.deps.Logger.Error("读取频道内的工单类型失败", "channel_id", panelChannelID, "err", err)
+		}
+		types = items
+	}
+	return b.isAdminWithTypes(ctx, userID, types)
+}
+
+// isTicketAdmin 判断用户是否可以处理某张具体工单。
+//
+// 优先用开单时落库的类型快照判定（类型即使被停用，处理中的工单仍需能关闭）；
+// 类型已被删除或旧数据缺失时，退化为按来源频道解析类型。
+func (b *Bot) isTicketAdmin(ctx context.Context, userID string, t *store.Ticket) bool {
+	var types []store.TicketType
+	if t.TypeID != nil {
+		if item, err := b.deps.Store.Types.ByID(*t.TypeID); err == nil {
+			types = append(types, *item)
+		} else if !errors.Is(err, store.ErrNotFound) {
+			b.deps.Logger.Warn("读取工单类型失败", "ticket_no", t.No, "type_id", *t.TypeID, "err", err)
+		}
+	}
+	if len(types) == 0 && t.SourceChannelID != "" {
+		items, err := b.deps.Store.Types.ListByChannel(t.SourceChannelID)
+		if err != nil {
+			b.deps.Logger.Error("读取来源频道的工单类型失败", "channel_id", t.SourceChannelID, "err", err)
+		}
+		types = items
+	}
+	return b.isAdminWithTypes(ctx, userID, types)
+}
+
+// isAdminWithTypes 是权限判定的核心：服务器创建者 / 全局管理员角色 / 给定类型的管理员角色。
+func (b *Bot) isAdminWithTypes(ctx context.Context, userID string, types []store.TicketType) bool {
 	roles, err := b.userRoles(ctx, userID)
 	if err != nil {
 		b.deps.Logger.Warn("读取用户角色失败，默认无权限", "user_id", userID, "err", err)
@@ -683,17 +719,12 @@ func (b *Bot) isAdmin(ctx context.Context, userID, panelChannelID string) bool {
 		return true
 	}
 
-	if panelChannelID != "" {
-		panels, err := b.deps.Store.Panels.ListByChannel(panelChannelID)
-		if err == nil {
-			// 频道内可能有多张面板卡片，命中任意一张的面板角色即视为管理员。
-			for _, panel := range panels {
-				for _, panelRole := range panel.Roles {
-					for _, roleID := range roles {
-						if panelRole.RoleID == fmt.Sprint(roleID) {
-							return true
-						}
-					}
+	// 工单类型角色：命中任一类型的任一角色即视为管理员。
+	for _, item := range types {
+		for _, typeRole := range item.Roles {
+			for _, roleID := range roles {
+				if typeRole.RoleID == fmt.Sprint(roleID) {
+					return true
 				}
 			}
 		}

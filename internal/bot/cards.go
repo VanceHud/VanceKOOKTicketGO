@@ -44,21 +44,32 @@ func (b *Bot) panelCard(title, buttonText, openValue string) string {
 
 // panelOpenMessage 渲染面板自定义的开单提示。
 //
-// 支持变量：{user} 提及开单人、{user_name} 开单人昵称、{ticket_no} 工单编号、{time} 开单时间；
-// 未识别的花括号内容原样保留，避免误伤正常文案。
-// 昵称经转义处理：KOOK 昵称可能包含 (met)all(met) 之类的提及语法，不能直接回填。
+// 支持变量：{user} 提及开单人、{user_name} 开单人昵称、{ticket_no} 工单编号、{time} 开单时间、
+// {type} / {type_name} 工单类型名称；未识别的花括号内容原样保留，避免误伤正常文案。
+// 昵称与类型名经转义处理：KOOK 文本可能包含 (met)all(met) 之类的提及语法，不能直接回填。
 //
 // 该内容以 KMarkdown 文本消息发送（不是卡片，没有 header 模块可用），
 // 因此 KOOK 不支持的 "# 标题"、"__下划线__"、"- 列表" 会先转换成
 // 加粗、(ins) 与「• 」，避免管理员在 WebUI 里看到效果、发到 KOOK 却是原文。
 func (b *Bot) panelOpenMessage(template string, t *store.Ticket) string {
+	typeName := kook.EscapeMentionText(ticketTypeLabel(t))
 	replacer := strings.NewReplacer(
 		"{user}", kook.MentionUser(t.UserID),
 		"{user_name}", kook.EscapeMentionText(firstNonEmpty(t.UserName, t.UserID)),
 		"{ticket_no}", t.No,
 		"{time}", b.formatTime(t.StartedAt),
+		"{type}", typeName,
+		"{type_name}", typeName,
 	)
 	return kook.NormalizeKMarkdown(replacer.Replace(template))
+}
+
+// ticketTypeLabel 返回工单类型的展示文案（历史工单缺失类型快照时用占位）。
+func ticketTypeLabel(t *store.Ticket) string {
+	if strings.TrimSpace(t.TypeName) == "" {
+		return store.UnnamedTypeLabel
+	}
+	return t.TypeName
 }
 
 // ticketCard 生成工单频道内的首条卡片（含关闭与锁定按钮）。
@@ -71,9 +82,10 @@ func (b *Bot) ticketCard(t *store.Ticket, adminRoleIDs []string, closeValue, loc
 
 	card := kook.NewCard(kook.CardThemePrimary).
 		KMarkdownSection(fmt.Sprintf(
-			"%s 发起了工单，请等待管理员回复\n工单编号：**%s**\n开启时间：%s\n%s",
+			"%s 发起了工单，请等待管理员回复\n工单编号：**%s**\n工单类型：**%s**\n开启时间：%s\n%s",
 			kook.MentionUser(t.UserID),
 			t.No,
+			ticketTypeLabel(t),
 			b.formatTime(t.StartedAt),
 			strings.TrimSpace(mentions.String()),
 		)).
@@ -98,8 +110,9 @@ func (b *Bot) ticketCard(t *store.Ticket, adminRoleIDs []string, closeValue, loc
 // 卡片里的 (chn) 频道提及会被客户端渲染成可点击链接，点击即可跳到工单频道。
 func (b *Bot) ticketCreatedCard(t *store.Ticket) string {
 	markdown := fmt.Sprintf(
-		"你的工单 **%s** 已创建完成，请前往 %s 与管理员沟通。",
+		"你的工单 **%s**（类型：**%s**）已创建完成，请前往 %s 与管理员沟通。",
 		t.No,
+		ticketTypeLabel(t),
 		kook.MentionChannel(t.ChannelID),
 	)
 
@@ -125,8 +138,9 @@ func (b *Bot) closedCard(t *store.Ticket, actor ticket.Actor, note string) strin
 	// 关闭用户可能是 WebUI 账号（actor.ID 是账号名而非 KOOK ID），
 	// 用 DisplayUser 回退到昵称，避免 KOOK 渲染成「@用户不存在」。
 	text := fmt.Sprintf(
-		"开启时间：%s\n发起用户：%s\n关闭时间：%s\n关闭用户：%s",
+		"开启时间：%s\n工单类型：%s\n发起用户：%s\n关闭时间：%s\n关闭用户：%s",
 		b.formatTime(t.StartedAt),
+		ticketTypeLabel(t),
 		kook.MentionUser(t.UserID),
 		b.formatTime(store.Now()),
 		kook.DisplayUser(closer, actor.Name),
@@ -155,7 +169,8 @@ func (b *Bot) lockCard(t *store.Ticket, actor ticket.Actor, reopenValue, reasonT
 		operator = "system"
 	}
 	text := fmt.Sprintf(
-		"当前工单已进入锁定状态，用户无法发言\n原因：%s\n操作时间：%s\n工单用户：%s\n操作用户：%s",
+		"当前工单已进入锁定状态，用户无法发言\n工单类型：%s\n原因：%s\n操作时间：%s\n工单用户：%s\n操作用户：%s",
+		ticketTypeLabel(t),
 		kook.EscapeMentionText(reasonText),
 		b.formatTime(store.Now()),
 		kook.MentionUser(t.UserID),
@@ -177,8 +192,9 @@ func (b *Bot) lockCard(t *store.Ticket, actor ticket.Actor, reopenValue, reasonT
 // ticketLogCard 生成日志卡片内容，供 /tkcm 备注后刷新。
 func (b *Bot) ticketLogCard(t *store.Ticket, notes []store.TicketNote) string {
 	text := fmt.Sprintf(
-		"开启时间：%s\n发起用户：%s\n结束时间：%s\n关闭用户：%s",
+		"开启时间：%s\n工单类型：%s\n发起用户：%s\n结束时间：%s\n关闭用户：%s",
 		b.formatTime(t.StartedAt),
+		ticketTypeLabel(t),
 		kook.MentionUser(t.UserID),
 		b.formatTime(derefTime(t.ClosedAt, store.Now())),
 		// closed_by 可能是 WebUI 账号名，优先用落库时的昵称展示。
@@ -207,9 +223,9 @@ func (b *Bot) ticketLogCard(t *store.Ticket, notes []store.TicketNote) string {
 // helpCard 生成帮助卡片。
 func (b *Bot) helpCard() string {
 	text := strings.Join([]string{
-		"`/ticket` 在当前频道新建一张工单按钮卡片（同一频道可多张）",
+		"`/ticket [类型名]` 在当前频道新建一张工单按钮卡片（同一频道可多张，省略类型名时复用本频道已有类型）",
 		"`/tkcm 工单编号 备注` 为已关闭的工单添加备注",
-		"`/aar @角色` 把角色设为当前面板的管理员角色；加 `-g` 设为全局管理员角色",
+		"`/aar @角色` 把角色设为当前频道面板所属工单类型的管理员角色；加 `-g` 设为全局管理员角色",
 		"`/login`（私聊）获取 WebUI 一次性登录码",
 		"`/bind`（私聊）获取账号绑定码，用于把 KOOK 身份绑定到 WebUI 账号",
 		"```\nID 获取方式：KOOK 设置 → 高级设置 → 打开开发者模式，然后右键复制对应 ID\n```",

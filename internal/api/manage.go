@@ -47,13 +47,15 @@ func normalizePanelOpenMessage(value string) (string, error) {
 // ---------------------------------------------------------------------------
 
 type panelCreateRequest struct {
+	// TypeID 是面板所属的工单类型（一个类型可对应多个面板）。
+	TypeID      uint   `json:"typeId"`
 	ChannelID   string `json:"channelId"`
 	Title       string `json:"title"`
 	ButtonText  string `json:"buttonText"`
 	OpenMessage string `json:"openMessage"`
 }
 
-// handlePanelCreate 在指定频道创建工单面板。
+// handlePanelCreate 在指定频道、指定工单类型下创建面板。
 //
 // 面板卡片必须由机器人发送（按钮 value 需要签名），因此该接口依赖机器人在线：
 // 未连接时返回 503 并提示先完成连接，避免写入一个永远不会生效的配置。
@@ -71,6 +73,13 @@ func (s *Server) handlePanelCreate(c *gin.Context) {
 	if s.Bot == nil || !s.botConnected() {
 		s.fail(c, http.StatusServiceUnavailable, "bot_offline",
 			"机器人未连接 KOOK，无法发送面板卡片。请先在「系统设置」完成配置并重连。")
+		return
+	}
+	// 类型校验放在机器人在线检查之后：离线是更根本的前置条件，
+	// 也保证离线时不会写入任何配置。
+	ticketType, err := s.Store.Types.ByID(req.TypeID)
+	if err != nil {
+		s.fail(c, http.StatusBadRequest, "invalid_type", "请选择有效的工单类型")
 		return
 	}
 
@@ -101,8 +110,9 @@ func (s *Server) handlePanelCreate(c *gin.Context) {
 	}
 
 	// 先落库拿到面板 ID，再发送卡片：按钮 value 会内嵌该 ID，
-	// 使同一频道内的多张卡片能各自携带独立的角色配置。
+	// 使同一频道内的多张卡片能各自携带独立的文案与所属工单类型。
 	panel := &store.Panel{
+		TypeID:      ticketType.ID,
 		ChannelID:   channelID,
 		ChannelName: channel.Name,
 		Title:       firstNonEmptyString(title, bot.DefaultPanelTitle),
@@ -135,7 +145,7 @@ func (s *Server) handlePanelCreate(c *gin.Context) {
 		s.failStore(c, err, "panel.create.reload")
 		return
 	}
-	s.audit(c, "panel.create", channelID, "创建面板，频道："+channel.Name+"，消息："+msgID)
+	s.audit(c, "panel.create", channelID, fmt.Sprintf("在类型「%s」下创建面板，频道：%s，消息：%s", ticketType.Name, channel.Name, msgID))
 	c.JSON(http.StatusCreated, stored)
 }
 
@@ -144,6 +154,8 @@ type panelUpdateRequest struct {
 	Title       *string `json:"title"`
 	ButtonText  *string `json:"buttonText"`
 	OpenMessage *string `json:"openMessage"`
+	// TypeID 用于把面板改属到另一个工单类型（类型只影响后续开单，无需重建卡片）。
+	TypeID *uint `json:"typeId"`
 }
 
 // handlePanelUpdate 更新面板的可编辑字段。
@@ -169,6 +181,13 @@ func (s *Server) handlePanelUpdate(c *gin.Context) {
 	}
 
 	updates := map[string]any{}
+	if req.TypeID != nil {
+		if _, err := s.Store.Types.ByID(*req.TypeID); err != nil {
+			s.fail(c, http.StatusBadRequest, "invalid_type", "请选择有效的工单类型")
+			return
+		}
+		updates["type_id"] = *req.TypeID
+	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
 	}
@@ -280,77 +299,6 @@ func (s *Server) handlePanelDelete(c *gin.Context) {
 	}
 	s.Bot.NotifyConfigChanged()
 	s.audit(c, "panel.delete", panel.ChannelID, "删除面板配置")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
-type panelRoleRequest struct {
-	RoleID   string `json:"roleId"`
-	RoleName string `json:"roleName"`
-}
-
-// handlePanelRoleAdd 添加面板级管理员角色（等价于 /aar @角色）。
-func (s *Server) handlePanelRoleAdd(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
-	if id == 0 {
-		s.fail(c, http.StatusBadRequest, "invalid_request", "面板 ID 不合法")
-		return
-	}
-	panel, err := s.Store.Panels.ByID(id)
-	if err != nil {
-		s.failStore(c, err, "panel.role.lookup")
-		return
-	}
-
-	var req panelRoleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		s.fail(c, http.StatusBadRequest, "invalid_request", "请求参数不合法")
-		return
-	}
-	roleID := strings.TrimSpace(req.RoleID)
-	if !validKookID(roleID) {
-		s.fail(c, http.StatusBadRequest, "invalid_request", "角色 ID 必须是 KOOK 的数字 ID")
-		return
-	}
-
-	roleName := strings.TrimSpace(req.RoleName)
-	// 机器人在线时校验角色是否存在并补全名称
-	if s.Bot != nil && s.botConnected() {
-		if name := s.Bot.RoleName(c.Request.Context(), roleID); name != "" {
-			roleName = name
-		} else if roleName == "" {
-			s.fail(c, http.StatusBadRequest, "invalid_role", "该角色不存在于当前服务器")
-			return
-		}
-	}
-	if roleName == "" {
-		roleName = roleID
-	}
-
-	if err := s.Store.Panels.AddRole(panel.ID, roleID, roleName); err != nil {
-		s.failStore(c, err, "panel.role.add")
-		return
-	}
-	s.audit(c, "role.panel.add", roleID, "面板 "+panel.ChannelID+" 新增管理员角色")
-	c.JSON(http.StatusCreated, gin.H{"ok": true})
-}
-
-// handlePanelRoleRemove 移除面板级管理员角色。
-func (s *Server) handlePanelRoleRemove(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
-	roleID := strings.TrimSpace(c.Param("roleId"))
-	if id == 0 || !validKookID(roleID) {
-		s.fail(c, http.StatusBadRequest, "invalid_request", "参数不合法")
-		return
-	}
-	if _, err := s.Store.Panels.ByID(id); err != nil {
-		s.failStore(c, err, "panel.role.lookup")
-		return
-	}
-	if err := s.Store.Panels.RemoveRole(id, roleID); err != nil {
-		s.failStore(c, err, "panel.role.remove")
-		return
-	}
-	s.audit(c, "role.panel.remove", roleID, "移除面板管理员角色")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
