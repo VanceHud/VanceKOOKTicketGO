@@ -513,15 +513,42 @@ func TestTicketTypeEnabledFalsePersists(t *testing.T) {
 // TestMigrateTicketTypesAdoptsLegacyPanels 验证旧版「面板 + 面板级角色」平滑升级为
 // 「工单类型 + 类型级角色」：每个面板生成一个同名类型、面板角色被复制去重、
 // 历史工单回填类型快照（面板已删除时退化为来源频道），旧角色表被清理。
+//
+// 关键点：旧库的 panel_roles 带着 FOREIGN KEY (panel_id) REFERENCES panels(id)。
+// GORM 重建 panels（新增 type_id 列与外键、去掉 enabled 默认值）时要 DROP 旧表，
+// 在 foreign_keys=ON 下会被这个引用挡住而启动失败；因此模拟旧库时必须原样带上外键。
 func TestMigrateTicketTypesAdoptsLegacyPanels(t *testing.T) {
 	st := newTestStore(t)
 
-	// 模拟旧版本：panel_roles 表、没有 type_id 的面板。
-	if err := st.db.Exec(`CREATE TABLE panel_roles (
-		id integer PRIMARY KEY AUTOINCREMENT,
-		panel_id integer, role_id text, role_name text, created_at datetime)`).Error; err != nil {
-		t.Fatalf("创建旧角色表失败: %v", err)
+	// 按旧版本的真实 schema 重建 panels / panel_roles / tickets：
+	// panel_roles 带外键引用 panels，panels 没有 type_id，tickets 没有 type_id/type_name。
+	//
+	// DDL 必须写成单行（与 GORM 实际生成的格式一致）：glebarez/sqlite 解析
+	// 多行 DDL 时会漏掉续行列，导致重建表时漏拷列而报 NOT NULL 失败。
+	legacyDDL := []string{
+		`DROP TABLE IF EXISTS panel_roles`,
+		`DROP TABLE IF EXISTS panels`,
+		"CREATE TABLE `panels` (`id` integer PRIMARY KEY AUTOINCREMENT,`channel_id` text NOT NULL," +
+			"`channel_name` text,`msg_id` text,`title` text,`button_text` text,`open_message` text," +
+			"`enabled` numeric DEFAULT true,`created_at` datetime,`updated_at` datetime)",
+		// 旧版本的唯一索引：另一个迁移负责把它降级为普通索引。
+		`CREATE UNIQUE INDEX idx_panels_channel_id ON panels(channel_id)`,
+		"CREATE TABLE `panel_roles` (`id` integer PRIMARY KEY AUTOINCREMENT,`panel_id` integer NOT NULL," +
+			"`role_id` text NOT NULL,`role_name` text,`created_at` datetime," +
+			"CONSTRAINT `fk_panels_roles` FOREIGN KEY (`panel_id`) REFERENCES `panels`(`id`))",
+		`DROP TABLE IF EXISTS tickets`,
+		"CREATE TABLE `tickets` (`id` integer PRIMARY KEY AUTOINCREMENT,`no` text NOT NULL,`user_id` text NOT NULL," +
+			"`user_name` text,`source_channel_id` text,`channel_id` text,`panel_id` integer,`status` text NOT NULL," +
+			"`started_at` datetime,`locked_at` datetime,`lock_reason` text,`closed_at` datetime,`closed_by` text," +
+			"`closed_by_name` text,`first_reply_at` datetime,`message_count` integer," +
+			"`log_channel_msg_id` text,`log_user_msg_id` text,`created_at` datetime,`updated_at` datetime)",
 	}
+	for _, ddl := range legacyDDL {
+		if err := st.db.Exec(ddl).Error; err != nil {
+			t.Fatalf("重建旧库表结构失败: %v（%s）", err, ddl)
+		}
+	}
+
 	insertPanel := func(channelID, channelName, title string) uint {
 		t.Helper()
 		err := st.db.Exec(
@@ -556,17 +583,23 @@ func TestMigrateTicketTypesAdoptsLegacyPanels(t *testing.T) {
 	insertLegacyRole(panelB, "1004", "二线客服")
 
 	// 历史工单：一条记录着面板，另一条面板已删除、只剩来源频道。
-	withPanel := &Ticket{UserID: "9001", UserName: "小明", SourceChannelID: "30001", Status: TicketClosed}
-	if err := st.Tickets.CreateWithNo(withPanel, Now(), time.UTC); err != nil {
-		t.Fatalf("创建历史工单失败: %v", err)
+	// 这里必须用原生 SQL：此时 tickets 还是旧 schema（没有 type_id 列）。
+	insertLegacyTicket := func(no, userID, userName string, panelID *uint) {
+		t.Helper()
+		err := st.db.Exec(
+			`INSERT INTO tickets (no, user_id, user_name, source_channel_id, channel_id, panel_id, status,
+				started_at, created_at, updated_at)
+			 VALUES (?, ?, ?, '30001', ?, ?, 'closed',
+				'2026-01-05 08:00:00+00:00', '2026-01-05 08:00:00+00:00', '2026-01-05 08:00:00+00:00')`,
+			no, userID, userName, "chan-"+userID, panelID).Error
+		if err != nil {
+			t.Fatalf("插入历史工单失败: %v", err)
+		}
 	}
-	if err := st.db.Model(&Ticket{}).Where("no = ?", withPanel.No).Update("panel_id", panelA).Error; err != nil {
-		t.Fatalf("写入历史工单面板失败: %v", err)
-	}
-	channelOnly := &Ticket{UserID: "9002", UserName: "李雷", SourceChannelID: "30001", Status: TicketClosed}
-	if err := st.Tickets.CreateWithNo(channelOnly, Now(), time.UTC); err != nil {
-		t.Fatalf("创建历史工单失败: %v", err)
-	}
+	withPanelNo := "TK-260105-AAAA"
+	channelOnlyNo := "TK-260105-BBBB"
+	insertLegacyTicket(withPanelNo, "9001", "小明", &panelA)
+	insertLegacyTicket(channelOnlyNo, "9002", "李雷", nil)
 
 	// 再次迁移等价于升级到新版本。
 	if err := st.Migrate(); err != nil {
@@ -613,14 +646,14 @@ func TestMigrateTicketTypesAdoptsLegacyPanels(t *testing.T) {
 	}
 
 	// 历史工单回填类型快照：按面板与按来源频道两条路径都要命中。
-	first, err := st.Tickets.ByNo(withPanel.No)
+	first, err := st.Tickets.ByNo(withPanelNo)
 	if err != nil {
 		t.Fatalf("读取历史工单失败: %v", err)
 	}
 	if first.TypeID == nil || *first.TypeID != types[0].ID || first.TypeName != "工单面板" {
 		t.Fatalf("按面板归属的工单未回填类型: %+v", first)
 	}
-	second, err := st.Tickets.ByNo(channelOnly.No)
+	second, err := st.Tickets.ByNo(channelOnlyNo)
 	if err != nil {
 		t.Fatalf("读取历史工单失败: %v", err)
 	}
