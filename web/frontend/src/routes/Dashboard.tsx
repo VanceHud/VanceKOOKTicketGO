@@ -46,10 +46,6 @@ export function DashboardPage() {
         .map(([status, count]) => ({ status, count }))
     : []
 
-  const statusConfig: ChartConfig = {
-    count: { label: t("common.total"), color: "var(--chart-1)" },
-  }
-
   const statusColor = (status: string) => {
     switch (status) {
       case "open":
@@ -64,6 +60,17 @@ export function DashboardPage() {
         return "var(--status-pending)"
     }
   }
+
+  const statusLabel = (status: string) => t(`status.${status}` as const, { defaultValue: status })
+
+  // 按状态名索引：饼图 tooltip 以 nameKey="status" 从 config 取已翻译的状态名，
+  // 不能把带 {{count}} 占位符的文案（common.total）当静态 label，否则会渲染出字面量。
+  const statusConfig: ChartConfig = Object.fromEntries(
+    statusData.map((entry) => [
+      entry.status,
+      { label: statusLabel(entry.status), color: statusColor(entry.status) },
+    ])
+  )
 
   return (
     <div className="space-y-6">
@@ -186,7 +193,7 @@ export function DashboardPage() {
                   <div className="space-y-4">
                     <ChartContainer config={statusConfig} className="mx-auto h-[210px] w-full">
                       <PieChart>
-                        <ChartTooltip content={<ChartTooltipContent nameKey="status" />} />
+                        <ChartTooltip content={<ChartTooltipContent nameKey="status" hideLabel />} />
                         <Pie data={statusData} dataKey="count" nameKey="status" innerRadius={55} outerRadius={90}>
                           {statusData.map((entry) => (
                             <Cell key={entry.status} fill={statusColor(entry.status)} />
@@ -202,7 +209,7 @@ export function DashboardPage() {
                             className="size-2.5 shrink-0 rounded-full"
                             style={{ backgroundColor: statusColor(entry.status) }}
                           />
-                          <span>{t(`status.${entry.status}` as const, { defaultValue: entry.status })}</span>
+                          <span>{statusLabel(entry.status)}</span>
                           <span className="text-muted-foreground ml-auto tabular-nums">{entry.count}</span>
                         </li>
                       ))}
