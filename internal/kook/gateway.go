@@ -86,6 +86,8 @@ type SessionStore interface {
 //  4. 断线时使用 resume=1&session_id=..&sn=.. 续传，避免丢事件；
 //     会话可通过 SessionStore 落库，进程重启后同样续传
 //  5. 失败按 2s、4s、8s… 指数退避重试，上限 60s
+//  6. 续传失败时（HELLO 错误码，或握手阶段/连接中收到 reconnect(s=5)）
+//     清空本地 session_id 与 sn，以全新会话重连
 type Gateway struct {
 	opts GatewayOptions
 
@@ -212,14 +214,17 @@ func (g *Gateway) Run(ctx context.Context) error {
 
 // backoff 计算指数退避时长：2s、4s、8s…上限 MaxBackoff。
 func (g *Gateway) backoff() time.Duration {
-	attempt := g.attempt.Load()
-	if attempt < 0 {
-		attempt = 0
+	// attempt 记录的是「已失败次数」，因此第 1 次失败退避 BaseBackoff（2s），
+	// 与官方文档的 2、4、8… 序列一致。
+	failures := g.attempt.Load()
+	if failures < 1 {
+		failures = 1
 	}
-	if attempt > 5 {
-		attempt = 5
+	exponent := failures - 1
+	if exponent > 5 {
+		exponent = 5
 	}
-	d := g.opts.BaseBackoff * time.Duration(1<<uint(attempt))
+	d := g.opts.BaseBackoff * time.Duration(1<<uint(exponent))
 	if d > g.opts.MaxBackoff {
 		d = g.opts.MaxBackoff
 	}
@@ -344,13 +349,12 @@ func (g *Gateway) serve(ctx context.Context) error {
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
 
-	// 先读取 HELLO，确认握手成功并拿到 session_id
-	hello, err := g.readFrame(conn)
+	// 先读取 HELLO，确认握手成功并拿到 session_id。
+	// 注意：带失效会话续传时，平台会直接下发 reconnect(s=5) 而不是
+	// 带错误码的 HELLO，必须在这里识别并丢弃旧会话（见 readHello）。
+	hello, err := g.readHello(conn)
 	if err != nil {
-		return fmt.Errorf("读取 HELLO 失败: %w", err)
-	}
-	if hello.Signal != SignalHello {
-		return fmt.Errorf("握手失败：期望 HELLO(s=1)，收到 s=%d", hello.Signal)
+		return err
 	}
 	var helloData struct {
 		Code      int    `json:"code"`
@@ -444,9 +448,10 @@ func (g *Gateway) serve(ctx context.Context) error {
 			// 平台要求重连：按官方文档清空 sn 与会话后回到第 1 步。
 			// 带着已失效的会话反复 resume，平台侧依旧显示已连接，
 			// 但不会再有任何事件——必须彻底重建会话。
-			g.opts.Logger.Warn("平台要求重新建立连接，已清空本地网关会话")
+			reason := reconnectReason(frame.Data)
+			g.opts.Logger.Warn("平台要求重新建立连接，已清空本地网关会话", "reason", reason)
 			g.clearSession()
-			return fmt.Errorf("平台要求重连（s=5）")
+			return fmt.Errorf("平台要求重连（s=5，%s）", reason)
 
 		case SignalResumeAck:
 			g.resumeAck.Store(true)
@@ -460,6 +465,59 @@ func (g *Gateway) serve(ctx context.Context) error {
 		default:
 			g.opts.Logger.Debug("收到未处理的网关信号", "signal", frame.Signal)
 		}
+	}
+}
+
+// readHello 等待并解析 HELLO。
+//
+// 续传失败时平台的回复有两种形态：带错误码的 HELLO，或直接下发
+// reconnect（s=5，d.code 为 40106/40107/40108；官方文档「信令[5] RECONNECT」
+// 把 resume 失败归在这条信令下）。后者如果不在握手阶段识别，就会带着同一个
+// 失效会话反复重连，日志里不断出现「握手失败：期望 HELLO(s=1)，收到 s=5」，
+// 机器人永远收不到事件。
+//
+// 因此这里对 s=5 一律按「会话已失效」处理：清空本地会话后返回错误，
+// 由 Run 退避后以全新会话重连。其余非 HELLO 信令（PONG 等）在握手阶段本不该
+// 出现，忽略并继续等待即可——读取截止时间在整段握手期间始终生效，不会挂死。
+func (g *Gateway) readHello(conn *websocket.Conn) (rawFrame, error) {
+	for {
+		frame, err := g.readFrame(conn)
+		if err != nil {
+			return rawFrame{}, fmt.Errorf("读取 HELLO 失败: %w", err)
+		}
+		switch frame.Signal {
+		case SignalHello:
+			return frame, nil
+		case SignalReconnect:
+			reason := reconnectReason(frame.Data)
+			g.opts.Logger.Warn("连接建立后即收到 reconnect（s=5），本地会话已失效，将改用全新会话重连", "reason", reason)
+			g.clearSession()
+			return rawFrame{}, fmt.Errorf("平台要求重连（s=5，%s）", reason)
+		default:
+			g.opts.Logger.Debug("等待 HELLO 期间收到其他信令，继续等待", "signal", frame.Signal)
+		}
+	}
+}
+
+// reconnectReason 解析 reconnect（s=5）信令的数据体，用日志与错误信息说明原因。
+// 常见 code：40106 缺少参数、40107 会话已过期、40108 sn 无效。
+func reconnectReason(data json.RawMessage) string {
+	var detail struct {
+		Code int    `json:"code"`
+		Err  string `json:"err"`
+	}
+	if len(data) == 0 || json.Unmarshal(data, &detail) != nil {
+		return "平台未说明原因"
+	}
+	switch {
+	case detail.Code == 0 && detail.Err == "":
+		return "平台未说明原因"
+	case detail.Err == "":
+		return fmt.Sprintf("code=%d", detail.Code)
+	case detail.Code == 0:
+		return detail.Err
+	default:
+		return fmt.Sprintf("code=%d %s", detail.Code, detail.Err)
 	}
 }
 

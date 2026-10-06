@@ -184,6 +184,42 @@ func TestGatewayFallsBackWhenResumeRejected(t *testing.T) {
 	}
 }
 
+// TestGatewayFallsBackWhenResumeRejectedByReconnect 是线上问题的回归测试：
+//
+// 平台对续传失败的回复不一定是带错误码的 HELLO：官方文档把 40106/40107/40108
+// 归在 reconnect(s=5) 信令下，真实平台也会直接在连接建立后下发 s=5。
+// 若握手阶段不识别 s=5，网关会拿着同一个失效会话反复重连，日志里不断出现
+// 「握手失败：期望 HELLO(s=1)，收到 s=5」，机器人永远收不到事件。
+func TestGatewayFallsBackWhenResumeRejectedByReconnect(t *testing.T) {
+	platform := kooktest.New()
+	t.Cleanup(platform.Close)
+	platform.RejectResume = true
+	platform.RejectResumeAsReconnect = true
+
+	store := &memorySessionStore{session: "sess-stale", sn: 7}
+	startGateway(t, platform, store)
+
+	waitFor(t, "首次连接", func() bool { return len(platform.WSConnects()) >= 1 })
+	if query := platform.WSConnects()[0]; query.Get("resume") != "1" || query.Get("session_id") != "sess-stale" {
+		t.Fatalf("第一次连接应尝试续传，实际参数: %v", query)
+	}
+
+	waitFor(t, "改用全新会话并落库", func() bool {
+		session, _ := store.snapshot()
+		return session != "" && session != "sess-stale"
+	})
+	// 失效会话只允许出现一次（首次尝试续传）：出现多次说明在反复 resume 同一个死会话。
+	stale := 0
+	for _, query := range platform.WSConnects() {
+		if query.Get("session_id") == "sess-stale" {
+			stale++
+		}
+	}
+	if stale != 1 {
+		t.Fatalf("失效会话应只被续传一次，实际 %d 次: %v", stale, platform.WSConnects())
+	}
+}
+
 // TestGatewayRebuildsSessionWhenResumeSilent 是回归测试：
 //
 // 平台受理了 resume 却既不补发事件、也不回 resumeOK(s=6) 时，连接看起来完全正常

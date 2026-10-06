@@ -63,6 +63,10 @@ type Server struct {
 	Compress          bool // 网关下发是否压缩（由 compress 查询参数决定）
 	// RejectResume 为真时拒绝带 resume 参数的续传（会话已过期）。
 	RejectResume bool
+	// RejectResumeAsReconnect 为真时，续传失败改用 reconnect(s=5, code=40107)
+	// 下发——这是真实平台的行为（官方文档把 40106/40107/40108 归在信令 5 下）；
+	// 为假时用 HELLO 的错误码下发，覆盖另一种形态。
+	RejectResumeAsReconnect bool
 	// SuppressResumeAck 为真时受理续传但不下发 resumeOK(s=6)，
 	// 用于模拟「续传实际没生效、事件仍留在旧会话」的平台异常。
 	SuppressResumeAck bool
@@ -543,8 +547,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.wsConnects = append(s.wsConnects, query)
 	s.mu.Unlock()
 
-	// 续传被拒：真实平台会用 HELLO 的错误码告知会话已失效（40107 session 过期）。
+	// 续传被拒：真实平台会用 reconnect(s=5, code=40107) 告知会话已失效
+	// （官方文档把 40106/40107/40108 归在信令 5 下），HELLO 错误码是另一种形态。
 	if query.Get("resume") == "1" && s.RejectResume {
+		if s.RejectResumeAsReconnect {
+			frame, _ := json.Marshal(map[string]any{
+				"s": kook.SignalReconnect,
+				"d": map[string]any{"code": 40107, "err": "session expired"},
+			})
+			_ = s.write(conn, websocket.TextMessage, frame)
+			_ = conn.Close()
+			return
+		}
 		hello, _ := json.Marshal(map[string]any{"s": kook.SignalHello, "d": map[string]any{"code": 40107}})
 		_ = s.write(conn, websocket.TextMessage, hello)
 		_ = conn.Close()
