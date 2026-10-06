@@ -78,6 +78,16 @@ func (s *Server) handleTicketList(c *gin.Context) {
 		}
 	}
 
+	if raw := strings.TrimSpace(c.Query("typeId")); raw != "" {
+		typeID := atoiDefault(raw, 0)
+		if typeID <= 0 {
+			s.fail(c, http.StatusBadRequest, "invalid_request", "工单类型参数不合法")
+			return
+		}
+		value := uint(typeID)
+		filter.TypeID = &value
+	}
+
 	from, err := timeParam(c, "from", s.Config.Location, false)
 	if err != nil {
 		s.fail(c, http.StatusBadRequest, "invalid_request", err.Error())
@@ -396,6 +406,9 @@ func renderTicketHTML(t *store.Ticket, messages []store.TicketMessage, notes []s
 		"</style></head><body>")
 	b.WriteString("<h1>工单 " + html.EscapeString(t.No) + "</h1>")
 	b.WriteString("<p>开单人：" + html.EscapeString(t.UserName) + "（" + html.EscapeString(t.UserID) + "）<br>")
+	if t.TypeName != "" {
+		b.WriteString("工单类型：" + html.EscapeString(t.TypeName) + "<br>")
+	}
 	b.WriteString("状态：" + html.EscapeString(t.Status) + "<br>")
 	b.WriteString("开启时间(UTC)：" + t.StartedAt.Format("2006-01-02 15:04:05") + "<br>")
 	if t.ClosedAt != nil {

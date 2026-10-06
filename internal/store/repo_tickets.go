@@ -134,9 +134,11 @@ type TicketFilter struct {
 	Statuses []string
 	// Query 支持编号前缀、用户昵称、用户 ID 三种匹配。
 	Query string
-	From  *time.Time
-	To    *time.Time
-	Page  int
+	// TypeID 非空时只返回该工单类型的工单。
+	TypeID *uint
+	From   *time.Time
+	To     *time.Time
+	Page   int
 	// PageSize 会被限制在 MaxPageSize 以内。
 	PageSize int
 }
@@ -164,6 +166,9 @@ func (r *TicketsRepo) List(f TicketFilter) ([]Ticket, int64, error) {
 
 	if len(f.Statuses) > 0 {
 		q = q.Where("status IN ?", f.Statuses)
+	}
+	if f.TypeID != nil {
+		q = q.Where("type_id = ?", *f.TypeID)
 	}
 	if term := strings.TrimSpace(f.Query); term != "" {
 		prefix := escapeLike(term) + "%"

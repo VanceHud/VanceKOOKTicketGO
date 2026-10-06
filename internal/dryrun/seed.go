@@ -81,21 +81,59 @@ func Seed(st *store.Store, loc *time.Location, log *slog.Logger) error {
 }
 
 func seedPanelsAndRoles(st *store.Store, log *slog.Logger) error {
-	panelChannel := demoUserID(2)
-	panel := &store.Panel{
-		ChannelID:   panelChannel,
-		ChannelName: "工单面板",
-		MsgID:       demoUserID(3),
-		Title:       "# 点击按钮发起工单",
-		ButtonText:  "ticket",
-		OpenMessage: "你好 {user}，工单 **{ticket_no}** 已创建（{time}）。\n请提供以下信息，便于我们尽快处理：\n1. 订单号或问题截图\n2. 问题发生的大致时间\n\n补充信息可直接在本频道回复。",
-		Enabled:     true,
+	// 演示三类工单类型，其中一类默认停用，便于在线验收启用开关与“停用后不能开单”的效果。
+	types := []*store.TicketType{
+		{Name: "账号与充值", Description: "账号异常、充值未到账、订单问题", Enabled: true},
+		{Name: "举报与投诉", Description: "处理刷屏、骚扰、违规内容", Enabled: true},
+		{Name: "功能建议", Description: "服务器与机器人的改进建议", Enabled: false},
 	}
-	if err := st.Panels.Create(panel); err != nil {
+	for _, item := range types {
+		if err := st.Types.Create(item); err != nil {
+			return err
+		}
+	}
+	if err := st.Types.AddRole(types[0].ID, demoUserID(11), "客服组"); err != nil {
 		return err
 	}
-	if err := st.Panels.AddRole(panel.ID, demoUserID(11), "客服组"); err != nil {
+	if err := st.Types.AddRole(types[1].ID, demoUserID(13), "版主组"); err != nil {
 		return err
+	}
+
+	openMessage := "你好 {user}，工单 **{ticket_no}**（类型：{type}）已创建（{time}）。\n请提供以下信息，便于我们尽快处理：\n1. 订单号或问题截图\n2. 问题发生的大致时间\n\n补充信息可直接在本频道回复。"
+	panels := []*store.Panel{
+		{
+			TypeID:      types[0].ID,
+			ChannelID:   demoUserID(2),
+			ChannelName: "工单面板",
+			MsgID:       demoUserID(3),
+			Title:       "# 点击按钮发起工单\n\n**处理范围**\n- 账号问题\n- 充值问题",
+			ButtonText:  "ticket",
+			OpenMessage: openMessage,
+			Enabled:     true,
+		},
+		{
+			TypeID:      types[0].ID,
+			ChannelID:   demoUserID(2),
+			ChannelName: "工单面板",
+			MsgID:       demoUserID(4),
+			Title:       "# 充值问题专用入口",
+			ButtonText:  "充值工单",
+			Enabled:     true,
+		},
+		{
+			TypeID:      types[1].ID,
+			ChannelID:   demoUserID(5),
+			ChannelName: "举报与投诉",
+			MsgID:       demoUserID(6),
+			Title:       "# 举报入口\n\n请准备好截图或聊天记录，管理员会尽快处理。",
+			ButtonText:  "举报",
+			Enabled:     true,
+		},
+	}
+	for _, panel := range panels {
+		if err := st.Panels.Create(panel); err != nil {
+			return err
+		}
 	}
 
 	if err := st.Roles.AddAdmin(demoUserID(10), "服主"); err != nil {
@@ -115,7 +153,7 @@ func seedPanelsAndRoles(st *store.Store, log *slog.Logger) error {
 			return err
 		}
 	}
-	log.Debug("演示数据：面板与角色已写入")
+	log.Debug("演示数据：工单类型、面板与角色已写入", "types", len(types), "panels", len(panels))
 	return nil
 }
 
@@ -137,6 +175,12 @@ func seedActivity(st *store.Store, log *slog.Logger) error {
 }
 
 func seedTickets(st *store.Store, loc *time.Location, rng *rand.Rand, now time.Time, log *slog.Logger) error {
+	// 演示工单按顺序轮流归属于已创建的类型，便于统计看板看到类型分布。
+	seededTypes, err := st.Types.List()
+	if err != nil {
+		return err
+	}
+
 	for i := 0; i < 30; i++ {
 		userID := demoUserID(100 + i)
 		userName := demoNames[i%len(demoNames)]
@@ -157,19 +201,30 @@ func seedTickets(st *store.Store, loc *time.Location, rng *rand.Rand, now time.T
 			Status:          store.TicketPending,
 			StartedAt:       started,
 		}
+		typeLabel := ""
+		if len(seededTypes) > 0 {
+			item := seededTypes[i%len(seededTypes)]
+			t.TypeID = &item.ID
+			t.TypeName = item.Name
+			typeLabel = item.Name
+		}
 		if err := st.Tickets.CreateWithNo(t, started, loc); err != nil {
 			return err
 		}
 		t.PanelID = nil
 
 		// 第一条：机器人开单卡片（系统消息）。
+		summary := fmt.Sprintf("%s 发起了工单，等待管理员处理", userName)
+		if typeLabel != "" {
+			summary = fmt.Sprintf("[%s] %s", typeLabel, summary)
+		}
 		if err := st.Tickets.AddMessage(&store.TicketMessage{
 			TicketNo:  t.No,
 			MsgID:     demoUserID(9000 + i),
 			ChannelID: t.ChannelID,
 			UserID:    "bot",
 			UserName:  "TicketBot",
-			Content:   fmt.Sprintf("%s 发起了工单，等待管理员处理", userName),
+			Content:   summary,
 			MsgType:   store.MsgTypeSystem,
 			IsBot:     true,
 			CreatedAt: started,

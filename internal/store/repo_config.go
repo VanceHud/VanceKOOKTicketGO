@@ -1,26 +1,45 @@
 package store
 
 import (
+	"strings"
+
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-// PanelsRepo 负责工单面板与其面板级管理员角色。
+// PanelsRepo 负责工单面板（工单类型下的按钮卡片）。
 type PanelsRepo struct {
 	db *gorm.DB
 }
 
-// List 返回全部面板，附带面板级角色。
+// List 返回全部面板，按类型与创建顺序排列。
 func (r *PanelsRepo) List() ([]Panel, error) {
 	var panels []Panel
-	err := r.db.Preload("Roles").Order("id ASC").Find(&panels).Error
+	err := r.db.Order("type_id ASC, id ASC").Find(&panels).Error
 	return panels, err
+}
+
+// ListByType 返回某个工单类型下的全部面板。
+func (r *PanelsRepo) ListByType(typeID uint) ([]Panel, error) {
+	if typeID == 0 {
+		return nil, nil
+	}
+	var panels []Panel
+	err := r.db.Where("type_id = ?", typeID).Order("id ASC").Find(&panels).Error
+	return panels, err
+}
+
+// CountByType 统计某个工单类型下的面板数量。
+func (r *PanelsRepo) CountByType(typeID uint) (int64, error) {
+	var count int64
+	err := r.db.Model(&Panel{}).Where("type_id = ?", typeID).Count(&count).Error
+	return count, err
 }
 
 // ByID 按主键查询面板。
 func (r *PanelsRepo) ByID(id uint) (*Panel, error) {
 	var p Panel
-	if err := r.db.Preload("Roles").First(&p, id).Error; err != nil {
+	if err := r.db.First(&p, id).Error; err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &p, nil
@@ -34,19 +53,19 @@ func (r *PanelsRepo) ByChannel(channelID string) (*Panel, error) {
 		return nil, ErrNotFound
 	}
 	var p Panel
-	if err := r.db.Preload("Roles").Where("channel_id = ?", channelID).Order("id ASC").First(&p).Error; err != nil {
+	if err := r.db.Where("channel_id = ?", channelID).Order("id ASC").First(&p).Error; err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &p, nil
 }
 
-// ListByChannel 返回频道内全部面板（含面板级角色），按创建顺序排列。
+// ListByChannel 返回频道内全部面板，按创建顺序排列。
 func (r *PanelsRepo) ListByChannel(channelID string) ([]Panel, error) {
 	if channelID == "" {
 		return nil, nil
 	}
 	var panels []Panel
-	err := r.db.Preload("Roles").Where("channel_id = ?", channelID).Order("id ASC").Find(&panels).Error
+	err := r.db.Where("channel_id = ?", channelID).Order("id ASC").Find(&panels).Error
 	return panels, err
 }
 
@@ -63,12 +82,9 @@ func (r *PanelsRepo) UpdateFields(id uint, fields map[string]any) error {
 	return r.db.Model(&Panel{}).Where("id = ?", id).Updates(fields).Error
 }
 
-// Delete 删除面板及其角色绑定，并把引用它的工单解绑（保留历史记录）。
+// Delete 删除面板，并把引用它的工单解绑（保留历史记录与类型快照）。
 func (r *PanelsRepo) Delete(id uint) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("panel_id = ?", id).Delete(&PanelRole{}).Error; err != nil {
-			return err
-		}
 		// 面板 ID 可能被后续新建的面板复用，直接清空引用避免工单被错误归属。
 		if err := tx.Model(&Ticket{}).Where("panel_id = ?", id).Update("panel_id", nil).Error; err != nil {
 			return err
@@ -77,22 +93,98 @@ func (r *PanelsRepo) Delete(id uint) error {
 	})
 }
 
-// AddRole 为面板绑定管理员角色（幂等）。
-func (r *PanelsRepo) AddRole(panelID uint, roleID, roleName string) error {
-	var existing PanelRole
-	err := r.db.Where("panel_id = ? AND role_id = ?", panelID, roleID).First(&existing).Error
+// TypesRepo 负责工单类型与其类型级管理员角色。
+type TypesRepo struct {
+	db *gorm.DB
+}
+
+// List 返回全部工单类型（含角色与面板）。
+func (r *TypesRepo) List() ([]TicketType, error) {
+	var types []TicketType
+	err := r.db.Preload("Roles").Preload("Panels").Order("id ASC").Find(&types).Error
+	return types, err
+}
+
+// ByID 按主键查询工单类型（含角色与面板）。
+func (r *TypesRepo) ByID(id uint) (*TicketType, error) {
+	var item TicketType
+	if err := r.db.Preload("Roles").Preload("Panels").First(&item, id).Error; err != nil {
+		return nil, mapNotFound(err)
+	}
+	return &item, nil
+}
+
+// ByName 按名称查询工单类型。
+func (r *TypesRepo) ByName(name string) (*TicketType, error) {
+	var item TicketType
+	err := r.db.Where("name = ?", strings.TrimSpace(name)).
+		Preload("Roles").Preload("Panels").First(&item).Error
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	return &item, nil
+}
+
+// ListByChannel 返回某频道内所有面板所属的工单类型（含角色，去重）。
+//
+// 供只能拿到频道 ID 的场景使用：/aar 命令、按来源频道判定管理员权限。
+func (r *TypesRepo) ListByChannel(channelID string) ([]TicketType, error) {
+	if channelID == "" {
+		return nil, nil
+	}
+	var types []TicketType
+	err := r.db.Preload("Roles").
+		Where("id IN (?)", r.db.Model(&Panel{}).Select("type_id").Where("channel_id = ?", channelID)).
+		Order("id ASC").Find(&types).Error
+	return types, err
+}
+
+// Create 新增工单类型。
+func (r *TypesRepo) Create(item *TicketType) error {
+	now := Now()
+	item.CreatedAt, item.UpdatedAt = now, now
+	return r.db.Create(item).Error
+}
+
+// UpdateFields 局部更新工单类型。
+func (r *TypesRepo) UpdateFields(id uint, fields map[string]any) error {
+	fields["updated_at"] = Now()
+	return r.db.Model(&TicketType{}).Where("id = ?", id).Updates(fields).Error
+}
+
+// Delete 删除工单类型及其角色。
+//
+// 调用方必须先确保该类型下没有面板：面板卡片仍在频道里，
+// 直接级联删除会让卡片点击后找不到类型；因此这里不提供隐式级联。
+// 已开出的历史工单保留 type_name 快照，type_id 置空。
+func (r *TypesRepo) Delete(id uint) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("type_id = ?", id).Delete(&TicketTypeRole{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&Ticket{}).Where("type_id = ?", id).Update("type_id", nil).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&TicketType{}, id).Error
+	})
+}
+
+// AddRole 为类型绑定管理员角色（幂等）。
+func (r *TypesRepo) AddRole(typeID uint, roleID, roleName string) error {
+	var existing TicketTypeRole
+	err := r.db.Where("type_id = ? AND role_id = ?", typeID, roleID).First(&existing).Error
 	if err == nil {
 		return nil
 	}
 	if mapped := mapNotFound(err); mapped != ErrNotFound {
 		return mapped
 	}
-	return r.db.Create(&PanelRole{PanelID: panelID, RoleID: roleID, RoleName: roleName, CreatedAt: Now()}).Error
+	return r.db.Create(&TicketTypeRole{TypeID: typeID, RoleID: roleID, RoleName: roleName, CreatedAt: Now()}).Error
 }
 
-// RemoveRole 解除面板与角色的绑定。
-func (r *PanelsRepo) RemoveRole(panelID uint, roleID string) error {
-	return r.db.Where("panel_id = ? AND role_id = ?", panelID, roleID).Delete(&PanelRole{}).Error
+// RemoveRole 解除类型与角色的绑定。
+func (r *TypesRepo) RemoveRole(typeID uint, roleID string) error {
+	return r.db.Where("type_id = ? AND role_id = ?", typeID, roleID).Delete(&TicketTypeRole{}).Error
 }
 
 // RolesRepo 负责全局管理员角色与 KOOK → WebUI 角色映射。

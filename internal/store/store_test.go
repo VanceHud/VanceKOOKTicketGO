@@ -29,6 +29,16 @@ func testLocation(t *testing.T) *time.Location {
 	return loc
 }
 
+// seedTicketType 创建测试用工单类型：面板必须挂在类型下（外键约束）。
+func seedTicketType(t *testing.T, st *Store, name string) *TicketType {
+	t.Helper()
+	item := &TicketType{Name: name, Enabled: true}
+	if err := st.Types.Create(item); err != nil {
+		t.Fatalf("创建工单类型失败: %v", err)
+	}
+	return item
+}
+
 func TestOpenCreatesPrivateFilesAndPassesQuickCheck(t *testing.T) {
 	st := newTestStore(t)
 
@@ -407,12 +417,13 @@ func TestAuditLogIsAppendOnly(t *testing.T) {
 
 func TestPanelsAllowMultiplePerChannel(t *testing.T) {
 	st := newTestStore(t)
+	ticketType := seedTicketType(t, st, "工单面板")
 
-	first := &Panel{ChannelID: "30001", ChannelName: "工单面板", Title: "第一张", Enabled: true}
+	first := &Panel{TypeID: ticketType.ID, ChannelID: "30001", ChannelName: "工单面板", Title: "第一张", Enabled: true}
 	if err := st.Panels.Create(first); err != nil {
 		t.Fatalf("创建第一张面板失败: %v", err)
 	}
-	second := &Panel{ChannelID: "30001", ChannelName: "工单面板", Title: "第二张", Enabled: true}
+	second := &Panel{TypeID: ticketType.ID, ChannelID: "30001", ChannelName: "工单面板", Title: "第二张", Enabled: true}
 	if err := st.Panels.Create(second); err != nil {
 		t.Fatalf("同一频道应允许创建第二张面板: %v", err)
 	}
@@ -450,10 +461,11 @@ func TestMigrateDowngradesLegacyPanelChannelIndex(t *testing.T) {
 	if err := st.db.Exec("CREATE UNIQUE INDEX idx_panels_channel_id ON panels(channel_id)").Error; err != nil {
 		t.Fatalf("创建旧唯一索引失败: %v", err)
 	}
-	if err := st.Panels.Create(&Panel{ChannelID: "30001", Title: "第一张", Enabled: true}); err != nil {
+	ticketType := seedTicketType(t, st, "工单面板")
+	if err := st.Panels.Create(&Panel{TypeID: ticketType.ID, ChannelID: "30001", Title: "第一张", Enabled: true}); err != nil {
 		t.Fatalf("创建面板失败: %v", err)
 	}
-	if err := st.Panels.Create(&Panel{ChannelID: "30001", Title: "第二张", Enabled: true}); err == nil {
+	if err := st.Panels.Create(&Panel{TypeID: ticketType.ID, ChannelID: "30001", Title: "第二张", Enabled: true}); err == nil {
 		t.Fatal("唯一索引下不应允许同频道第二张面板")
 	}
 
@@ -461,7 +473,195 @@ func TestMigrateDowngradesLegacyPanelChannelIndex(t *testing.T) {
 	if err := st.Migrate(); err != nil {
 		t.Fatalf("再次迁移失败: %v", err)
 	}
-	if err := st.Panels.Create(&Panel{ChannelID: "30001", Title: "第二张", Enabled: true}); err != nil {
+	if err := st.Panels.Create(&Panel{TypeID: ticketType.ID, ChannelID: "30001", Title: "第二张", Enabled: true}); err != nil {
 		t.Fatalf("迁移后应允许同频道第二张面板: %v", err)
+	}
+}
+
+// TestTicketTypeEnabledFalsePersists 验证“新建即停用”能如实入库。
+//
+// GORM 对带 default 标签的字段会忽略零值，Enabled 因此不能带 default:true，
+// 否则停用状态会被静默写成启用。
+func TestTicketTypeEnabledFalsePersists(t *testing.T) {
+	st := newTestStore(t)
+
+	disabledType := &TicketType{Name: "停用的类型", Enabled: false}
+	if err := st.Types.Create(disabledType); err != nil {
+		t.Fatalf("创建工单类型失败: %v", err)
+	}
+	storedType, err := st.Types.ByID(disabledType.ID)
+	if err != nil {
+		t.Fatalf("读取工单类型失败: %v", err)
+	}
+	if storedType.Enabled {
+		t.Fatal("Enabled=false 的工单类型不应被写成启用")
+	}
+
+	panel := &Panel{TypeID: disabledType.ID, ChannelID: "30001", Title: "第一张", Enabled: false}
+	if err := st.Panels.Create(panel); err != nil {
+		t.Fatalf("创建面板失败: %v", err)
+	}
+	storedPanel, err := st.Panels.ByID(panel.ID)
+	if err != nil {
+		t.Fatalf("读取面板失败: %v", err)
+	}
+	if storedPanel.Enabled {
+		t.Fatal("Enabled=false 的面板不应被写成启用")
+	}
+}
+
+// TestMigrateTicketTypesAdoptsLegacyPanels 验证旧版「面板 + 面板级角色」平滑升级为
+// 「工单类型 + 类型级角色」：每个面板生成一个同名类型、面板角色被复制去重、
+// 历史工单回填类型快照（面板已删除时退化为来源频道），旧角色表被清理。
+func TestMigrateTicketTypesAdoptsLegacyPanels(t *testing.T) {
+	st := newTestStore(t)
+
+	// 模拟旧版本：panel_roles 表、没有 type_id 的面板。
+	if err := st.db.Exec(`CREATE TABLE panel_roles (
+		id integer PRIMARY KEY AUTOINCREMENT,
+		panel_id integer, role_id text, role_name text, created_at datetime)`).Error; err != nil {
+		t.Fatalf("创建旧角色表失败: %v", err)
+	}
+	insertPanel := func(channelID, channelName, title string) uint {
+		t.Helper()
+		err := st.db.Exec(
+			`INSERT INTO panels (channel_id, channel_name, title, enabled, created_at, updated_at)
+			 VALUES (?, ?, ?, 1, '2026-01-05 08:00:00+00:00', '2026-01-05 08:00:00+00:00')`,
+			channelID, channelName, title).Error
+		if err != nil {
+			t.Fatalf("插入旧面板失败: %v", err)
+		}
+		var id uint
+		if err := st.db.Raw("SELECT id FROM panels WHERE title = ?", title).Scan(&id).Error; err != nil {
+			t.Fatalf("读取旧面板 ID 失败: %v", err)
+		}
+		return id
+	}
+	panelA := insertPanel("30001", "工单面板", "第一张")
+	panelB := insertPanel("30002", "充值面板", "第二张")
+
+	insertLegacyRole := func(panelID uint, roleID, roleName string) {
+		t.Helper()
+		err := st.db.Exec(
+			`INSERT INTO panel_roles (panel_id, role_id, role_name, created_at)
+			 VALUES (?, ?, ?, '2026-01-05 08:00:00+00:00')`,
+			panelID, roleID, roleName).Error
+		if err != nil {
+			t.Fatalf("插入旧面板角色失败: %v", err)
+		}
+	}
+	insertLegacyRole(panelA, "1003", "实习客服")
+	// 重复角色：迁移时应去重，只保留一条。
+	insertLegacyRole(panelA, "1003", "实习客服")
+	insertLegacyRole(panelB, "1004", "二线客服")
+
+	// 历史工单：一条记录着面板，另一条面板已删除、只剩来源频道。
+	withPanel := &Ticket{UserID: "9001", UserName: "小明", SourceChannelID: "30001", Status: TicketClosed}
+	if err := st.Tickets.CreateWithNo(withPanel, Now(), time.UTC); err != nil {
+		t.Fatalf("创建历史工单失败: %v", err)
+	}
+	if err := st.db.Model(&Ticket{}).Where("no = ?", withPanel.No).Update("panel_id", panelA).Error; err != nil {
+		t.Fatalf("写入历史工单面板失败: %v", err)
+	}
+	channelOnly := &Ticket{UserID: "9002", UserName: "李雷", SourceChannelID: "30001", Status: TicketClosed}
+	if err := st.Tickets.CreateWithNo(channelOnly, Now(), time.UTC); err != nil {
+		t.Fatalf("创建历史工单失败: %v", err)
+	}
+
+	// 再次迁移等价于升级到新版本。
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("迁移失败: %v", err)
+	}
+
+	var types []TicketType
+	if err := st.db.Order("id ASC").Find(&types).Error; err != nil {
+		t.Fatalf("查询工单类型失败: %v", err)
+	}
+	if len(types) != 2 {
+		t.Fatalf("应为每个存量面板各建一个类型，实际 %d 个: %+v", len(types), types)
+	}
+	if types[0].Name != "工单面板" || types[1].Name != "充值面板" {
+		t.Fatalf("迁移生成的类型名应取自频道名: %q / %q", types[0].Name, types[1].Name)
+	}
+	for _, item := range types {
+		if !item.Enabled {
+			t.Fatalf("迁移生成的类型应默认启用: %+v", item)
+		}
+	}
+
+	// 面板已挂到各自类型上。
+	storedA, err := st.Panels.ByID(panelA)
+	if err != nil || storedA.TypeID != types[0].ID {
+		t.Fatalf("面板 A 应归属类型 %d，实际 %+v（err=%v）", types[0].ID, storedA, err)
+	}
+	storedB, err := st.Panels.ByID(panelB)
+	if err != nil || storedB.TypeID != types[1].ID {
+		t.Fatalf("面板 B 应归属类型 %d，实际 %+v（err=%v）", types[1].ID, storedB, err)
+	}
+
+	// 面板角色复制为类型角色，且按 role_id 去重。
+	withRoles, err := st.Types.ByID(types[0].ID)
+	if err != nil {
+		t.Fatalf("读取类型失败: %v", err)
+	}
+	if len(withRoles.Roles) != 1 || withRoles.Roles[0].RoleID != "1003" || withRoles.Roles[0].RoleName != "实习客服" {
+		t.Fatalf("类型角色复制异常（应去重为 1 条）: %+v", withRoles.Roles)
+	}
+	otherType, err := st.Types.ByID(types[1].ID)
+	if err != nil || len(otherType.Roles) != 1 || otherType.Roles[0].RoleID != "1004" {
+		t.Fatalf("第二个类型的角色复制异常: %+v（err=%v）", otherType.Roles, err)
+	}
+
+	// 历史工单回填类型快照：按面板与按来源频道两条路径都要命中。
+	first, err := st.Tickets.ByNo(withPanel.No)
+	if err != nil {
+		t.Fatalf("读取历史工单失败: %v", err)
+	}
+	if first.TypeID == nil || *first.TypeID != types[0].ID || first.TypeName != "工单面板" {
+		t.Fatalf("按面板归属的工单未回填类型: %+v", first)
+	}
+	second, err := st.Tickets.ByNo(channelOnly.No)
+	if err != nil {
+		t.Fatalf("读取历史工单失败: %v", err)
+	}
+	if second.TypeID == nil || *second.TypeID != types[0].ID || second.TypeName != "工单面板" {
+		t.Fatalf("按来源频道归属的工单未回填类型: %+v", second)
+	}
+
+	// 旧角色表已清理，避免留下死数据。
+	exists, err := tableExists(st.db, "panel_roles")
+	if err != nil {
+		t.Fatalf("检查旧表失败: %v", err)
+	}
+	if exists {
+		t.Fatal("升级后旧面板角色表应被删除")
+	}
+}
+
+// TestTypesListByChannel 验证按频道反查工单类型（/aar 与权限判定依赖）。
+func TestTypesListByChannel(t *testing.T) {
+	st := newTestStore(t)
+	first := seedTicketType(t, st, "账号与充值")
+	second := seedTicketType(t, st, "举报与投诉")
+
+	if err := st.Panels.Create(&Panel{TypeID: first.ID, ChannelID: "30001", Title: "A", Enabled: true}); err != nil {
+		t.Fatalf("创建面板失败: %v", err)
+	}
+	if err := st.Panels.Create(&Panel{TypeID: second.ID, ChannelID: "30001", Title: "B", Enabled: true}); err != nil {
+		t.Fatalf("创建面板失败: %v", err)
+	}
+	if err := st.Panels.Create(&Panel{TypeID: second.ID, ChannelID: "30001", Title: "C", Enabled: true}); err != nil {
+		t.Fatalf("创建面板失败: %v", err)
+	}
+
+	types, err := st.Types.ListByChannel("30001")
+	if err != nil {
+		t.Fatalf("按频道查询类型失败: %v", err)
+	}
+	if len(types) != 2 || types[0].ID != first.ID || types[1].ID != second.ID {
+		t.Fatalf("同频道的类型应去重并按创建顺序返回: %+v", types)
+	}
+	if types, err := st.Types.ListByChannel(""); err != nil || types != nil {
+		t.Fatalf("空频道应返回空结果: %+v（err=%v）", types, err)
 	}
 }

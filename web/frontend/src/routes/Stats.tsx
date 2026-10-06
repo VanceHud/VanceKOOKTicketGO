@@ -6,7 +6,7 @@
  */
 
 import { useState } from "react"
-import { BarChart3, Clock, MessageSquare, Timer, TrendingDown, TrendingUp, Users } from "lucide-react"
+import { BarChart3, Clock, LayoutPanelLeft, MessageSquare, Timer, TrendingDown, TrendingUp, Users } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import { Link } from "react-router"
@@ -14,6 +14,7 @@ import { Link } from "react-router"
 import { PageHeader } from "@/components/PageHeader"
 import { EmptyState, ErrorState, InlineLoader } from "@/components/StateViews"
 import { StatCard } from "@/components/StatCard"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -232,6 +233,51 @@ export function StatsPage() {
                           </TableRow>
                         )
                       })}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* 工单类型 */}
+            <Card className="md:col-span-2">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <LayoutPanelLeft className="size-4" />
+                  {t("stats.typesTitle")}
+                </CardTitle>
+                <CardDescription>{t("stats.typesDesc")}</CardDescription>
+              </CardHeader>
+              <CardContent className="px-0">
+                {(query.data.types ?? []).length === 0 ? (
+                  <EmptyState className="py-8" />
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>{t("stats.colType")}</TableHead>
+                        <TableHead className="text-right">{t("stats.colOpened")}</TableHead>
+                        <TableHead className="text-right">{t("stats.colClosed")}</TableHead>
+                        <TableHead className="text-right">{t("stats.colCloseRate")}</TableHead>
+                        <TableHead />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(query.data.types ?? []).map((item) => (
+                        <TableRow key={item.typeName}>
+                          <TableCell>
+                            <Badge variant="outline" className="font-normal">
+                              {item.typeName}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">{item.opened}</TableCell>
+                          <TableCell className="text-right tabular-nums">{item.closed}</TableCell>
+                          <TableCell className="text-right tabular-nums">{percent(item.closedRate)}</TableCell>
+                          <TableCell className="w-24">
+                            <Progress value={item.closedRate * 100} className="h-1.5" />
+                          </TableCell>
+                        </TableRow>
+                      ))}
                     </TableBody>
                   </Table>
                 )}

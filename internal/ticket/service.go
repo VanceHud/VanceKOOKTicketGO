@@ -103,24 +103,43 @@ func (s *Service) platformOrErr() (Platform, error) {
 // Get 返回工单详情。
 func (s *Service) Get(no string) (*store.Ticket, error) { return s.store.Tickets.ByNo(no) }
 
+// OpenParams 是一次开单所需的上下文，来自被点击的面板及其所属工单类型。
+type OpenParams struct {
+	UserID   string
+	UserName string
+	// SourceChannelID 是按钮所在的面板频道。
+	SourceChannelID string
+	// PanelID / TypeID 可为空（面板或类型已被删除的容错场景）；
+	// TypeName 是开单时的类型名快照，用于历史展示。
+	PanelID  *uint
+	TypeID   *uint
+	TypeName string
+}
+
 // CreatePending 分配工单编号并写入占位记录（状态 pending）。
 //
 // 由机器人在“点击按钮 → 建频道”流程的最前面调用，编号一旦分配即入库，
 // 保证频道名中的编号与数据库一致；建频道失败时用 DiscardPending 回收。
-func (s *Service) CreatePending(ctx context.Context, userID, userName, sourceChannelID string, panelID *uint) (*store.Ticket, error) {
+func (s *Service) CreatePending(ctx context.Context, params OpenParams) (*store.Ticket, error) {
 	now := store.Now()
 	t := &store.Ticket{
-		UserID:          userID,
-		UserName:        userName,
-		SourceChannelID: sourceChannelID,
-		PanelID:         panelID,
+		UserID:          params.UserID,
+		UserName:        params.UserName,
+		SourceChannelID: params.SourceChannelID,
+		PanelID:         params.PanelID,
+		TypeID:          params.TypeID,
+		TypeName:        params.TypeName,
 		Status:          store.TicketPending,
 		StartedAt:       now,
 	}
 	if err := s.store.Tickets.CreateWithNo(t, now, s.loc); err != nil {
 		return nil, err
 	}
-	s.audit(Actor{ID: userID, Name: userName, Source: "kook"}, "ticket.open", t.No, "发起工单（等待创建频道）")
+	detail := "发起工单（等待创建频道）"
+	if params.TypeName != "" {
+		detail = fmt.Sprintf("发起工单（类型：%s，等待创建频道）", params.TypeName)
+	}
+	s.audit(Actor{ID: params.UserID, Name: params.UserName, Source: "kook"}, "ticket.open", t.No, detail)
 	return t, nil
 }
 

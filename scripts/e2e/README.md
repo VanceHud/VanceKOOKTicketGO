@@ -53,7 +53,7 @@ LOGIN_CODE='XYZ789' ADMIN_PASSWORD='SmokeTest@2026kt' node scripts/e2e/02-kook-a
 | `LOGIN_CODE` | `XYZ789` | 第二步使用的登录码（需与服务端库中一致） |
 | `OUT_DIR` | `/tmp/kook-ticket-e2e` | 截图输出目录 |
 
-另外还有 `03-manage-and-stats.mjs`：验收统计看板、面板管理、表情规则增删改与北京时间标注，
+另外还有 `03-manage-and-stats.mjs`：验收统计看板、工单类型与面板管理、表情规则增删改与北京时间标注，
 不需要登录码，直接用管理员密码运行即可：
 
 ```bash

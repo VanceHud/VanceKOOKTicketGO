@@ -48,15 +48,24 @@ try {
   ok("北京时间标注", statsText.includes("北京时间") ? "已标注时区" : "未标注时区")
   await shot(page, "stats")
 
-  // 2) 面板管理（DryRun 下机器人离线：应提示并禁用新建）
-  await page.goto(`${BASE}/panels`, { waitUntil: "networkidle" })
-  await page.waitForSelector("text=工单面板", { timeout: 15000 })
-  const panelsText = await page.locator("main").last().innerText()
-  ok("面板列表渲染", panelsText.includes("面板管理员角色") ? "含角色列" : "缺少角色列")
-  ok("机器人离线提示", panelsText.includes("机器人未连接 KOOK") ? "已提示" : "未提示")
-  const createDisabled = await page.getByRole("button", { name: "新建面板" }).isDisabled()
-  ok("离线时禁用新建", createDisabled ? "按钮已禁用" : "按钮仍可点击（异常）")
-  await shot(page, "panels")
+  // 2) 工单类型管理（DryRun 下机器人离线：应提示并禁用面板相关操作）
+  await page.goto(`${BASE}/types`, { waitUntil: "networkidle" })
+  await page.waitForSelector("text=工单类型", { timeout: 15000 })
+  const typesText = await page.locator("main").last().innerText()
+  ok("工单类型列表渲染", typesText.includes("类型管理员角色") ? "含角色" : "缺少角色")
+  ok("演示类型已加载", typesText.includes("账号与充值") && typesText.includes("举报与投诉") ? "含 2 个类型" : "缺少类型数据")
+  ok("机器人离线提示", typesText.includes("机器人未连接 KOOK") ? "已提示" : "未提示")
+  const createTypeDisabled = await page.getByRole("button", { name: "新建类型" }).isDisabled()
+  ok("离线时仍可新建类型", !createTypeDisabled ? "按钮可点击" : "按钮被禁用（异常）")
+
+  // 展开第一个类型，检查其面板列表与离线时的新建面板限制
+  await page.getByRole("button", { name: "展开面板" }).first().click()
+  await page.waitForTimeout(400)
+  const expandedText = await page.locator("main").last().innerText()
+  ok("类型下展示面板", expandedText.includes("充值工单") || expandedText.includes("工单面板") ? "含面板" : "缺少面板")
+  const addPanelDisabled = await page.getByRole("button", { name: "为该类型添加面板" }).first().isDisabled()
+  ok("离线时禁用新建面板", addPanelDisabled ? "按钮已禁用" : "按钮仍可点击（异常）")
+  await shot(page, "ticket-types")
 
   // 3) 表情规则：新增 → 停用 → 删除
   await page.goto(`${BASE}/emoji-roles`, { waitUntil: "networkidle" })

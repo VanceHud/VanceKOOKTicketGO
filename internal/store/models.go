@@ -95,6 +95,10 @@ type Ticket struct {
 	ChannelID string `gorm:"index;size:64" json:"channelId"`
 	// PanelID 关联面板，面板删除后置空。
 	PanelID *uint `gorm:"index" json:"panelId,omitempty"`
+	// TypeID 关联工单类型，类型删除后置空。
+	TypeID *uint `gorm:"index" json:"typeId,omitempty"`
+	// TypeName 是开单时的类型名快照：类型改名或删除后，历史工单仍显示当时的分类。
+	TypeName string `gorm:"size:64" json:"typeName,omitempty"`
 
 	Status     string     `gorm:"index;index:idx_tickets_timeout,priority:1;size:16;not null" json:"status"`
 	StartedAt  time.Time  `gorm:"index" json:"startedAt"`
@@ -165,12 +169,57 @@ type TicketNote struct {
 	CreatedAt time.Time `gorm:"index" json:"createdAt"`
 }
 
+// 工单类型相关常量。
+const (
+	// UnnamedTypeLabel 是历史工单缺少类型快照时的展示占位（如类型被删除后的旧数据）。
+	UnnamedTypeLabel = "未分类"
+	// DefaultTypeName 是通过 /ticket 命令隐式创建类型时的默认名称。
+	DefaultTypeName = "默认工单类型"
+)
+
+// TicketType 是工单类型：一组面板共享的分类与管理员角色。
+//
+// 一个类型可以对应多个面板（频道里的多张卡片，甚至分布在多个频道），
+// 点击任意面板开出的工单都归属该类型；工单开启时会把类型名展示在工单频道，
+// 便于管理员一眼看清分类与处理范围。
+//
+// 权限模型：类型的角色即该类型所有工单的“面板管理员”（对应原项目的 /aar 单频道管理员），
+// 面板本身不再单独配置角色。
+type TicketType struct {
+	ID   uint   `gorm:"primaryKey" json:"id"`
+	Name string `gorm:"uniqueIndex;size:64;not null" json:"name"`
+	// Description 是给管理员的内部备注，不展示给开单人。
+	Description string `gorm:"size:256" json:"description"`
+	// Enabled 不带 default 标签：GORM 对带默认值的字段会忽略零值，
+	// 导致“新建即停用”的类型被静默写成启用。零值必须如实入库。
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+
+	Roles []TicketTypeRole `gorm:"foreignKey:TypeID" json:"roles,omitempty"`
+	// Panels 是该类型下的面板（一个类型可对应多个面板）。
+	Panels []Panel `gorm:"foreignKey:TypeID" json:"panels,omitempty"`
+}
+
+// TicketTypeRole 是工单类型的管理员角色。
+type TicketTypeRole struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	TypeID    uint      `gorm:"index;not null" json:"typeId"`
+	RoleID    string    `gorm:"size:64;not null" json:"roleId"`
+	RoleName  string    `gorm:"size:128" json:"roleName"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // Panel 是某个频道里的一条工单按钮卡片（对应原项目 TicketConf 的 channel_id 段）。
 //
 // 同一频道允许存在多条记录：每一张卡片对应一条 Panel，卡片按钮内嵌自己的 ID，
-// 因此点击不同卡片可以携带不同的面板管理员角色。
+// 因此同一类型的多个面板可以被精确定位到点击的那一张。
 type Panel struct {
-	ID          uint   `gorm:"primaryKey" json:"id"`
+	ID uint `gorm:"primaryKey" json:"id"`
+	// TypeID 是所属工单类型；类型删除前必须先移除或迁移其面板。
+	// 不加 not null 约束：SQLite 无法给已有数据的表补一个无默认值的非空列，
+	// 存量库升级时该列必须允许 NULL，非零由仓储层与迁移保证。
+	TypeID      uint   `gorm:"index" json:"typeId"`
 	ChannelID   string `gorm:"index;size:64;not null" json:"channelId"`
 	ChannelName string `gorm:"size:128" json:"channelName"`
 	// MsgID 是当前生效的面板卡片消息 ID，重新生成面板时更新。
@@ -186,21 +235,11 @@ type Panel struct {
 	//
 	// 支持占位符：{user} 提及开单人、{user_name} 开单人昵称、{ticket_no} 工单编号、{time} 开单时间。
 	// 为空时不发送任何内容（仅保留默认工单卡片）。
-	OpenMessage string    `gorm:"type:text" json:"openMessage"`
-	Enabled     bool      `gorm:"default:true" json:"enabled"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-
-	Roles []PanelRole `gorm:"foreignKey:PanelID" json:"roles,omitempty"`
-}
-
-// PanelRole 是面板级（单频道）管理员角色，对应原项目的 /aar 单频道管理员。
-type PanelRole struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	PanelID   uint      `gorm:"index;not null" json:"panelId"`
-	RoleID    string    `gorm:"size:64;not null" json:"roleId"`
-	RoleName  string    `gorm:"size:128" json:"roleName"`
+	OpenMessage string `gorm:"type:text" json:"openMessage"`
+	// Enabled 不带 default 标签，理由同 TicketType.Enabled。
+	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 // AdminRole 是全局管理员角色，对应原项目 TicketConf["ticket"]["admin_role"]。
@@ -370,8 +409,9 @@ func AllModels() []any {
 		&Ticket{},
 		&TicketMessage{},
 		&TicketNote{},
+		&TicketType{},
+		&TicketTypeRole{},
 		&Panel{},
-		&PanelRole{},
 		&AdminRole{},
 		&EmojiRule{},
 		&EmojiGrant{},

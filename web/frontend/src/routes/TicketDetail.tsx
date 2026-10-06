@@ -294,6 +294,7 @@ export function TicketDetailPage() {
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
               <InfoRow label={t("tickets.colUser")} value={`${ticket.userName}（${ticket.userId}）`} />
+              <InfoRow label={t("ticket.type")} value={ticket.typeName || t("common.none")} />
               <InfoRow label={t("ticket.startedAt")} value={formatDateTime(ticket.startedAt, i18n.language)} />
               <InfoRow label={t("ticket.messageCount")} value={String(ticket.messageCount)} />
               <InfoRow

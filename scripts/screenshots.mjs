@@ -83,10 +83,10 @@ async function main() {
   await page.goto(`${BASE}/stats`, { waitUntil: "networkidle" })
   await shot("stats", { full: true })
 
-  // ---- 面板管理 ----
-  console.log("面板管理…")
-  await page.goto(`${BASE}/panels`, { waitUntil: "networkidle" })
-  await shot("panels")
+  // ---- 工单类型 ----
+  console.log("工单类型…")
+  await page.goto(`${BASE}/types`, { waitUntil: "networkidle" })
+  await shot("ticket-types")
 
   // ---- 表情上角色 ----
   console.log("表情上角色…")

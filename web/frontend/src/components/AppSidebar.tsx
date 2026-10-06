@@ -60,7 +60,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "nav.sectionConfig",
     items: [
-      { to: "/panels", labelKey: "nav.panels", icon: LayoutPanelLeft },
+      { to: "/types", labelKey: "nav.types", icon: LayoutPanelLeft },
       { to: "/emoji-roles", labelKey: "nav.emoji", icon: SmilePlus },
       { to: "/roles", labelKey: "nav.roles", icon: ShieldCheck, minRole: "admin" },
     ],

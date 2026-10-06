@@ -70,6 +70,7 @@ func NewRouter(d Deps) *gin.Engine {
 	readonly.GET("/stats/overview", server.handleStatsOverview)
 	readonly.GET("/stats/analytics", server.handleStatsAnalytics)
 	readonly.GET("/panels", server.handlePanelList)
+	readonly.GET("/types", server.handleTypeList)
 	readonly.GET("/emoji/rules", server.handleEmojiRuleList)
 	readonly.GET("/emoji/grants", server.handleEmojiGrantList)
 	readonly.GET("/meta/runtime", server.handleRuntimeInfo)
@@ -99,13 +100,17 @@ func NewRouter(d Deps) *gin.Engine {
 	admin.POST("/roles/admin", server.handleAdminRoleAdd)
 	admin.DELETE("/roles/admin/:roleId", server.handleAdminRoleRemove)
 	admin.GET("/roles/mappings", server.handleRoleMappingList)
-	// 面板与表情规则管理：需要机器人发出卡片或校验角色，因此归入管理员权限
+	// 面板与工单类型管理：需要机器人发出卡片或校验角色，因此归入管理员权限
 	admin.POST("/panels", server.handlePanelCreate)
 	admin.PATCH("/panels/:id", server.handlePanelUpdate)
 	admin.DELETE("/panels/:id", server.handlePanelDelete)
 	admin.POST("/panels/:id/refresh", server.handlePanelRefresh)
-	admin.POST("/panels/:id/roles", server.handlePanelRoleAdd)
-	admin.DELETE("/panels/:id/roles/:roleId", server.handlePanelRoleRemove)
+	// 工单类型：一个类型可对应多个面板，角色挂在类型上
+	admin.POST("/types", server.handleTypeCreate)
+	admin.PATCH("/types/:id", server.handleTypeUpdate)
+	admin.DELETE("/types/:id", server.handleTypeDelete)
+	admin.POST("/types/:id/roles", server.handleTypeRoleAdd)
+	admin.DELETE("/types/:id/roles/:roleId", server.handleTypeRoleRemove)
 	admin.POST("/emoji/rules", server.handleEmojiRuleCreate)
 	admin.PATCH("/emoji/rules/:id", server.handleEmojiRuleUpdate)
 	admin.DELETE("/emoji/rules/:id", server.handleEmojiRuleDelete)

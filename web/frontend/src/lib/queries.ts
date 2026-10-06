@@ -16,7 +16,6 @@ import type {
   GameListResponse,
   KookOptionsResponse,
   ListResponse,
-  Panel,
   RoleMapping,
   RuntimeInfo,
   SettingsResponse,
@@ -26,6 +25,7 @@ import type {
   TicketListParams,
   TicketMessage,
   TicketNote,
+  TicketType,
   WebUserAccount,
 } from "@/lib/types"
 
@@ -41,7 +41,7 @@ export const queryKeys = {
   runtime: ["runtime"] as const,
   users: ["users"] as const,
   audit: (params: AuditParams) => ["audit", params] as const,
-  panels: ["panels"] as const,
+  types: ["ticket-types"] as const,
   emojiRules: ["emoji-rules"] as const,
   emojiGrants: ["emoji-grants"] as const,
   adminRoles: ["admin-roles"] as const,
@@ -125,8 +125,8 @@ export function useAuditLogs(params: AuditParams): UseQueryResult<ListResponse<A
   })
 }
 
-export function usePanels(): UseQueryResult<ListResponse<Panel>> {
-  return useQuery({ queryKey: queryKeys.panels, queryFn: () => api.get<ListResponse<Panel>>("/panels") })
+export function useTicketTypes(): UseQueryResult<ListResponse<TicketType>> {
+  return useQuery({ queryKey: queryKeys.types, queryFn: () => api.get<ListResponse<TicketType>>("/types") })
 }
 
 export function useEmojiRules(): UseQueryResult<ListResponse<EmojiRule>> {
