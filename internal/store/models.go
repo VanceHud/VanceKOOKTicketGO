@@ -19,8 +19,6 @@ const (
 	TicketLocked = "locked"
 	// TicketClosed 表示工单已关闭、频道已删除。
 	TicketClosed = "closed"
-	// TicketFailed 表示开单流程失败（例如建频道失败），占号作废。
-	TicketFailed = "failed"
 )
 
 // 锁定原因。
@@ -134,10 +132,13 @@ type TicketMessage struct {
 	ID       uint   `gorm:"primaryKey" json:"id"`
 	TicketNo string `gorm:"index;index:idx_ticket_messages_timeline,priority:1;size:20;not null" json:"ticketNo"`
 	// MsgID 是 KOOK 消息 ID，可为空（系统生成的事件）。
-	MsgID     string `gorm:"index;size:64" json:"msgId"`
+	// 不加索引：没有任何查询按它过滤（补全走主键），消息表是插入最频繁的表，
+	// 每个冗余索引都是纯写放大。
+	MsgID     string `gorm:"size:64" json:"msgId"`
 	ChannelID string `gorm:"size:64" json:"channelId"`
 
-	UserID   string `gorm:"index;size:64" json:"userId"`
+	// UserID 不加索引，理由同 MsgID。
+	UserID   string `gorm:"size:64" json:"userId"`
 	UserName string `gorm:"size:128" json:"userName"`
 
 	Content string `gorm:"type:text" json:"content"`
@@ -206,9 +207,11 @@ type TicketType struct {
 
 // TicketTypeRole 是工单类型的管理员角色。
 type TicketTypeRole struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	TypeID    uint      `gorm:"index;not null" json:"typeId"`
-	RoleID    string    `gorm:"size:64;not null" json:"roleId"`
+	ID uint `gorm:"primaryKey" json:"id"`
+	// (TypeID, RoleID) 联合唯一：绑定操作必须幂等，数据库层面兜底防重复行。
+	// 重复的角色会在开单时被重复下发频道权限，旧版“先查后建”在并发下可产生重复。
+	TypeID    uint      `gorm:"uniqueIndex:idx_ticket_type_roles_type_role,priority:1;not null" json:"typeId"`
+	RoleID    string    `gorm:"uniqueIndex:idx_ticket_type_roles_type_role,priority:2;size:64;not null" json:"roleId"`
 	RoleName  string    `gorm:"size:128" json:"roleName"`
 	CreatedAt time.Time `json:"createdAt"`
 }
@@ -261,7 +264,9 @@ type EmojiRule struct {
 	EmojiID   string `gorm:"size:64;not null" json:"emojiId"`
 	RoleID    string `gorm:"size:64;not null" json:"roleId"`
 	Label     string `gorm:"size:64" json:"label"`
-	Enabled   bool   `gorm:"default:true" json:"enabled"`
+	// Enabled 不带 default 标签，理由同 TicketType.Enabled：
+	// 带默认值时 GORM 会忽略零值，“新建即停用”的规则会被静默写成启用。
+	Enabled bool `json:"enabled"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

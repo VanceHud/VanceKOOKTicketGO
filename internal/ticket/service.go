@@ -95,6 +95,22 @@ func (s *Service) SetPlatform(p Platform) {
 	s.platform = p
 }
 
+// ClearPlatform 清除平台实现，且仅当它仍然是 p 时生效。
+//
+// 网关协程退出时会调用它，但 Bot.Stop 等待网关退出只有 5 秒上限：
+// 重启机器人时旧协程可能晚于新连接退出，若无条件置空，
+// 会把新 Bot 刚注入的实现清掉，WebUI 的关单/锁单将一直报 ErrNoPlatform
+// 直到下一次重连。按身份比较即可避免这种“迟到的清理”。
+//
+// p 必须与 SetPlatform 收到的是同一个可比较值（当前实现为 *platform）。
+func (s *Service) ClearPlatform(p Platform) {
+	s.platformMu.Lock()
+	defer s.platformMu.Unlock()
+	if s.platform == p {
+		s.platform = nil
+	}
+}
+
 // WithPlatform 在给定平台实现下执行 fn，用于“本地事务 + 远端调用”的清晰边界。
 func (s *Service) platformOrErr() (Platform, error) {
 	s.platformMu.RLock()
@@ -398,23 +414,49 @@ func (s *Service) Messages(no string, limit, offset int) ([]store.TicketMessage,
 	return s.store.Tickets.Messages(no, limit, offset)
 }
 
+// PendingMaxAge 是 pending 工单的最长存活时间。
+//
+// 开单流程先占号（pending）→ 建频道 → Activate；若进程在建频道途中崩溃，
+// 记录会永远停在 pending，而“一人一单”把 pending 也算作未关闭工单，
+// 该用户此后无法再开单（WebUI 的关闭同样会拒绝 pending）。
+// 正常流程只需数秒，超过这个时间仍未激活的一定是残留，直接回收编号。
+const PendingMaxAge = 10 * time.Minute
+
+// ScanPending 回收滞留的 pending 工单（见 PendingMaxAge）。
+func (s *Service) ScanPending(ctx context.Context) error {
+	stale, err := s.store.Tickets.PendingStale(store.Now().Add(-PendingMaxAge), 200)
+	if err != nil {
+		return err
+	}
+	for i := range stale {
+		if err := s.DiscardPending(ctx, stale[i].No); err != nil {
+			slog.Warn("回收滞留的占号工单失败", "ticket_no", stale[i].No, "err", err)
+			continue
+		}
+		slog.Info("已回收滞留的占号工单", "ticket_no", stale[i].No)
+	}
+	return nil
+}
+
 // ScanTimeout 扫描并锁定超时未活动的工单，返回被锁定的工单列表。
 //
 // 判定依据是工单的 updated_at：写入消息时会刷新该字段，
 // 因此“从未发言”的工单也会从开单时间开始计时。
 func (s *Service) ScanTimeout(ctx context.Context) ([]string, error) {
+	// 滞留占号的回收独立于超时锁定：即使它失败（例如 DB 短暂繁忙），
+	// 也不应跳过本轮的超时锁定。
+	if err := s.ScanPending(ctx); err != nil {
+		slog.Warn("回收滞留的占号工单失败", "err", err)
+	}
+
 	hours := s.outdateHours()
 	if hours <= 0 {
 		return nil, nil
 	}
 	cutoff := store.Now().Add(-time.Duration(hours) * time.Hour)
 
-	var candidates []store.Ticket
-	if err := s.store.DB().
-		Where("status = ? AND updated_at < ?", store.TicketOpen, cutoff).
-		Order("updated_at ASC").
-		Limit(200).
-		Find(&candidates).Error; err != nil {
+	candidates, err := s.store.Tickets.OpenTimedOut(cutoff, 200)
+	if err != nil {
 		return nil, err
 	}
 
@@ -450,7 +492,7 @@ func (s *Service) audit(actor Actor, action, target, detail string) {
 	if s.store == nil {
 		return
 	}
-	_ = s.store.Audit.Write(&store.AuditLog{
+	if err := s.store.Audit.Write(&store.AuditLog{
 		Actor:     actor.Name,
 		ActorType: actor.Source,
 		Action:    action,
@@ -459,5 +501,9 @@ func (s *Service) audit(actor Actor, action, target, detail string) {
 		IP:        actor.IP,
 		RequestID: actor.RequestID,
 		CreatedAt: store.Now(),
-	})
+	}); err != nil {
+		// 审计是安全特性（仅追加、不可修改）：写入失败必须留痕，
+		// 否则 SQLite 繁忙超时会造成审计条目静默丢失。
+		slog.Warn("写入审计日志失败", "action", action, "target", target, "err", err)
+	}
 }

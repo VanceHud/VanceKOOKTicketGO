@@ -72,8 +72,13 @@ func (r *SettingsRepo) GetDefault(key, def string) (string, error) {
 
 // Set 写入（或覆盖）配置。
 func (r *SettingsRepo) Set(key, value string) error {
+	return upsertSetting(r.db, key, value)
+}
+
+// upsertSetting 在给定句柄（连接或事务）上写入配置项。
+func upsertSetting(tx *gorm.DB, key, value string) error {
 	item := Setting{Key: key, Value: value, UpdatedAt: Now()}
-	return r.db.Clauses(clause.OnConflict{
+	return tx.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"value", "updated_at"}),
 	}).Create(&item).Error
@@ -171,26 +176,50 @@ func (r *SettingsRepo) LoadGatewaySession() (string, int64, error) {
 }
 
 // SaveGatewaySession 写入网关会话；sessionID 为空表示清空（会话已失效）。
+//
+// 两个键在同一事务内写入：否则中途失败会留下「新 session_id + 旧 sn」的组合，
+// 续传时平台会从错误的 sn 之后补发（重放或漏事件）。
 func (r *SettingsRepo) SaveGatewaySession(sessionID string, sn int64) error {
-	if sessionID == "" {
-		if err := r.Delete(SettingGatewaySessionID); err != nil {
-			return err
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if sessionID == "" {
+			for _, key := range []string{SettingGatewaySessionID, SettingGatewaySessionSN} {
+				if err := tx.Where("key = ?", key).Delete(&Setting{}).Error; err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-		return r.Delete(SettingGatewaySessionSN)
-	}
-	if err := r.Set(SettingGatewaySessionID, sessionID); err != nil {
-		return err
-	}
-	return r.Set(SettingGatewaySessionSN, strconv.FormatInt(sn, 10))
+		for key, value := range map[string]string{
+			SettingGatewaySessionID: sessionID,
+			SettingGatewaySessionSN: strconv.FormatInt(sn, 10),
+		} {
+			if err := upsertSetting(tx, key, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // OutdateHours 返回工单空闲锁定阈值（小时）。
 func (r *SettingsRepo) OutdateHours() int {
-	hours := r.GetInt(SettingOutdateHours, DefaultOutdateHours)
-	if hours <= 0 {
+	value, _, err := r.Get(SettingOutdateHours)
+	if err != nil {
 		return DefaultOutdateHours
 	}
-	return hours
+	return outdateHoursOrDefault(value)
+}
+
+// outdateHoursOrDefault 解析 outdate_hours 配置；缺失、非法或非正时使用默认值。
+func outdateHoursOrDefault(raw string) int {
+	if raw == "" {
+		return DefaultOutdateHours
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return DefaultOutdateHours
+	}
+	return parsed
 }
 
 // ActivityAutoRestore 返回是否在重连后自动恢复动态；默认开启。
@@ -234,7 +263,8 @@ func (r *SettingsRepo) Runtime(appSecret []byte) (*RuntimeConfig, error) {
 		CategoryID:     all[SettingCategoryID],
 		LogChannelID:   all[SettingLogChannelID],
 		DebugChannelID: all[SettingDebugChannelID],
-		OutdateHours:   r.OutdateHours(),
+		// 直接从全量配置里取值：旧实现又调用一次 OutdateHours（多查一次库）。
+		OutdateHours: outdateHoursOrDefault(all[SettingOutdateHours]),
 	}
 	if raw, ok := all[SettingInitializedAt]; ok && raw != "" {
 		if ts, err := time.Parse(time.RFC3339, raw); err == nil {

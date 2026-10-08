@@ -46,7 +46,14 @@ import { api, downloadExport } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { formatDateTime, formatRelative, roleAtLeast } from "@/lib/format"
 import { timezoneLabel } from "@/lib/timezone"
-import { queryKeys, useTicket, useTicketMessages, useTicketNotes } from "@/lib/queries"
+import {
+  DEFAULT_MESSAGE_LIMIT,
+  nextMessageLimit,
+  queryKeys,
+  useTicket,
+  useTicketMessages,
+  useTicketNotes,
+} from "@/lib/queries"
 import { toastError, toastSuccess } from "@/lib/toast"
 import type { Ticket } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -63,7 +70,9 @@ export function TicketDetailPage() {
   const canOperate = roleAtLeast(me?.user.role, "staff")
 
   const ticketQuery = useTicket(no)
-  const messagesQuery = useTicketMessages(no)
+  // 默认只取最近一段消息；消息很多时可通过「加载更早的消息」逐步放大。
+  const [messageLimit, setMessageLimit] = useState(DEFAULT_MESSAGE_LIMIT)
+  const messagesQuery = useTicketMessages(no, messageLimit)
   const notesQuery = useTicketNotes(no)
   const ticket = ticketQuery.data
 
@@ -237,6 +246,21 @@ export function TicketDetailPage() {
               <EmptyState title={t("ticket.timelineEmpty")} />
             ) : (
               <ScrollArea className="h-[520px] px-6">
+                {(messagesQuery.data?.total ?? 0) > (messagesQuery.data?.items.length ?? 0) ? (
+                  <div className="flex flex-col items-center gap-1 pb-4 pt-1">
+                    <p className="text-muted-foreground text-xs">
+                      {t("ticket.timelineTruncated", { shown: messagesQuery.data?.items.length ?? 0, total: messagesQuery.data?.total ?? 0 })}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={messageLimit >= 2000}
+                      onClick={() => setMessageLimit((current) => nextMessageLimit(current))}
+                    >
+                      {t("ticket.loadEarlier")}
+                    </Button>
+                  </div>
+                ) : null}
                 <ul className="space-y-4 pb-4">
                   {messagesQuery.data?.items.map((message) => {
                     const isSystem = message.type === "system"

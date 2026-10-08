@@ -1,11 +1,12 @@
 package api
 
 import (
-	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -45,9 +46,12 @@ func (s *Server) ticketActor(c *gin.Context) ticket.Actor {
 }
 
 // validTicketStatus 校验状态取值。
+//
+// 只接受真实会出现的状态：失败的建频道流程会回收编号（记录被删除），
+// 不存在 failed 状态的工单。
 func validTicketStatus(status string) bool {
 	switch status {
-	case store.TicketPending, store.TicketOpen, store.TicketLocked, store.TicketClosed, store.TicketFailed:
+	case store.TicketPending, store.TicketOpen, store.TicketLocked, store.TicketClosed:
 		return true
 	default:
 		return false
@@ -139,7 +143,10 @@ func (s *Server) handleTicketDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, t)
 }
 
-// handleTicketMessages 返回工单聊天记录（分页）。
+// handleTicketMessages 返回工单聊天记录。
+//
+// tail=1 返回最新的一段（前端默认），否则按 offset 正序分页；
+// 响应带 total，前端据此提示“仅显示最近 N 条”。
 func (s *Server) handleTicketMessages(c *gin.Context) {
 	if _, ok := s.lookupTicket(c); !ok {
 		return
@@ -152,15 +159,31 @@ func (s *Server) handleTicketMessages(c *gin.Context) {
 	if offset < 0 {
 		offset = 0
 	}
-	msgs, err := s.Store.Tickets.Messages(strings.TrimSpace(c.Param("no")), limit, offset)
+	tail := c.Query("tail") == "1" || strings.EqualFold(c.Query("tail"), "true")
+
+	no := strings.TrimSpace(c.Param("no"))
+	var (
+		msgs []store.TicketMessage
+		err  error
+	)
+	if tail {
+		msgs, err = s.Store.Tickets.MessagesTail(no, limit)
+	} else {
+		msgs, err = s.Store.Tickets.Messages(no, limit, offset)
+	}
 	if err != nil {
 		s.failInternal(c, err, "ticket.messages")
+		return
+	}
+	total, err := s.Store.Tickets.CountMessages(no)
+	if err != nil {
+		s.failInternal(c, err, "ticket.messages.count")
 		return
 	}
 	if msgs == nil {
 		msgs = []store.TicketMessage{}
 	}
-	c.JSON(http.StatusOK, gin.H{"items": msgs, "limit": limit, "offset": offset})
+	c.JSON(http.StatusOK, gin.H{"items": msgs, "limit": limit, "offset": offset, "total": total, "tail": tail})
 }
 
 // handleTicketNotes 返回工单备注。
@@ -221,7 +244,8 @@ func (s *Server) handleTicketClose(c *gin.Context) {
 		return
 	}
 	var req closeRequest
-	if err := c.ShouldBindJSON(&req); err != nil && err.Error() != "EOF" {
+	// 空请求体（无 body）是有意允许的：此时按照“不带关闭说明”处理。
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "请求参数不合法")
 		return
 	}
@@ -249,7 +273,7 @@ func (s *Server) handleTicketLock(c *gin.Context) {
 		return
 	}
 	var req lockRequest
-	if err := c.ShouldBindJSON(&req); err != nil && err.Error() != "EOF" {
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "请求参数不合法")
 		return
 	}
@@ -293,8 +317,12 @@ func (s *Server) failTicketError(c *gin.Context, err error, action string) {
 	}
 }
 
+// isInvalidState 判断是否为「状态不允许该操作」的业务错误。
+//
+// 用 errors.Is 而不是字符串包含：包装链里恰好含相同文案的其它错误
+// 不应被误判为状态冲突。
 func isInvalidState(err error) bool {
-	return err != nil && strings.Contains(err.Error(), ticket.ErrInvalidState.Error())
+	return errors.Is(err, ticket.ErrInvalidState)
 }
 
 // handleTicketExport 导出工单聊天记录，支持 json / csv / html。
@@ -341,12 +369,24 @@ func (s *Server) handleTicketExport(c *gin.Context) {
 			"messages":   messages,
 			"notes":      notes,
 		}
-		c.JSON(http.StatusOK, payload)
+		// 直接流式编码到响应，避免 gin 的渲染缓冲再复制一份大对象
+		// （单条消息的卡片 JSON 可达数十 KB）。
+		c.Header("Content-Type", "application/json; charset=utf-8")
+		c.Status(http.StatusOK)
+		if err := json.NewEncoder(c.Writer).Encode(payload); err != nil {
+			s.Log.Error("导出 JSON 失败", "ticket_no", t.No, "err", err)
+			return
+		}
 	case "csv":
-		var buf bytes.Buffer
-		// 加 BOM，保证 Excel 正确识别 UTF-8。
-		buf.WriteString("\ufeff")
-		writer := csv.NewWriter(&buf)
+		// 同样边写边发：CSV 行之间没有结构依赖，不需要整体缓冲。
+		c.Header("Content-Type", "text/csv; charset=utf-8")
+		c.Status(http.StatusOK)
+		// BOM 保证 Excel 正确识别 UTF-8。
+		if _, err := c.Writer.WriteString("\ufeff"); err != nil {
+			s.Log.Error("导出 CSV 失败", "ticket_no", t.No, "err", err)
+			return
+		}
+		writer := csv.NewWriter(c.Writer)
 		_ = writer.Write([]string{"时间(UTC)", "消息ID", "用户ID", "用户名", "类型", "来源", "内容", "媒体链接"})
 		for _, m := range messages {
 			source := "用户"
@@ -369,13 +409,18 @@ func (s *Server) handleTicketExport(c *gin.Context) {
 			_ = writer.Write(row)
 		}
 		writer.Flush()
+		// 响应已开始发送，无法再改状态码，只能记录日志。
 		if err := writer.Error(); err != nil {
-			s.failInternal(c, err, "ticket.export.csv")
+			s.Log.Error("导出 CSV 失败", "ticket_no", t.No, "err", err)
 			return
 		}
-		c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
 	case "html":
-		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(renderTicketHTML(t, messages, notes, exporter)))
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.Status(http.StatusOK)
+		if _, err := c.Writer.WriteString(renderTicketHTML(t, messages, notes, exporter)); err != nil {
+			s.Log.Error("导出 HTML 失败", "ticket_no", t.No, "err", err)
+			return
+		}
 	}
 
 	s.audit(c, "ticket.export", t.No, fmt.Sprintf("导出聊天记录（格式：%s，消息数：%d）", format, len(messages)))

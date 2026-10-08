@@ -163,7 +163,7 @@ type panelUpdateRequest struct {
 // 说明：卡片上的文案与按钮文字需要重建卡片才会生效（调用 refresh），
 // 而“开单后发送内容”只作用于后续新开的工单，保存即生效、无需重建。
 func (s *Server) handlePanelUpdate(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "面板 ID 不合法")
 		return
@@ -235,7 +235,7 @@ func (s *Server) handlePanelUpdate(c *gin.Context) {
 
 // handlePanelRefresh 重新发送面板卡片（删除旧卡片并更新消息 ID）。
 func (s *Server) handlePanelRefresh(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "面板 ID 不合法")
 		return
@@ -277,7 +277,7 @@ func (s *Server) handlePanelRefresh(c *gin.Context) {
 
 // handlePanelDelete 删除面板配置（并尽力删除频道内的卡片消息）。
 func (s *Server) handlePanelDelete(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "面板 ID 不合法")
 		return
@@ -297,7 +297,9 @@ func (s *Server) handlePanelDelete(c *gin.Context) {
 		s.failStore(c, err, "panel.delete")
 		return
 	}
-	s.Bot.NotifyConfigChanged()
+	if s.Bot != nil {
+		s.Bot.NotifyConfigChanged()
+	}
 	s.audit(c, "panel.delete", panel.ChannelID, "删除面板配置")
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -351,7 +353,7 @@ func (s *Server) handleEmojiRuleCreate(c *gin.Context) {
 
 // handleEmojiRuleUpdate 更新规则（表情、角色、备注、启用状态）。
 func (s *Server) handleEmojiRuleUpdate(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "规则 ID 不合法")
 		return
@@ -403,7 +405,7 @@ func (s *Server) handleEmojiRuleUpdate(c *gin.Context) {
 
 // handleEmojiRuleDelete 删除规则。
 func (s *Server) handleEmojiRuleDelete(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "规则 ID 不合法")
 		return
@@ -460,25 +462,36 @@ func (s *Server) handleStatsAnalytics(c *gin.Context) {
 	if days < 1 || days > 365 {
 		days = 30
 	}
-	analytics, err := s.Store.Tickets.Analytics(store.Now(), s.Config.Location, days)
+	// 来源频道的可读名称在缓存内解析：返回给 handler 的对象不可再被修改，
+	// 否则同一个缓存对象会在每次请求上叠加副作用（旧实现把名称拼进 channelId）。
+	analytics, err := s.analyticsCache.get(strconv.Itoa(days), func() (*store.Analytics, error) {
+		result, err := s.Store.Tickets.Analytics(store.Now(), s.Config.Location, days)
+		if err != nil {
+			return nil, err
+		}
+		s.fillSourceNames(result)
+		return result, nil
+	})
 	if err != nil {
 		s.failInternal(c, err, "stats.analytics")
 		return
 	}
-
-	// 把来源频道 ID 换成可读名称，避免前端再查一次
-	panels, err := s.Store.Panels.List()
-	if err == nil {
-		names := make(map[string]string, len(panels))
-		for _, panel := range panels {
-			names[panel.ChannelID] = firstNonEmptyString(panel.ChannelName, panel.ChannelID)
-		}
-		for i := range analytics.Sources {
-			if name, ok := names[analytics.Sources[i].ChannelID]; ok {
-				analytics.Sources[i].ChannelID = analytics.Sources[i].ChannelID + "|" + name
-			}
-		}
-	}
-
 	c.JSON(http.StatusOK, analytics)
+}
+
+// fillSourceNames 为统计结果中的来源频道补充可读名称。
+func (s *Server) fillSourceNames(analytics *store.Analytics) {
+	panels, err := s.Store.Panels.List()
+	if err != nil {
+		// 名称只是展示增强，查不到时前端回退显示频道 ID。
+		s.Log.Warn("读取面板列表失败，统计来源将只显示频道 ID", "err", err)
+		return
+	}
+	names := make(map[string]string, len(panels))
+	for _, panel := range panels {
+		names[panel.ChannelID] = firstNonEmptyString(panel.ChannelName, panel.ChannelID)
+	}
+	for i := range analytics.Sources {
+		analytics.Sources[i].ChannelName = names[analytics.Sources[i].ChannelID]
+	}
 }

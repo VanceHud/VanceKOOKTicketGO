@@ -27,7 +27,7 @@ import { useTickets, useTicketTypes } from "@/lib/queries"
 import type { Ticket } from "@/lib/types"
 
 const PAGE_SIZE = 20
-const STATUS_FILTERS = ["open", "locked", "closed", "pending", "failed"] as const
+const STATUS_FILTERS = ["open", "locked", "closed", "pending"] as const
 
 export function TicketsPage() {
   const { t, i18n } = useTranslation()

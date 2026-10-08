@@ -71,7 +71,6 @@
     "open": "Open",
     "locked": "Locked",
     "closed": "Closed",
-    "failed": "Failed",
     "lockReason": {
       "manual": "Locked manually",
       "timeout": "Auto-locked (idle)"
@@ -189,6 +188,8 @@
     "timeline": "Transcript",
     "timelineEmpty": "No messages archived for this ticket yet",
     "timelineHint": "Messages are archived from the KOOK channel in real time; this view is read-only",
+    "timelineTruncated": "Showing the latest {{shown}} of {{total}} messages",
+    "loadEarlier": "Load earlier messages",
     "mediaImageFailed": "Image failed to load, click to open the original",
     "mediaOpen": "Open original",
     "attachment": "Attachment",

@@ -214,15 +214,13 @@ export function StatsPage() {
                     </TableHeader>
                     <TableBody>
                       {query.data.sources.map((source) => {
-                        const [channelID, channelName] = source.channelId.includes("|")
-                          ? source.channelId.split("|")
-                          : [source.channelId, source.channelId]
+                        const channelName = source.channelName || source.channelId
                         return (
                           <TableRow key={source.channelId}>
                             <TableCell>
                               <div className="space-y-0.5">
                                 <p className="text-sm">{channelName}</p>
-                                <p className="text-muted-foreground font-mono text-xs">{channelID}</p>
+                                <p className="text-muted-foreground font-mono text-xs">{source.channelId}</p>
                               </div>
                             </TableCell>
                             <TableCell className="text-right tabular-nums">{source.opened}</TableCell>

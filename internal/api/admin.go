@@ -375,7 +375,7 @@ type userUpdateRequest struct {
 }
 
 func (s *Server) handleUserUpdate(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "账号 ID 不合法")
 		return
@@ -479,7 +479,7 @@ func (s *Server) handleUserUpdate(c *gin.Context) {
 }
 
 func (s *Server) handleUserDelete(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "账号 ID 不合法")
 		return
@@ -626,7 +626,7 @@ func (s *Server) handleRoleMappingUpsert(c *gin.Context) {
 }
 
 func (s *Server) handleRoleMappingDelete(c *gin.Context) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "ID 不合法")
 		return
@@ -684,7 +684,9 @@ func (s *Server) handleStatsOverview(c *gin.Context) {
 	if days < 1 || days > 365 {
 		days = 7
 	}
-	overview, err := s.Store.Tickets.Overview(store.Now(), s.Config.Location, days)
+	overview, err := s.overviewCache.get(strconv.Itoa(days), func() (*store.Overview, error) {
+		return s.Store.Tickets.Overview(store.Now(), s.Config.Location, days)
+	})
 	if err != nil {
 		s.failInternal(c, err, "stats.overview")
 		return
@@ -914,7 +916,13 @@ func (s *Server) handleEvents(c *gin.Context) {
 		c.SSEvent(eventType, data)
 		return controller.Flush() == nil
 	}
+	// 事件路径上的会话校验做降频：每条事件都查 sessions + users 两次库，
+	// 事件风暴时 N 个订阅者 × M 条事件会挤占仅 4 个连接池的连接。
+	// 心跳路径（25s）仍保持每次全量校验，“禁用 / 改密”最迟 25 秒内生效。
+	const checkInterval = 10 * time.Second
+	lastCheckAt := time.Now().Add(-checkInterval)
 	check := func() bool {
+		lastCheckAt = time.Now()
 		_, user, err := s.Sessions.Check(token)
 		if err != nil || user.MustChangePassword || !store.RoleAtLeast(user.Role, store.RoleReadonly) {
 			send("auth.expired", gin.H{"at": store.Now()})
@@ -922,6 +930,12 @@ func (s *Server) handleEvents(c *gin.Context) {
 		}
 		role = user.Role
 		return true
+	}
+	checkThrottled := func() bool {
+		if time.Since(lastCheckAt) < checkInterval {
+			return true
+		}
+		return check()
 	}
 
 	c.Header("Cache-Control", "no-store")
@@ -942,7 +956,7 @@ func (s *Server) handleEvents(c *gin.Context) {
 			if !ok {
 				return
 			}
-			if !check() {
+			if !checkThrottled() {
 				return
 			}
 			if role == store.RoleReadonly && !readonlyEventTypes(event.Type) {

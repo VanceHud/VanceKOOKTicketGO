@@ -4,7 +4,7 @@
  * 约定：所有时间字段都是 RFC3339 的 UTC 字符串，展示时由前端按本地时区转换。
  */
 
-export type TicketStatus = "pending" | "open" | "locked" | "closed" | "failed"
+export type TicketStatus = "pending" | "open" | "locked" | "closed"
 export type WebRole = "admin" | "staff" | "readonly"
 export type CodePurpose = "login" | "bind"
 
@@ -138,8 +138,9 @@ export interface CloserStat {
 }
 
 export interface SourceStat {
-  /** 形如 "频道ID|频道名"（服务端已附带可读名称）。 */
   channelId: string
+  /** 来源频道的可读名称（面板已删除时为空）。 */
+  channelName?: string
   opened: number
   closed: number
   closedRate: number

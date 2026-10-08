@@ -94,6 +94,9 @@ type Gateway struct {
 	mu        sync.Mutex
 	sessionID string
 	lastSN    int64
+	// persistedSN / lastPersistAt 支持按时间去抖的事件落库（见 persistSessionSoon）。
+	persistedSN   int64
+	lastPersistAt time.Time
 
 	connectedAt    atomic.Int64
 	eventsReceived atomic.Int64
@@ -231,6 +234,13 @@ func (g *Gateway) backoff() time.Duration {
 	return d
 }
 
+// SessionPersistInterval 是事件驱动落库的最小间隔。
+//
+// 每条事件都同步落库会把读循环拖慢（SQLite 单写者，且必须及时读取 PONG 帧，
+// PongTimeout 只有 6 秒）；去抖后崩溃时最多重放这段时间内的事件，
+// 与断线续传补发的事件走完全相同的处理路径，代价可接受。
+const SessionPersistInterval = 2 * time.Second
+
 // persistSession 把当前会话与已处理到的 sn 写入持久化存储。
 //
 // 失败只记日志：落库是「重启后仍能收到事件」的增强，不应影响当前连接。
@@ -240,12 +250,64 @@ func (g *Gateway) persistSession() {
 	}
 	g.mu.Lock()
 	sessionID, sn := g.sessionID, g.lastSN
+	g.persistedSN = sn
+	g.lastPersistAt = time.Now()
 	g.mu.Unlock()
 	if strings.TrimSpace(sessionID) == "" {
 		return
 	}
 	if err := g.opts.SessionStore.SaveGatewaySession(sessionID, sn); err != nil {
 		g.opts.Logger.Warn("持久化网关会话失败", "session_id", sessionID, "sn", sn, "err", err)
+	}
+}
+
+// persistSessionSoon 按 SessionPersistInterval 去抖地落库，供事件分支调用。
+//
+// 读循环内不能每条事件都做同步写入：消息突发时写事务会与消息归档竞争，
+// 读循环被拖慢后 PONG 读取延迟，可能触发心跳超时误判断线，进而重放事件。
+// 连接断开时 serve 会做一次最终落库（defer），正常停机不会丢位置。
+func (g *Gateway) persistSessionSoon() {
+	if g.opts.SessionStore == nil {
+		return
+	}
+	g.mu.Lock()
+	stale := g.lastSN != g.persistedSN
+	due := g.lastPersistAt.IsZero() || time.Since(g.lastPersistAt) >= SessionPersistInterval
+	g.mu.Unlock()
+	if stale && due {
+		g.persistSession()
+	}
+}
+
+// persistLoop 周期性把待落库的 sn 写入存储。
+//
+// 事件去抖后需要一个"最迟多久一定落库"的保证：没有新事件时，
+// 最后一次变化也要在 SessionPersistInterval 内写下去，
+// 否则崩溃后会从明显更旧的 sn 重放（虽然平台能补发，但重放量不可控）。
+func (g *Gateway) persistLoop(ctx context.Context) {
+	ticker := time.NewTicker(SessionPersistInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			g.persistSessionSoon()
+		}
+	}
+}
+
+// drainPongs 丢弃上一条连接残留的 PONG 信号。
+//
+// pongCh 容量为 1 且跨连接复用：若不排空，新连接的心跳会立刻消费旧连接的
+// PONG，把一次真实的超时检测整整推迟一个心跳周期（30s）。
+func (g *Gateway) drainPongs() {
+	for {
+		select {
+		case <-g.pongCh:
+		default:
+			return
+		}
 	}
 }
 
@@ -257,6 +319,7 @@ func (g *Gateway) persistSession() {
 func (g *Gateway) clearSession() {
 	g.mu.Lock()
 	g.sessionID, g.lastSN = "", 0
+	g.persistedSN, g.lastPersistAt = 0, time.Now()
 	g.mu.Unlock()
 	if g.opts.SessionStore != nil {
 		if err := g.opts.SessionStore.SaveGatewaySession("", 0); err != nil {
@@ -361,7 +424,11 @@ func (g *Gateway) serve(ctx context.Context) error {
 		SessionID string `json:"session_id"`
 	}
 	if len(hello.Data) > 0 {
-		_ = json.Unmarshal(hello.Data, &helloData)
+		if err := json.Unmarshal(hello.Data, &helloData); err != nil {
+			// 解析失败时 Code 会保持零值、被当作握手成功，但 SessionID 为空：
+			// 会话既不能续传也不会落库，故障会推迟到「重启后收不到事件」才暴露。
+			return fmt.Errorf("解析网关 HELLO 数据失败（%s）: %w", truncateForLog(hello.Data), err)
+		}
 	}
 	if helloData.Code != 0 {
 		if sessionID != "" {
@@ -382,6 +449,16 @@ func (g *Gateway) serve(ctx context.Context) error {
 	g.mu.Unlock()
 	// 握手成功即落库：此时起的任何事件丢失都能靠下一次 resume 补回来。
 	g.persistSession()
+	// 连接断开（含 Stop / 心跳超时）前做一次最终落库，
+	// 配合事件分支的去抖写入，正常停机不会丢失续传位置。
+	defer g.persistSession()
+	// 后台刷盘：保证去抖写入的延迟上界（见 persistLoop）。
+	persistCtx, stopPersist := context.WithCancel(ctx)
+	defer stopPersist()
+	go g.persistLoop(persistCtx)
+
+	// 丢弃上一条连接的残留 PONG，避免掩盖新连接的心跳超时。
+	g.drainPongs()
 
 	g.connectedAt.Store(time.Now().UnixNano())
 	g.attempt.Store(0)
@@ -434,9 +511,9 @@ func (g *Gateway) serve(ctx context.Context) error {
 			if g.opts.OnEvent != nil {
 				g.opts.OnEvent(ctx, event)
 			}
-			// 回调返回后立即落库：崩溃/重启时从这条事件之后续传。
+			// 回调返回后按去抖间隔落库：崩溃/重启时从最近一次写入的 sn 之后续传。
 			// （OnEvent 若只是入队异步处理，见 SessionStore 的说明。）
-			g.persistSession()
+			g.persistSessionSoon()
 
 		case SignalPong:
 			select {

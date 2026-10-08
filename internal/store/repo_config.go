@@ -170,16 +170,15 @@ func (r *TypesRepo) Delete(id uint) error {
 }
 
 // AddRole 为类型绑定管理员角色（幂等）。
+//
+// 用 OnConflict 保证并发下的幂等：旧实现“先查后建”之间没有事务，
+// WebUI 与 KOOK 命令同时绑定同一角色会插入重复行，
+// 而重复角色会让开单流程重复下发频道权限。唯一索引见 TicketTypeRole。
 func (r *TypesRepo) AddRole(typeID uint, roleID, roleName string) error {
-	var existing TicketTypeRole
-	err := r.db.Where("type_id = ? AND role_id = ?", typeID, roleID).First(&existing).Error
-	if err == nil {
-		return nil
-	}
-	if mapped := mapNotFound(err); mapped != ErrNotFound {
-		return mapped
-	}
-	return r.db.Create(&TicketTypeRole{TypeID: typeID, RoleID: roleID, RoleName: roleName, CreatedAt: Now()}).Error
+	return r.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "type_id"}, {Name: "role_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"role_name"}),
+	}).Create(&TicketTypeRole{TypeID: typeID, RoleID: roleID, RoleName: roleName, CreatedAt: Now()}).Error
 }
 
 // RemoveRole 解除类型与角色的绑定。

@@ -2,6 +2,7 @@ package store
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -109,6 +110,58 @@ func TestSearchEscapesLikeWildcards(t *testing.T) {
 	// 正常关键词仍可命中
 	if _, total, err := st.Tickets.List(TicketFilter{Query: "李雷"}); err != nil || total != 1 {
 		t.Fatalf("正常关键词匹配失败: total=%d err=%v", total, err)
+	}
+}
+
+// TestSearchByTicketNumberUsesIndex 验证“TK-数字”形态的查询走编号范围比较，
+// 而不是退化成带模糊匹配的全表扫描（含大小写不敏感与部分前缀）。
+func TestSearchByTicketNumberUsesIndex(t *testing.T) {
+	st := newTestStore(t)
+	loc := testLocation(t)
+
+	first := &Ticket{UserID: "90000000000000001", UserName: "小张", Status: TicketOpen}
+	if err := st.Tickets.CreateWithNo(first, Now(), loc); err != nil {
+		t.Fatalf("创建工单失败: %v", err)
+	}
+	second := &Ticket{UserID: "90000000000000002", UserName: "小李", Status: TicketOpen}
+	if err := st.Tickets.CreateWithNo(second, Now().Add(time.Hour), loc); err != nil {
+		t.Fatalf("创建工单失败: %v", err)
+	}
+
+	// 完整编号精确命中。
+	items, total, err := st.Tickets.List(TicketFilter{Query: first.No})
+	if err != nil || total != 1 || len(items) != 1 || items[0].No != first.No {
+		t.Fatalf("按完整编号搜索失败: total=%d err=%v", total, err)
+	}
+
+	// 小写输入同样命中（LIKE 原本大小写不敏感）。
+	if items, total, err = st.Tickets.List(TicketFilter{Query: strings.ToLower(first.No)}); err != nil || total != 1 || items[0].No != first.No {
+		t.Fatalf("小写编号搜索失败: total=%d err=%v", total, err)
+	}
+
+	// 编号前缀命中当天的全部工单。
+	prefix := first.No[:5]
+	if _, total, err = st.Tickets.List(TicketFilter{Query: prefix}); err != nil || total < 1 {
+		t.Fatalf("按编号前缀搜索失败: total=%d err=%v", total, err)
+	}
+
+	// 查询计划必须使用编号上的唯一索引。
+	type planRow struct {
+		Detail string `gorm:"column:detail"`
+	}
+	var plan []planRow
+	if err := st.DB().Raw("EXPLAIN QUERY PLAN SELECT * FROM tickets WHERE no >= ? AND no < ?",
+		first.No, first.No+"\x7f").Scan(&plan).Error; err != nil {
+		t.Fatalf("查询计划失败: %v", err)
+	}
+	used := false
+	for _, row := range plan {
+		if strings.Contains(row.Detail, "sqlite_autoindex_tickets") || strings.Contains(row.Detail, "idx_tickets_no") {
+			used = true
+		}
+	}
+	if !used {
+		t.Fatalf("编号搜索应使用唯一索引，实际计划: %+v", plan)
 	}
 }
 
@@ -507,6 +560,111 @@ func TestTicketTypeEnabledFalsePersists(t *testing.T) {
 	}
 	if storedPanel.Enabled {
 		t.Fatal("Enabled=false 的面板不应被写成启用")
+	}
+}
+
+// TestEmojiRuleEnabledFalsePersists 验证“新建即停用”的表情规则能如实入库。
+//
+// 与 TicketType.Enabled 同理：GORM 对带 default 标签的字段会忽略零值，
+// EmojiRule.Enabled 若带 default:true，“停用”的规则会被静默写成启用并立即生效。
+func TestEmojiRuleEnabledFalsePersists(t *testing.T) {
+	st := newTestStore(t)
+
+	rule := &EmojiRule{
+		MessageID: "msg-1",
+		EmojiID:   "emoji-1",
+		RoleID:    "role-1",
+		Enabled:   false,
+	}
+	if err := st.Emoji.CreateRule(rule); err != nil {
+		t.Fatalf("创建表情规则失败: %v", err)
+	}
+	stored, err := st.Emoji.RuleByID(rule.ID)
+	if err != nil {
+		t.Fatalf("读取表情规则失败: %v", err)
+	}
+	if stored.Enabled {
+		t.Fatal("Enabled=false 的表情规则不应被写成启用")
+	}
+	if _, err := st.Emoji.MatchRule("msg-1", "emoji-1"); err == nil {
+		t.Fatal("停用的规则不应被匹配到")
+	}
+}
+
+// TestAddRoleIsIdempotentUnderConcurrency 是回归测试：
+//
+// 旧实现“先查后建”且无事务，并发绑定同一角色会插入重复行，
+// 重复角色会让开单流程重复下发频道权限。现在依靠唯一索引 + OnConflict 保证幂等。
+func TestAddRoleIsIdempotentUnderConcurrency(t *testing.T) {
+	st := newTestStore(t)
+
+	ticketType := &TicketType{Name: "并发的类型", Enabled: true}
+	if err := st.Types.Create(ticketType); err != nil {
+		t.Fatalf("创建工单类型失败: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := st.Types.AddRole(ticketType.ID, "role-1", "管理员"); err != nil {
+				t.Errorf("绑定角色失败: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	stored, err := st.Types.ByID(ticketType.ID)
+	if err != nil {
+		t.Fatalf("读取工单类型失败: %v", err)
+	}
+	if len(stored.Roles) != 1 {
+		t.Fatalf("并发绑定同一角色应只留下 1 条记录，实际 %d 条", len(stored.Roles))
+	}
+}
+
+// TestMigrateDedupesTicketTypeRoles 验证升级时清理历史重复角色行，
+// 并确保唯一索引在迁移后真正生效（AutoMigrate 在重复数据上会直接失败）。
+func TestMigrateDedupesTicketTypeRoles(t *testing.T) {
+	st := newTestStore(t)
+
+	ticketType := &TicketType{Name: "历史类型", Enabled: true}
+	if err := st.Types.Create(ticketType); err != nil {
+		t.Fatalf("创建工单类型失败: %v", err)
+	}
+
+	// 模拟旧库：去掉唯一索引后再插入重复行（旧版先查后建的竞态产物）。
+	if err := st.DB().Exec("DROP INDEX IF EXISTS idx_ticket_type_roles_type_role").Error; err != nil {
+		t.Fatalf("删除唯一索引失败: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := st.DB().Exec(
+			"INSERT INTO ticket_type_roles (type_id, role_id, role_name, created_at) VALUES (?, 'role-1', '管理员', ?)",
+			ticketType.ID, Now()).Error; err != nil {
+			t.Fatalf("插入重复角色失败: %v", err)
+		}
+	}
+
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("升级迁移失败: %v", err)
+	}
+
+	var count int64
+	if err := st.DB().Model(&TicketTypeRole{}).
+		Where("type_id = ? AND role_id = ?", ticketType.ID, "role-1").Count(&count).Error; err != nil {
+		t.Fatalf("统计角色失败: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("重复角色应被清理为 1 条，实际 %d 条", count)
+	}
+
+	// 唯一索引必须已重建：再次直接插入同一组合应当失败。
+	err := st.DB().Create(&TicketTypeRole{
+		TypeID: ticketType.ID, RoleID: "role-1", RoleName: "管理员", CreatedAt: Now(),
+	}).Error
+	if err == nil {
+		t.Fatal("唯一索引应阻止重复的角色绑定")
 	}
 }
 

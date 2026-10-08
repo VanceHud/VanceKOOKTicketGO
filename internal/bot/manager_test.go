@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -178,5 +179,33 @@ func TestManagerRestartResumesPersistedSession(t *testing.T) {
 	last := connects[len(connects)-1]
 	if last.Get("resume") != "1" || last.Get("session_id") != sessionID {
 		t.Fatalf("重连应续传旧会话 %s，实际连接参数: %v", sessionID, last)
+	}
+}
+
+// TestManagerConcurrentStartsConnectOnce 是回归测试：
+//
+// WebUI 的「保存配置」与「重新连接」都会触发 Start/Restart，双击或并发点击时
+// 旧实现会让多次 Start 同时通过 running 检查、各自建立一个连接：
+// 后写的覆盖前一个，旧实例永远不会被 Stop——平台上两个会话、事件双份处理。
+func TestManagerConcurrentStartsConnectOnce(t *testing.T) {
+	manager, mock, _ := newManagerEnv(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := manager.Start(context.Background()); err != nil {
+				t.Errorf("并发启动失败: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	waitForStatus(t, manager.Status, "网关连接建立", func(s Status) bool { return s.Connected })
+
+	// 留出时间让可能多出来的连接暴露（误判时才会出现）。
+	time.Sleep(300 * time.Millisecond)
+	if connects := mock.WSConnects(); len(connects) != 1 {
+		t.Fatalf("并发 Start 只应建立一次网关连接，实际 %d 次", len(connects))
 	}
 }

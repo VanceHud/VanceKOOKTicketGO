@@ -86,6 +86,10 @@ type Server struct {
 	Deps
 	passwordAttempts *auth.WindowLimiter
 	passwordSlots    chan struct{}
+
+	// 统计聚合的短 TTL 缓存：同一份全区间扫描不应被并发请求重复执行。
+	overviewCache  *cachedStats[*store.Overview]
+	analyticsCache *cachedStats[*store.Analytics]
 }
 
 // NewServer 创建 API 服务。
@@ -93,7 +97,13 @@ func NewServer(d Deps) *Server {
 	if d.Log == nil {
 		d.Log = slog.Default()
 	}
-	return &Server{Deps: d, passwordAttempts: auth.NewWindowLimiter(20, time.Minute), passwordSlots: make(chan struct{}, 4)}
+	return &Server{
+		Deps:             d,
+		passwordAttempts: auth.NewWindowLimiter(20, time.Minute),
+		passwordSlots:    make(chan struct{}, 4),
+		overviewCache:    newCachedStats[*store.Overview](statsCacheTTL),
+		analyticsCache:   newCachedStats[*store.Analytics](statsCacheTTL),
+	}
 }
 
 // botConnected 判断机器人是否在线。
@@ -204,6 +214,19 @@ func atoiDefault(raw string, def int) int {
 	return v
 }
 
+// pathID 解析路径参数中的资源 ID：必须是正整数，非法或非正数时返回 0。
+//
+// 直接用 uint(atoiDefault(...)) 会把 -1 回绕成 18446744073709551615，
+// 查库必然 404，但语义上应当是同一种「ID 不合法」；集中在这里处理，
+// 也避免每个 handler 重复写转换。
+func pathID(c *gin.Context) uint {
+	value := atoiDefault(c.Param("id"), 0)
+	if value <= 0 {
+		return 0
+	}
+	return uint(value)
+}
+
 // timeParam 解析时间参数，支持两种形式：
 //   - YYYY-MM-DD：按业务时区（TICKET_TZ）解释；endOfDay 为真时返回次日 00:00（右开区间）
 //   - RFC3339：按给定偏移解析
@@ -239,6 +262,9 @@ func accessLog(log *slog.Logger) gin.HandlerFunc {
 			level = slog.LevelError
 		case c.Writer.Status() >= 400:
 			level = slog.LevelWarn
+		case strings.HasPrefix(c.Request.URL.Path, "/assets/"):
+			// 静态产物：一次页面加载十几个带哈希的请求，逐条记录只会淹没日志。
+			level = slog.LevelDebug
 		}
 		log.Log(c.Request.Context(), level, "http 请求",
 			"request_id", auth.RequestIDOf(c),

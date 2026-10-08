@@ -113,3 +113,19 @@ func (b *Bus) Subscribers() int {
 	defer b.mu.RUnlock()
 	return len(b.subs)
 }
+
+// CloseAll 关闭全部订阅通道并清空订阅表。
+//
+// 供进程优雅退出时调用：http.Server.Shutdown 只等待活跃连接结束，
+// 而 SSE 处理函数在请求上下文取消前不会返回——不主动关闭通道，
+// 每次重启都会白等满关闭超时。SSE 端检测到通道关闭后立即返回。
+func (b *Bus) CloseAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, ch := range b.subs {
+		close(ch)
+		delete(b.subs, id)
+		delete(b.owners, id)
+	}
+	b.counts = map[string]int{}
+}

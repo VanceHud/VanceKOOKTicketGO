@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"hash/fnv"
 	"log/slog"
 	"time"
 
@@ -81,16 +80,27 @@ func (d *eventDispatcher) consume(ctx context.Context, queue <-chan kook.Event) 
 	}
 }
 
-// shardFor 返回事件应落入的分片号。
-func (d *eventDispatcher) shardFor(event kook.Event) int {
-	hasher := fnv.New32a()
-	_, _ = hasher.Write([]byte(d.keyFor(event)))
-	return int(hasher.Sum32() % uint32(len(d.queues)))
+// shardFor 返回分片键应落入的分片号。
+//
+// 内联 FNV-1a 32 位实现（而不是 fnv.New32a）：事件分发在每条消息的路径上，
+// 为一次哈希分配 hasher 是纯热路径开销。
+func (d *eventDispatcher) shardFor(key string) int {
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	hash := uint32(offset32)
+	for i := 0; i < len(key); i++ {
+		hash ^= uint32(key[i])
+		hash *= prime32
+	}
+	return int(hash % uint32(len(d.queues)))
 }
 
 // enqueue 只做入队，绝不长时间阻塞读取协程。
 func (d *eventDispatcher) enqueue(ctx context.Context, event kook.Event) {
-	queue := d.queues[d.shardFor(event)]
+	key := d.keyFor(event)
+	queue := d.queues[d.shardFor(key)]
 
 	select {
 	case queue <- event:
@@ -100,12 +110,12 @@ func (d *eventDispatcher) enqueue(ctx context.Context, event kook.Event) {
 
 	// 队列已满：同一个频道短时间内堆了大量事件（例如刷屏）。
 	// 这里短暂等待，而不是直接丢事件；等不到再放弃并留下错误日志。
-	d.log.Warn("事件处理队列已满，等待处理", "type", event.Type, "key", d.keyFor(event))
+	d.log.Warn("事件处理队列已满，等待处理", "type", event.Type, "key", key)
 	select {
 	case queue <- event:
 	case <-ctx.Done():
 	case <-time.After(3 * time.Second):
-		d.log.Error("事件处理队列持续拥塞，已丢弃事件", "type", event.Type, "key", d.keyFor(event))
+		d.log.Error("事件处理队列持续拥塞，已丢弃事件", "type", event.Type, "key", key)
 	}
 }
 

@@ -176,7 +176,11 @@ func run(resetUser, newPassword string) error {
 		logger.Warn("机器人启动失败，可通过 WebUI「机器人状态 → 重新连接」重试", "err", err)
 	}
 
-	go backgroundTasks(ctx, logger, st, sessions, loginLimiter, codeLimiter, ticketService)
+	bgDone := make(chan struct{})
+	go func() {
+		defer close(bgDone)
+		backgroundTasks(ctx, logger, st, sessions, loginLimiter, codeLimiter, ticketService, cfg.AuditRetention)
+	}()
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
@@ -188,6 +192,9 @@ func run(resetUser, newPassword string) error {
 		IdleTimeout:  120 * time.Second,
 		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
+	// 优雅关闭时主动结束 SSE 连接：Shutdown 不会取消请求上下文，
+	// 只要有一个打开的控制台页面，关停就要白等满 15 秒超时。
+	server.RegisterOnShutdown(func() { bus.CloseAll() })
 
 	serverErr := make(chan error, 1)
 	go func() {
@@ -208,6 +215,12 @@ func run(resetUser, newPassword string) error {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("优雅关闭超时", "err", err)
+	}
+	// 等后台维护任务收口：否则它可能在数据库关闭后仍执行查询。
+	select {
+	case <-bgDone:
+	case <-time.After(5 * time.Second):
+		logger.Warn("后台维护任务未在超时内退出")
 	}
 	logger.Info("已退出")
 	return nil
@@ -303,11 +316,34 @@ func backgroundTasks(
 	loginLimiter *auth.LoginLimiter,
 	codeLimiter *auth.WindowLimiter,
 	ticketService *ticket.Service,
+	auditRetention time.Duration,
 ) {
 	maintenance := time.NewTicker(5 * time.Minute)
 	timeoutScan := time.NewTicker(10 * time.Minute)
 	defer maintenance.Stop()
 	defer timeoutScan.Stop()
+
+	// 审计清理每天最多一次：首次维护周期即执行，之后按 24 小时节流
+	// （进程每天重启也能保证至少清理一次）。
+	var lastAuditPurge time.Time
+	purgeAudit := func() {
+		if auditRetention <= 0 {
+			return
+		}
+		if !lastAuditPurge.IsZero() && time.Since(lastAuditPurge) < 24*time.Hour {
+			return
+		}
+		lastAuditPurge = time.Now()
+		before := store.Now().Add(-auditRetention)
+		removed, err := st.Audit.PurgeBefore(before)
+		if err != nil {
+			logger.Error("清理历史审计日志失败", "err", err)
+			return
+		}
+		if removed > 0 {
+			logger.Info("已清理历史审计日志", "count", removed, "before", before.Format(time.RFC3339))
+		}
+	}
 
 	for {
 		select {
@@ -326,6 +362,7 @@ func backgroundTasks(
 			}
 			loginLimiter.GC()
 			codeLimiter.GC()
+			purgeAudit()
 		case <-timeoutScan.C:
 			locked, err := ticketService.ScanTimeout(ctx)
 			if err != nil {

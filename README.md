@@ -205,7 +205,8 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 | `SESSION_MAX_DAYS` | `7` | 会话绝对有效期 |
 | `LOGIN_MAX_FAILS` | `5` | 窗口内登录失败上限，达到即锁定 |
 | `LOGIN_WINDOW_MINUTES` | `15` | 失败计数窗口 |
-| `LOGIN_LOCK_MINUTES` | `15` | 基础锁定时长（持续失败会指数延长） |
+| `LOGIN_LOCK_MINUTES` | `15` | 基础锁定时长（持续失败会指数延长，封顶 1 小时） |
+| `AUDIT_RETENTION_DAYS` | `180` | 审计日志保留期（后台每天清理一次；`0` = 永久保留） |
 
 ---
 

@@ -17,6 +17,15 @@ import (
 type Manager struct {
 	deps Deps
 
+	// opMu 串行化整个生命周期操作（Start/Stop/Restart）。
+	//
+	// 建连包含数秒的网络调用（Token 校验、服务器信息、网关握手），
+	// 若只用 mu 检查 running 标志，两次并发的 Start/Restart 会同时通过检查、
+	// 各自建立一个连接：后写的覆盖前一个，旧实例永远不会被 Stop——
+	// 平台上出现两个会话、事件被双份处理。WebUI 的「保存配置」与
+	// 「重新连接」按钮都会直接调用 Restart，双击即可触发。
+	opMu sync.Mutex
+
 	mu        sync.Mutex
 	bot       *Bot
 	running   bool
@@ -33,9 +42,18 @@ func NewManager(deps Deps) (*Manager, error) {
 
 // Start 读取配置并建立连接（幂等：已运行时不会重复启动）。
 //
+// 与 Stop/Restart 之间通过 opMu 完全串行：调用期间并发的生命周期操作会排队，
+// 不会出现两个连接同时存活的窗口。
+//
 // ctx 仅用于本次建连的准备工作（见 Bot.Start）；连接建立后由 Stop 负责断开，
 // 因此调用方用 HTTP 请求上下文调用它是安全的。
 func (m *Manager) Start(ctx context.Context) error {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	return m.startLocked(ctx)
+}
+
+func (m *Manager) startLocked(ctx context.Context) error {
 	m.mu.Lock()
 	if m.running {
 		m.mu.Unlock()
@@ -62,7 +80,16 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // Stop 断开当前连接。
+//
+// 若有生命周期操作正在进行（例如 WebUI 正在建连），会等它结束后再断开，
+// 保证「用户点了断开」之后不会再有连接被建起来。
 func (m *Manager) Stop() {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	m.stopLocked()
+}
+
+func (m *Manager) stopLocked() {
 	m.mu.Lock()
 	instance := m.bot
 	m.bot, m.running = nil, false
@@ -75,11 +102,14 @@ func (m *Manager) Stop() {
 
 // Restart 使用最新配置重新连接；返回错误表示新配置连接失败（旧连接已断开）。
 func (m *Manager) Restart(ctx context.Context) error {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
 	m.deps.Logger.Info("正在按最新配置重启机器人连接")
-	m.Stop()
+	m.stopLocked()
 
 	// Start 会构造新的 Bot 实例，角色/频道缓存随之重建，无需额外清理。
-	return m.Start(ctx)
+	return m.startLocked(ctx)
 }
 
 // Status 返回机器人状态；未连接时给出原因。

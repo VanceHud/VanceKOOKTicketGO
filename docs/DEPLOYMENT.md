@@ -599,7 +599,8 @@ data/
 | `TRUSTED_PROXIES` | 空 | 可信反代地址（CIDR 逗号分隔） |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / 随机 | 仅首次初始化生效 |
 | `SESSION_IDLE_HOURS` / `SESSION_MAX_DAYS` | `12` / `7` | 会话空闲与绝对过期 |
-| `LOGIN_MAX_FAILS` / `LOGIN_WINDOW_MINUTES` / `LOGIN_LOCK_MINUTES` | `5` / `15` / `15` | 登录限流 |
+| `LOGIN_MAX_FAILS` / `LOGIN_WINDOW_MINUTES` / `LOGIN_LOCK_MINUTES` | `5` / `15` / `15` | 登录限流（锁定时长指数退避，封顶 1 小时） |
+| `AUDIT_RETENTION_DAYS` | `180` | 审计日志保留期（后台每天清理；`0` = 永久保留） |
 
 ### 11.2 KOOK ID 获取方式
 

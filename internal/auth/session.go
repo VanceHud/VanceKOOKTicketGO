@@ -171,9 +171,10 @@ func (m *SessionManager) RevokeUser(userID uint) error {
 	return m.store.Sessions.DeleteForUser(userID)
 }
 
-// GC 清理过期会话。
+// GC 清理过期会话（绝对过期与空闲过期）。
 func (m *SessionManager) GC() (int64, error) {
-	return m.store.Sessions.DeleteExpired(store.Now())
+	now := store.Now()
+	return m.store.Sessions.DeleteExpired(now, now.Add(-m.idleTTL))
 }
 
 func truncate(s string, max int) string {

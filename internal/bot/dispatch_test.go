@@ -71,7 +71,7 @@ func TestEventDispatcherRunsDifferentChannelsInParallel(t *testing.T) {
 	var other string
 	for i := 0; i < 32; i++ {
 		candidate := fmt.Sprintf("fast-%d", i)
-		if dispatcher.shardFor(kook.Event{TargetID: candidate}) != dispatcher.shardFor(kook.Event{TargetID: "slow-1"}) {
+		if dispatcher.shardFor("channel:"+candidate) != dispatcher.shardFor("channel:slow-1") {
 			other = candidate
 			break
 		}

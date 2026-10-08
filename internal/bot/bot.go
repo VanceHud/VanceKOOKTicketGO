@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
@@ -107,8 +108,27 @@ type Bot struct {
 	// openLocks 保证「同一个用户同时只开一单」：按用户加锁，不同用户可以并行开单。
 	openLocks keyedlock.Locks
 
+	// configMu 串行化配置刷新（见 currentConfig）：10s 缓存过期的瞬间，
+	// 并发到达的事件只需要一次查库，其余协程复用刷新结果。
+	configMu sync.Mutex
+
+	// eventsHandled / lastEventAt 以原子方式维护，Status 读取时合并进快照。
+	eventsHandled atomic.Int64
+	lastEventAt   atomic.Int64
+
+	// activityRestore 防止重连风暴下重复执行在玩动态恢复。
+	activityRestore atomic.Bool
+
 	// events 把网关事件从读取协程解耦到分片处理协程（见 dispatch.go）。
 	events *eventDispatcher
+
+	// enrichJobs 是卡片内容补全的任务队列，由固定数量的 worker 消费（见 startEnrichers）。
+	// 用户上传的文件会被平台转成卡片消息，每条都需要一次 message/view 拉取，
+	// 队列 + 固定并发保证刷屏时不会堆积无界协程与 API 调用。
+	enrichJobs chan enrichJob
+	// enriching 记录进行中的补全（按平台消息 ID），事件重放时不重复拉取。
+	enrichMu  sync.Mutex
+	enriching map[string]struct{}
 
 	// gatewayDone 在网关协程退出时关闭，供 Stop 等待连接真正断开。
 	gatewayDone chan struct{}
@@ -142,6 +162,7 @@ func New(deps Deps) (*Bot, error) {
 		secret:       deps.AppSecret,
 		roleCache:    newTTLCache(30 * time.Second),
 		channelCache: newTTLCache(60 * time.Second),
+		enriching:    map[string]struct{}{},
 	}, nil
 }
 
@@ -234,8 +255,12 @@ func (b *Bot) Start(ctx context.Context) error {
 			})
 			// 每次连接建立（含网关自动重连）都尝试恢复在玩动态：
 			// KOOK 的动态绑定在网关上，重新握手后会丢失。
-			if status.Connected {
-				go b.restoreActivity()
+			// 用 in-flight 标志去重：网络抖动连续重连时不应并发发出多组相同调用。
+			if status.Connected && b.activityRestore.CompareAndSwap(false, true) {
+				go func() {
+					defer b.activityRestore.Store(false)
+					b.restoreActivity()
+				}()
 			}
 		},
 	})
@@ -249,6 +274,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	gatewayDone := make(chan struct{})
 	dispatcher := newEventDispatcher(eventShards, eventQueueSize, b.handleEvent, nil, b.deps.Logger)
 	dispatcher.start(runCtx)
+	b.startEnrichers(runCtx)
 
 	b.mu.Lock()
 	b.client = client
@@ -272,13 +298,15 @@ func (b *Bot) Start(ctx context.Context) error {
 		s.LastError = ""
 	})
 
-	// 把真实平台实现注入工单服务
-	b.deps.Tickets.SetPlatform(&platform{b: b})
+	// 把真实平台实现注入工单服务。记录实例身份：网关协程退出时按身份清除，
+	// 避免旧协程的迟到清理把重启后新 Bot 注入的实现置空。
+	platformImpl := &platform{b: b}
+	b.deps.Tickets.SetPlatform(platformImpl)
 
 	go func() {
 		defer close(gatewayDone)
 		defer func() {
-			b.deps.Tickets.SetPlatform(nil)
+			b.deps.Tickets.ClearPlatform(platformImpl)
 			b.setStatus(func(s *Status) {
 				s.Running = false
 				s.Connected = false
@@ -306,6 +334,8 @@ func (b *Bot) Stop() {
 	done := b.gatewayDone
 	b.stop = nil
 	b.gatewayDone = nil
+	// 停止接收新的补全任务；已入队的任务由 runCtx 取消终止。
+	b.enrichJobs = nil
 	b.mu.Unlock()
 	if stop != nil {
 		stop()
@@ -323,8 +353,17 @@ func (b *Bot) Stop() {
 // Status 返回当前状态。
 func (b *Bot) Status() Status {
 	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.status
+	status := b.status
+	b.mu.RUnlock()
+
+	// 事件计数与最近事件时间由原子字段维护（见 markEvent），
+	// 这里合并进快照，避免每条事件都争抢主锁。
+	status.EventsHandled = b.eventsHandled.Load()
+	if ts := b.lastEventAt.Load(); ts > 0 {
+		at := time.Unix(0, ts).UTC()
+		status.LastEventAt = &at
+	}
+	return status
 }
 
 // Client 返回底层客户端（未连接时为 nil）。
@@ -491,6 +530,17 @@ func (b *Bot) currentConfig(ctx context.Context) (*Config, error) {
 	if cfg != nil && store.Now().Sub(at) < 10*time.Second {
 		return cfg, nil
 	}
+
+	// 串行化刷新并双重检查：过期瞬间的并发事件只触发一次查库。
+	b.configMu.Lock()
+	defer b.configMu.Unlock()
+	b.mu.RLock()
+	cfg, at = b.config, b.configAt
+	b.mu.RUnlock()
+	if cfg != nil && store.Now().Sub(at) < 10*time.Second {
+		return cfg, nil
+	}
+
 	fresh, err := b.deps.Config(ctx)
 	if err != nil {
 		if cfg != nil {
@@ -528,11 +578,12 @@ func setStatusNow(target **time.Time) {
 }
 
 // markEvent 记录一次事件处理。
+//
+// 用原子计数而不是主锁：每条消息都会走到这里，而主锁同时保护
+// client/gateway/status，与 WebUI 的状态轮询互相竞争。
 func (b *Bot) markEvent() {
-	b.setStatus(func(s *Status) {
-		s.EventsHandled++
-		setStatusNow(&s.LastEventAt)
-	})
+	b.eventsHandled.Add(1)
+	b.lastEventAt.Store(time.Now().UnixNano())
 }
 
 // ---------------------------------------------------------------------------
@@ -710,40 +761,30 @@ func (b *Bot) isAdminWithTypes(ctx context.Context, userID string, types []store
 		return true
 	}
 
+	// 用户角色一次性转成字符串集合：避免穷举比较中的反复格式化分配，
+	// 也让下面的判定从 O(类型×角色) 降为 O(角色数)。权限判定在每个按钮点击上执行。
+	roleSet := make(map[string]struct{}, len(roles))
+	for _, roleID := range roles {
+		roleSet[strconv.FormatInt(roleID, 10)] = struct{}{}
+	}
+
 	adminRoles, err := b.deps.Store.Roles.ListAdmin()
 	if err != nil {
 		b.deps.Logger.Error("读取全局管理员角色失败", "err", err)
 		return false
 	}
-	if intersects(roles, adminRoles) {
-		return true
+	for _, role := range adminRoles {
+		if _, ok := roleSet[role.RoleID]; ok {
+			return true
+		}
 	}
 
 	// 工单类型角色：命中任一类型的任一角色即视为管理员。
 	for _, item := range types {
 		for _, typeRole := range item.Roles {
-			for _, roleID := range roles {
-				if typeRole.RoleID == fmt.Sprint(roleID) {
-					return true
-				}
+			if _, ok := roleSet[typeRole.RoleID]; ok {
+				return true
 			}
-		}
-	}
-	return false
-}
-
-// intersects 判断用户角色与管理员角色是否相交。
-func intersects(userRoles []int64, adminRoles []store.AdminRole) bool {
-	if len(adminRoles) == 0 {
-		return false
-	}
-	adminSet := make(map[string]struct{}, len(adminRoles))
-	for _, role := range adminRoles {
-		adminSet[role.RoleID] = struct{}{}
-	}
-	for _, roleID := range userRoles {
-		if _, ok := adminSet[fmt.Sprint(roleID)]; ok {
-			return true
 		}
 	}
 	return false

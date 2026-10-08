@@ -254,7 +254,7 @@ func (s *Server) handleTypeRoleRemove(c *gin.Context) {
 
 // lookupType 按路径参数取工单类型。
 func (s *Server) lookupType(c *gin.Context) (*store.TicketType, bool) {
-	id := uint(atoiDefault(c.Param("id"), 0))
+	id := pathID(c)
 	if id == 0 {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "工单类型 ID 不合法")
 		return nil, false

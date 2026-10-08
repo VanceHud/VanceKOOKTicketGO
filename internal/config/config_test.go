@@ -118,6 +118,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"限流窗口为负", "LOGIN_WINDOW_MINUTES", "-1"},
 		{"锁定时长为零", "LOGIN_LOCK_MINUTES", "0"},
 		{"弱密钥", "APP_SECRET", "short-secret"},
+		{"可信代理非法", "TRUSTED_PROXIES", "10.0.0.1/34"},
+		{"审计保留期非法", "AUDIT_RETENTION_DAYS", "半年"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,6 +141,37 @@ func TestLoadRejectsIdleLongerThanAbsoluteTTL(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("空闲过期大于绝对有效期时应拒绝启动")
+	}
+}
+
+// TestLoadParsesAuditRetention 验证审计保留期：裸数字按天解释，0 表示永久保留。
+func TestLoadParsesAuditRetention(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATA_DIR", t.TempDir())
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("装载配置失败: %v", err)
+	}
+	if cfg.AuditRetention != 180*24*time.Hour {
+		t.Fatalf("默认保留期应为 180 天，得到 %s", cfg.AuditRetention)
+	}
+
+	t.Setenv("AUDIT_RETENTION_DAYS", "30")
+	if cfg, err = Load(); err != nil {
+		t.Fatalf("装载配置失败: %v", err)
+	}
+	if cfg.AuditRetention != 30*24*time.Hour {
+		t.Fatalf("裸数字应按天解释，得到 %s", cfg.AuditRetention)
+	}
+
+	// 0 表示永久保留（后台任务跳过清理）。
+	t.Setenv("AUDIT_RETENTION_DAYS", "0")
+	if cfg, err = Load(); err != nil {
+		t.Fatalf("装载配置失败: %v", err)
+	}
+	if cfg.AuditRetention != 0 {
+		t.Fatalf("0 应表示永久保留，得到 %s", cfg.AuditRetention)
 	}
 }
 

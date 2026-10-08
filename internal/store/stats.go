@@ -30,10 +30,12 @@ type CloserStat struct {
 
 // SourceStat 是按来源面板频道聚合的工单量。
 type SourceStat struct {
-	ChannelID  string  `json:"channelId"`
-	Opened     int64   `json:"opened"`
-	Closed     int64   `json:"closed"`
-	ClosedRate float64 `json:"closedRate"`
+	ChannelID string `json:"channelId"`
+	// ChannelName 是来源频道的可读名称（由 API 层补充，查不到时为空）。
+	ChannelName string  `json:"channelName,omitempty"`
+	Opened      int64   `json:"opened"`
+	Closed      int64   `json:"closed"`
+	ClosedRate  float64 `json:"closedRate"`
 }
 
 // TypeStat 是按工单类型聚合的工单量（按开单时的类型名快照归集）。

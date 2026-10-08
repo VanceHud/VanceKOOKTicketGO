@@ -225,19 +225,6 @@ func (r *SessionsRepo) Touch(id uint, seenAt time.Time) error {
 	return r.db.Model(&Session{}).Where("id = ? AND last_seen_at < ?", id, seenAt.UTC()).Update("last_seen_at", seenAt.UTC()).Error
 }
 
-// DeleteOldestForUser 仅保留最近 keep 个会话，删除更旧的会话（含已过期者）。
-func (r *SessionsRepo) DeleteOldestForUser(userID uint, keep int) (int64, error) {
-	var ids []uint
-	err := r.db.Model(&Session{}).Where("user_id = ?", userID).
-		Order("last_seen_at DESC, id DESC").
-		Offset(keep).Pluck("id", &ids).Error
-	if err != nil || len(ids) == 0 {
-		return 0, err
-	}
-	res := r.db.Where("id IN ?", ids).Delete(&Session{})
-	return res.RowsAffected, res.Error
-}
-
 // DeleteByTokenHash 注销单个会话。
 func (r *SessionsRepo) DeleteByTokenHash(hash string) error {
 	return r.db.Where("token_hash = ?", hash).Delete(&Session{}).Error
@@ -248,9 +235,12 @@ func (r *SessionsRepo) DeleteForUser(userID uint) error {
 	return r.db.Where("user_id = ?", userID).Delete(&Session{}).Error
 }
 
-// DeleteExpired 清理过期会话，返回清理数量。
-func (r *SessionsRepo) DeleteExpired(now time.Time) (int64, error) {
-	res := r.db.Where("expires_at < ?", now.UTC()).Delete(&Session{})
+// DeleteExpired 清理过期会话：绝对过期（expires_at）与空闲过期（idleCutoff 之前
+// 不再活跃）两种。空闲过期若不清理，只能等用户再次访问时惰性删除，
+// 会一直占用 MaxSessionsPerUser 的额度。
+func (r *SessionsRepo) DeleteExpired(now, idleCutoff time.Time) (int64, error) {
+	res := r.db.Where("expires_at < ? OR last_seen_at < ?", now.UTC(), idleCutoff.UTC()).
+		Delete(&Session{})
 	return res.RowsAffected, res.Error
 }
 

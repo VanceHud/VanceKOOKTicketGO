@@ -397,11 +397,18 @@ func (b *Bot) cmdBind(ctx context.Context, event kook.Event) {
 // issueCode 生成一次性码并回复用户。
 func (b *Bot) issueCode(ctx context.Context, event kook.Event, purpose, roleHint string) {
 	// 频率限制：同一用户 30s 内只能申请一次（基于数据库记录，重启不失效）。
-	if latest, err := b.deps.Store.Codes.Latest(event.AuthorID, purpose); err == nil && latest != nil {
+	latest, err := b.deps.Store.Codes.Latest(event.AuthorID, purpose)
+	switch {
+	case err == nil && latest != nil:
 		if store.Now().Sub(latest.CreatedAt) < codeCooldown {
 			b.replyDirect(ctx, event.AuthorID, "请求过于频繁，请稍后再试")
 			return
 		}
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		// 冷却判定依赖数据库；读不到时拒绝发放，避免异常期间冷却静默失效、被刷码。
+		b.deps.Logger.Warn("检查验证码冷却失败", "user_id", event.AuthorID, "err", err)
+		b.replyDirect(ctx, event.AuthorID, "系统繁忙，请稍后重试")
+		return
 	}
 
 	code, err := secure.RandomCrockford(6)

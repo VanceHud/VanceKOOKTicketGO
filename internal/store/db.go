@@ -116,6 +116,11 @@ func openGorm(path string, foreignKeys bool, maxOpenConns ...int) (*gorm.DB, err
 	db, err := gorm.Open(sqlite.Open(sqliteDSN(path, foreignKeys)), &gorm.Config{
 		// 把 SQLite 的唯一约束错误翻译成 gorm.ErrDuplicatedKey，编号冲突重试依赖它。
 		TranslateError: true,
+		// 关闭 GORM 对单条写入的隐式事务：本包所有多语句场景都已显式使用
+		// Transaction（见 AddMessage / createLimited / Close 等），
+		// 隐式事务只会为每条单语句 Create/Update 多出 BEGIN IMMEDIATE/COMMIT
+		// 两次往返，并提前占用 SQLite 的写锁。
+		SkipDefaultTransaction: true,
 		Logger: gormlogger.New(gormSlogWriter{log: slog.Default()}, gormlogger.Config{
 			SlowThreshold: 500 * time.Millisecond,
 			// 只上报真正的异常与慢查询；仓储层用 ErrNotFound 表达“未找到”，不算异常。
@@ -170,7 +175,14 @@ func (s *Store) Migrate() error {
 		}
 	}()
 
+	// 唯一索引建立前先清理历史重复行与冗余索引，否则 AutoMigrate 会因重复数据失败。
+	if err := dedupeTicketTypeRoles(migrator); err != nil {
+		return fmt.Errorf("数据库迁移失败: %w", err)
+	}
 	if err := migrator.AutoMigrate(AllModels()...); err != nil {
+		return fmt.Errorf("数据库迁移失败: %w", err)
+	}
+	if err := dropRedundantIndexes(migrator); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
 	if err := migratePanelChannelIndex(migrator); err != nil {
@@ -282,13 +294,23 @@ func (s *Store) migrateTicketTypes() error {
 		}
 
 		// 面板已被删除的历史工单：退化为按来源频道匹配该频道最早的面板所属类型。
-		if err := tx.Exec(`
-			UPDATE tickets SET
-				type_id = (SELECT p.type_id FROM panels p WHERE p.channel_id = tickets.source_channel_id ORDER BY p.id ASC LIMIT 1),
-				type_name = (SELECT t.name FROM panels p JOIN ticket_types t ON t.id = p.type_id
-					WHERE p.channel_id = tickets.source_channel_id ORDER BY p.id ASC LIMIT 1)
-			WHERE (type_id IS NULL OR type_id = 0) AND source_channel_id <> ''`).Error; err != nil {
+		// 先探测是否存在待回填的行：这条 UPDATE 每次启动都会执行，
+		// 正常运行时恒不命中，不该为此扫描整张 tickets 表。
+		var needsBackfill int64
+		if err := tx.Model(&Ticket{}).
+			Where("(type_id IS NULL OR type_id = 0) AND source_channel_id <> ''").
+			Limit(1).Count(&needsBackfill).Error; err != nil {
 			return err
+		}
+		if needsBackfill > 0 {
+			if err := tx.Exec(`
+				UPDATE tickets SET
+					type_id = (SELECT p.type_id FROM panels p WHERE p.channel_id = tickets.source_channel_id ORDER BY p.id ASC LIMIT 1),
+					type_name = (SELECT t.name FROM panels p JOIN ticket_types t ON t.id = p.type_id
+						WHERE p.channel_id = tickets.source_channel_id ORDER BY p.id ASC LIMIT 1)
+				WHERE (type_id IS NULL OR type_id = 0) AND source_channel_id <> ''`).Error; err != nil {
+				return err
+			}
 		}
 
 		if hasPanelRoles {
@@ -368,6 +390,51 @@ func truncateRunes(value string, limit int) string {
 		return string(runes[:limit])
 	}
 	return string(runes[:limit-1]) + "…"
+}
+
+// dropRedundantIndexes 删除不再被模型声明、也无人查询的索引。
+//
+// AutoMigrate 只会创建/更新索引，不会删除模型上已移除的旧索引，
+// 升级后的老库需要显式清理：
+//   - ticket_messages(msg_id)：没有任何查询按消息 ID 过滤（补全走主键）；
+//   - ticket_messages(user_id)：没有任何查询按消息作者过滤；
+//   - ticket_type_roles(type_id) 单列：联合唯一索引已覆盖其前缀。
+//
+// 消息表是插入最频繁的表，这些索引只带来写放大。
+func dropRedundantIndexes(db *gorm.DB) error {
+	for _, name := range []string{
+		"idx_ticket_messages_msg_id",
+		"idx_ticket_messages_user_id",
+		"idx_ticket_type_roles_type_id",
+	} {
+		if err := db.Exec("DROP INDEX IF EXISTS " + name).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dedupeTicketTypeRoles 在建 (type_id, role_id) 唯一索引之前清理历史重复行。
+//
+// 旧版 AddRole 为先查后建且无事务，并发绑定会在库里留下重复行；
+// AutoMigrate 创建唯一索引时会因这些行直接失败，必须先做去重。
+func dedupeTicketTypeRoles(db *gorm.DB) error {
+	exists, err := tableExists(db, "ticket_type_roles")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	res := db.Exec(`DELETE FROM ticket_type_roles WHERE id NOT IN (
+		SELECT MIN(id) FROM ticket_type_roles GROUP BY type_id, role_id)`)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		slog.Info("已清理重复的工单类型角色绑定", "removed", res.RowsAffected)
+	}
+	return nil
 }
 
 // migratePanelChannelIndex 去掉历史版本在 panels.channel_id 上的唯一索引。

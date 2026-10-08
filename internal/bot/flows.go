@@ -165,8 +165,15 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 		return
 	}
 
-	// 一人一单
-	if existing, err := b.deps.Store.Tickets.ActiveByUser(userID); err == nil && existing != nil {
+	// 一人一单。查询失败时不放行：这是该约束唯一的执行点（openLocks 只保证
+	// 同一用户串行，不保证唯一），静默继续会让用户重复开单。
+	existing, activeErr := b.deps.Store.Tickets.ActiveByUser(userID)
+	if activeErr != nil && !errors.Is(activeErr, store.ErrNotFound) {
+		b.deps.Logger.Error("检查用户未关闭工单失败", "user_id", userID, "err", activeErr)
+		b.sendEphemeral(ctx, panelChannelID, userID, "系统繁忙，请稍后重试")
+		return
+	}
+	if existing != nil {
 		b.sendEphemeral(ctx, panelChannelID, userID, fmt.Sprintf(
 			"你已有一个未关闭的工单：%s\n请在已有工单频道中继续沟通",
 			kook.MentionChannel(existing.ChannelID),
@@ -491,7 +498,7 @@ func (b *Bot) archiveMessage(ctx context.Context, event kook.Event) {
 	// 卡片消息的事件推送不带内容（用户上传的文件也被平台转成卡片消息下发），
 	// 需要异步调用 message/view 补全卡片 JSON 与媒体地址。
 	if event.Type == kook.EventTypeCard && event.MsgID != "" && strings.TrimSpace(event.Content) == "" {
-		go b.enrichCardMessage(t.No, message.ID, event.MsgID)
+		b.enqueueEnrich(t.No, message.ID, event.MsgID)
 	}
 }
 
@@ -549,12 +556,88 @@ func archivedMessage(event kook.Event, ticketNo string) *store.TicketMessage {
 	return message
 }
 
-// enrichCardMessage 异步补全卡片消息内容。
+// 卡片补全 worker 池的规模：并发拉取过多会挤占 KOOK 限流额度，
+// 队列满时直接跳过（归档记录里已有「[卡片消息]」兜底文案，不影响可读性）。
+const (
+	enrichQueueSize = 128
+	enrichWorkers   = 4
+)
+
+// enrichJob 是一次卡片内容补全请求。
+type enrichJob struct {
+	ticketNo  string
+	messageID uint
+	msgID     string
+}
+
+// startEnrichers 启动固定数量的卡片补全 worker。
+//
+// 用户上传的文件/图片都会变成卡片消息，每条都需要补全；
+// 若每条消息一个无界协程，刷屏时会有大量协程与 API 调用堆积
+// （最坏每条存活 30 秒以上）。
+func (b *Bot) startEnrichers(ctx context.Context) {
+	jobs := make(chan enrichJob, enrichQueueSize)
+	b.mu.Lock()
+	b.enrichJobs = jobs
+	b.mu.Unlock()
+	for i := 0; i < enrichWorkers; i++ {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
+					b.enrichCardMessage(ctx, job.ticketNo, job.messageID, job.msgID)
+					b.enrichMu.Lock()
+					delete(b.enriching, job.msgID)
+					b.enrichMu.Unlock()
+				}
+			}
+		}()
+	}
+}
+
+// enqueueEnrich 投递一次卡片补全。
+//
+// 同一平台消息 ID 进行中时不重复投递（事件重放或平台重复推送时会出现）；
+// 队列拥塞时直接跳过并记录调试日志。
+func (b *Bot) enqueueEnrich(ticketNo string, messageID uint, msgID string) {
+	b.mu.RLock()
+	jobs := b.enrichJobs
+	b.mu.RUnlock()
+	if jobs == nil {
+		return
+	}
+
+	b.enrichMu.Lock()
+	if _, busy := b.enriching[msgID]; busy {
+		b.enrichMu.Unlock()
+		return
+	}
+	b.enriching[msgID] = struct{}{}
+	b.enrichMu.Unlock()
+
+	select {
+	case jobs <- enrichJob{ticketNo: ticketNo, messageID: messageID, msgID: msgID}:
+	default:
+		b.enrichMu.Lock()
+		delete(b.enriching, msgID)
+		b.enrichMu.Unlock()
+		b.deps.Logger.Debug("卡片补全队列已满，跳过富内容拉取", "msg_id", msgID)
+	}
+}
+
+// enrichCardMessage 补全卡片消息内容。
 //
 // 平台下发的卡片消息事件 content 为空，需要再调 message/view 取卡片 JSON。
 // 事件到达时平台侧可能尚未落库，因此做几次短重试；失败只记录日志，
 // 记录里至少保留「[卡片消息]」兜底文案。
-func (b *Bot) enrichCardMessage(ticketNo string, messageID uint, msgID string) {
+//
+// ctx 是机器人连接的生命周期上下文：机器人停止后立即放弃剩余重试。
+func (b *Bot) enrichCardMessage(ctx context.Context, ticketNo string, messageID uint, msgID string) {
 	client := b.Client()
 	if client == nil {
 		return
@@ -563,12 +646,21 @@ func (b *Bot) enrichCardMessage(ticketNo string, messageID uint, msgID string) {
 	backoffs := []time.Duration{0, 800 * time.Millisecond, 2 * time.Second}
 	for attempt, wait := range backoffs {
 		if wait > 0 {
-			time.Sleep(wait)
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		detail, err := client.MessageView(ctx, msgID)
+		callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		detail, err := client.MessageView(callCtx, msgID)
 		cancel()
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			b.deps.Logger.Debug("拉取消息详情失败", "msg_id", msgID, "attempt", attempt+1, "err", err)
 			continue
 		}
@@ -685,13 +777,18 @@ func archivedType(eventType int) string {
 
 // archivedContent 生成入库内容：媒体消息记录为「[类型] 地址」。
 func archivedContent(event kook.Event) string {
-	label := map[int]string{
-		kook.EventTypeImage: "[图片] ",
-		kook.EventTypeVideo: "[视频] ",
-		kook.EventTypeFile:  "[文件] ",
-		kook.EventTypeAudio: "[语音] ",
+	var prefix string
+	switch event.Type {
+	case kook.EventTypeImage:
+		prefix = "[图片] "
+	case kook.EventTypeVideo:
+		prefix = "[视频] "
+	case kook.EventTypeFile:
+		prefix = "[文件] "
+	case kook.EventTypeAudio:
+		prefix = "[语音] "
 	}
-	if prefix, ok := label[event.Type]; ok {
+	if prefix != "" {
 		attachment, hasAttachment := eventAttachment(event)
 		if hasAttachment {
 			return prefix + attachment.URL

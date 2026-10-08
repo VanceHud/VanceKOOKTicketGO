@@ -126,17 +126,20 @@ func DisplayUser(id, name string) string {
 	return EscapeMentionText(id)
 }
 
+// mentionEscaper 是包级复用的转义器：每条归档消息与卡片文案都要经过它，
+// 每次调用重建 Replacer 会带来不必要的分配。
+var mentionEscaper = strings.NewReplacer(
+	"(met)", "( met )",
+	"(rol)", "( rol )",
+	"(chn)", "( chn )",
+)
+
 // EscapeMentionText 转义用户内容中的提及语法，避免开单人伪造 @全体成员。
 //
 // 说明：KMarkdown 的提及写法是 (met)…(met)，如果直接把用户输入拼进卡片，
 // 用户就能构造出任意提及（包括 @全体成员）。这里统一做字符替换。
 func EscapeMentionText(text string) string {
-	replacer := strings.NewReplacer(
-		"(met)", "( met )",
-		"(rol)", "( rol )",
-		"(chn)", "( chn )",
-	)
-	return replacer.Replace(text)
+	return mentionEscaper.Replace(text)
 }
 
 // NewCard 创建一张卡片。

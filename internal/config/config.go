@@ -9,10 +9,10 @@ package config
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -74,6 +74,10 @@ type Config struct {
 
 	SessionIdleTTL time.Duration
 	SessionMaxTTL  time.Duration
+
+	// AuditRetention 是审计日志的保留时长；为 0 表示永久保留。
+	// 审计写入覆盖登录失败、导出等高频操作，不清理会让数据库单调膨胀。
+	AuditRetention time.Duration
 
 	LoginMaxFails int
 	LoginWindow   time.Duration
@@ -146,6 +150,10 @@ func Load() (*Config, error) {
 	if c.LoginLockFor, err = envDurationUnit("LOGIN_LOCK_MINUTES", 15*time.Minute, time.Minute); err != nil {
 		return nil, err
 	}
+	// 0 表示永久保留审计日志（审计不可修改，保留期由运维按合规要求决定）。
+	if c.AuditRetention, err = envDurationUnit("AUDIT_RETENTION_DAYS", 180*24*time.Hour, 24*time.Hour); err != nil {
+		return nil, err
+	}
 
 	if c.AppSecret, c.SecretSource, err = loadSecret(c.DataDir); err != nil {
 		return nil, err
@@ -172,6 +180,26 @@ func (c *Config) validate() error {
 	}
 	if len(c.AppSecret) < 32 {
 		return fmt.Errorf("APP_SECRET 太短，至少需要 32 字节")
+	}
+	if err := c.validateTrustedProxies(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateTrustedProxies 校验可信代理解析结果。
+//
+// 非法条目必须让启动失败：auth 中间件会在运行时静默丢弃它，
+// 表现为“拿到的都是代理 IP”，限流与审计按代理 IP 计数——安全能力静默降级。
+func (c *Config) validateTrustedProxies() error {
+	for _, entry := range c.TrustedProxies {
+		if _, err := netip.ParsePrefix(entry); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(entry); err == nil {
+			continue
+		}
+		return fmt.Errorf("TRUSTED_PROXIES 条目 %q 既不是合法 IP 也不是 CIDR", entry)
 	}
 	return nil
 }
@@ -242,16 +270,6 @@ func (c *Config) SecureCookie(isHTTPS bool) bool {
 	default:
 		return isHTTPS
 	}
-}
-
-// ConstantTimeEqual 长度不等时同样保持时间无关的比较。
-func ConstantTimeEqual(a, b string) bool {
-	if len(a) != len(b) {
-		// 仍然执行一次比较，避免通过耗时区分长度。
-		subtle.ConstantTimeCompare([]byte(a), []byte(a))
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func env(key, def string) string {

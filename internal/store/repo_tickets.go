@@ -171,26 +171,14 @@ func (r *TicketsRepo) List(f TicketFilter) ([]Ticket, int64, error) {
 		q = q.Where("type_id = ?", *f.TypeID)
 	}
 	if term := strings.TrimSpace(f.Query); term != "" {
-		prefix := escapeLike(term) + "%"
-		contains := "%" + escapeLike(term) + "%"
-		// 关键词同时匹配编号前缀、用户昵称、用户 ID，以及聊天内容。
-		// 聊天内容用 EXISTS 子查询（表上有 ticket_no 索引），避免 JOIN 造成的行放大。
-		q = q.Where(
-			`no LIKE ? ESCAPE '\' OR user_name LIKE ? ESCAPE '\' OR user_id = ?`+
-				` OR EXISTS (SELECT 1 FROM ticket_messages m WHERE m.ticket_no = tickets.no AND m.content LIKE ? ESCAPE '\')`,
-			prefix, contains, term, contains,
-		)
+		condition, args := ticketSearch(term)
+		q = q.Where(condition, args...)
 	}
 	if f.From != nil {
 		q = q.Where("started_at >= ?", f.From.UTC())
 	}
 	if f.To != nil {
 		q = q.Where("started_at < ?", f.To.UTC())
-	}
-
-	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		return nil, 0, err
 	}
 
 	page := f.Page
@@ -203,12 +191,81 @@ func (r *TicketsRepo) List(f TicketFilter) ([]Ticket, int64, error) {
 	err := q.Order("started_at DESC, id DESC").
 		Offset((page - 1) * size).Limit(size).
 		Find(&items).Error
-	return items, total, err
+	if err != nil {
+		return nil, 0, err
+	}
+	// 第一页未满说明结果已全部返回，总数就是当前条数：
+	// 省掉一次同等昂贵的 COUNT 扫描（搜索条件含不可索引的模糊匹配时尤其明显）。
+	if page == 1 && len(items) < size {
+		return items, int64(len(items)), nil
+	}
+
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+// ticketSearch 返回关键词搜索的 WHERE 子句与参数。
+//
+// 形如 "TK-2601" 的编号查询走唯一索引的范围比较：SQLite 默认
+// case_sensitive_like=OFF，BINARY 索引不参与 LIKE 优化，而组合 OR 中
+// 昵称/消息内容是子串模糊匹配、无法索引，整体只能全表扫描。
+// 编号查询是使用频率最高的搜索，单独用范围比较可以完全避免扫描。
+// 其它关键词维持原有语义：编号前缀 ∪ 昵称包含 ∪ 用户 ID ∪ 消息内容。
+func ticketSearch(term string) (string, []any) {
+	if low, high, ok := ticketNumberPrefixRange(term); ok {
+		return "(no >= ? AND no < ?)", []any{low, high}
+	}
+	contains := "%" + escapeLike(term) + "%"
+	return `no LIKE ? ESCAPE '\' OR user_name LIKE ? ESCAPE '\' OR user_id = ?` +
+			` OR EXISTS (SELECT 1 FROM ticket_messages m WHERE m.ticket_no = tickets.no AND m.content LIKE ? ESCAPE '\')`,
+		[]any{escapeLike(term) + "%", contains, term, contains}
+}
+
+// ticketNumberPrefixRange 判断输入是否为工单编号前缀（"TK-" + 数字），
+// 是则返回可用于唯一索引的字典序区间 [low, high)。
+//
+// 只对 "TK-<数字>" 形态启用：这类输入几乎必然是编号查询。编号是生成的
+// ASCII 大写串，"TK-26" 与 "tk-26" 都规整为 "TK-26"，[P, P+DEL) 与
+// 大小写不敏感的前缀 LIKE 在此形态下等价。
+func ticketNumberPrefixRange(term string) (low, high string, ok bool) {
+	upper := strings.ToUpper(term)
+	if !strings.HasPrefix(upper, "TK-") {
+		return "", "", false
+	}
+	for i := 3; i < len(upper); i++ {
+		if upper[i] < '0' || upper[i] > '9' {
+			return "", "", false
+		}
+	}
+	return upper, upper + "\x7f", true
 }
 
 // escapeLike 转义 LIKE 通配符，避免用户输入的 % 与 _ 变成通配匹配。
 func escapeLike(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// OpenTimedOut 返回超过 cutoff 未活动的进行中工单，供超时锁定扫描使用。
+func (r *TicketsRepo) OpenTimedOut(cutoff time.Time, limit int) ([]Ticket, error) {
+	var items []Ticket
+	err := r.db.Where("status = ? AND updated_at < ?", TicketOpen, cutoff.UTC()).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&items).Error
+	return items, err
+}
+
+// PendingStale 返回滞留超过 cutoff 的 pending 工单（开单流程中断留下的占号记录）。
+func (r *TicketsRepo) PendingStale(cutoff time.Time, limit int) ([]Ticket, error) {
+	var items []Ticket
+	err := r.db.Where("status = ? AND updated_at < ?", TicketPending, cutoff.UTC()).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&items).Error
+	return items, err
 }
 
 // Messages 按时间顺序返回工单消息。
@@ -221,6 +278,33 @@ func (r *TicketsRepo) Messages(no string, limit, offset int) ([]TicketMessage, e
 		Order("created_at ASC, id ASC").
 		Limit(limit).Offset(offset).Find(&msgs).Error
 	return msgs, err
+}
+
+// MessagesTail 返回最新的 limit 条消息（仍按时间正序排列）。
+//
+// 工单详情默认应当展示“最近发生了什么”：按 offset 正序分页在消息超过
+// limit 时只能看到最早的一段，正在发生的对话反而不可见。
+func (r *TicketsRepo) MessagesTail(no string, limit int) ([]TicketMessage, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	var msgs []TicketMessage
+	if err := r.db.Where("ticket_no = ?", no).
+		Order("created_at DESC, id DESC").
+		Limit(limit).Find(&msgs).Error; err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}
+
+// CountMessages 统计某工单的消息总数（用于前端提示是否被截断）。
+func (r *TicketsRepo) CountMessages(no string) (int64, error) {
+	var total int64
+	err := r.db.Model(&TicketMessage{}).Where("ticket_no = ?", no).Count(&total).Error
+	return total, err
 }
 
 // MaxExportMessages 是导出聊天记录时的消息条数上限。
@@ -245,29 +329,38 @@ func (r *TicketsRepo) ExportMessages(no string) ([]TicketMessage, error) {
 // AddMessage 写入一条工单消息，并维护工单的消息数与首次响应时间。
 //
 // 首次响应时间定义：首条既非开单人、也非机器人发送的消息时间（即人工客服的第一次回复）。
+//
+// 实现上先 INSERT 再一条原子 UPDATE，不再先 SELECT 工单：归档是机器人最热的写路径
+// （每条群消息一条），读-改-写会让每条消息多一次查询往返。工单不存在时
+// UPDATE 影响 0 行，返回 ErrNotFound 并回滚整笔事务（消息不会变成孤儿行）。
 func (r *TicketsRepo) AddMessage(m *TicketMessage) error {
 	m.CreatedAt = m.CreatedAt.UTC()
 	if m.MsgType == "" {
 		m.MsgType = MsgTypeUnknown
 	}
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		var ticket Ticket
-		if err := tx.Where("no = ?", m.TicketNo).First(&ticket).Error; err != nil {
-			return mapNotFound(err)
-		}
 		if err := tx.Create(m).Error; err != nil {
 			return err
 		}
 
 		fields := map[string]any{
-			"message_count": ticket.MessageCount + 1,
+			"message_count": gorm.Expr("message_count + 1"),
 			"updated_at":    Now(),
 		}
-		if ticket.FirstReplyAt == nil && !m.IsBot && m.UserID != "" && m.UserID != ticket.UserID {
-			replyAt := m.CreatedAt
-			fields["first_reply_at"] = replyAt
+		if !m.IsBot && m.UserID != "" {
+			// 首响条件在 SQL 内判定：仅当尚未记录且发送者不是开单人时写入。
+			fields["first_reply_at"] = gorm.Expr(
+				"CASE WHEN first_reply_at IS NULL AND user_id <> ? THEN ? ELSE first_reply_at END",
+				m.UserID, m.CreatedAt)
 		}
-		return tx.Model(&Ticket{}).Where("no = ?", m.TicketNo).Updates(fields).Error
+		result := tx.Model(&Ticket{}).Where("no = ?", m.TicketNo).Updates(fields)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
 	})
 }
 

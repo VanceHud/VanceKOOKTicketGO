@@ -10,7 +10,7 @@ import (
 // AuditRepo 负责审计日志。
 //
 // 审计日志只追加：本包不提供任何删除单条记录的接口，
-// 仅保留按保留期清理的能力（由运维显式调用）。
+// 仅保留按保留期整体清理的能力（后台任务按 AUDIT_RETENTION_DAYS 调用）。
 type AuditRepo struct {
 	db *gorm.DB
 }
@@ -80,7 +80,9 @@ func (r *AuditRepo) Count() (int64, error) {
 	return n, err
 }
 
-// PurgeBefore 按保留期清理历史审计日志。仅供运维显式触发。
+// PurgeBefore 按保留期清理历史审计日志。
+//
+// 由后台维护任务按 AUDIT_RETENTION_DAYS 周期调用（保留期配置为 0 时不清理）。
 func (r *AuditRepo) PurgeBefore(before time.Time) (int64, error) {
 	res := r.db.Where("created_at < ?", before.UTC()).Delete(&AuditLog{})
 	return res.RowsAffected, res.Error

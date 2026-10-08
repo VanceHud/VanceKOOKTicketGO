@@ -71,7 +71,6 @@
     "open": "进行中",
     "locked": "已锁定",
     "closed": "已关闭",
-    "failed": "创建失败",
     "lockReason": {
       "manual": "人工锁定",
       "timeout": "超时自动锁定"
@@ -189,6 +188,8 @@
     "timeline": "聊天记录",
     "timelineEmpty": "该工单还没有聊天记录",
     "timelineHint": "记录由机器人在 KOOK 频道内实时归档，此处仅供查看",
+    "timelineTruncated": "仅显示最近 {{shown}} / {{total}} 条消息",
+    "loadEarlier": "加载更早的消息",
     "mediaImageFailed": "图片加载失败，点击打开原图",
     "mediaOpen": "打开原文件",
     "attachment": "附件",

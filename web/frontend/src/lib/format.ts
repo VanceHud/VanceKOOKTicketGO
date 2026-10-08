@@ -88,8 +88,6 @@ export function statusColorClass(status: TicketStatus): string {
       return "text-status-locked bg-status-locked/15 border-status-locked/30"
     case "closed":
       return "text-status-closed bg-status-closed/12 border-status-closed/20"
-    case "failed":
-      return "text-status-failed bg-status-failed/12 border-status-failed/25"
     case "pending":
     default:
       return "text-status-pending bg-status-pending/12 border-status-pending/25"

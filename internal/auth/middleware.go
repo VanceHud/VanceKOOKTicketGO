@@ -218,13 +218,16 @@ func remoteIP(r *http.Request) string {
 }
 
 // forwardedIP 从右向左跳过可信代理，返回第一个不可信地址。
+//
+// 优先使用 X-Forwarded-For 链；仅当它缺失时才采信 X-Real-Ip。
+// 若两者都取，把 X-Real-Ip 当成链尾，会让“代理透传客户端自带 X-Real-Ip”
+// 的配置下攻击者直接用该头覆盖真实来源 IP（限流与审计随之失真）。
 func forwardedIP(r *http.Request, nets []*net.IPNet) string {
-	chains := []string{}
+	var chains []string
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		chains = append(chains, strings.Split(xff, ",")...)
-	}
-	if real := r.Header.Get("X-Real-Ip"); real != "" {
-		chains = append(chains, real)
+		chains = strings.Split(xff, ",")
+	} else if real := r.Header.Get("X-Real-Ip"); real != "" {
+		chains = []string{real}
 	}
 	for i := len(chains) - 1; i >= 0; i-- {
 		candidate := strings.TrimSpace(chains[i])

@@ -54,7 +54,15 @@ export function getCsrfToken(): string | null {
 
 type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
 
-async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
+/**
+ * 单次请求的超时时间。
+ *
+ * 默认 30s：服务端卡住时请求不应永远 pending（按钮会一直转圈，
+ * React Query 的 retry 也不会触发）。导出等慢接口可通过 timeoutMs 覆盖。
+ */
+const DEFAULT_TIMEOUT_MS = 30_000
+
+async function request<T>(method: Method, path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" }
   if (body !== undefined) {
     headers["Content-Type"] = "application/json"
@@ -68,6 +76,7 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
     headers,
     credentials: "same-origin",
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
   })
 
   const text = await response.text()

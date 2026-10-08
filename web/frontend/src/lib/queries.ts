@@ -68,10 +68,27 @@ export function useTicket(no: string | undefined): UseQueryResult<Ticket> {
   })
 }
 
-export function useTicketMessages(no: string | undefined): UseQueryResult<ListResponse<TicketMessage>> {
+/**
+ * 工单详情默认加载最近的消息条数。
+ *
+ * 后端 tail=1 返回最新的一段；被截断时页面提供「加载更早的消息」按钮
+ * （增大 limit 重新查询，上限为后端的 2000 条）。
+ */
+export const DEFAULT_MESSAGE_LIMIT = 300
+const MAX_MESSAGE_LIMIT = 2000
+
+/** 下一档消息加载量（用于「加载更早的消息」）。 */
+export function nextMessageLimit(current: number): number {
+  return Math.min(current + DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT)
+}
+
+export function useTicketMessages(no: string | undefined, limit = DEFAULT_MESSAGE_LIMIT): UseQueryResult<ListResponse<TicketMessage>> {
   return useQuery({
-    queryKey: queryKeys.messages(no ?? ""),
-    queryFn: () => api.get<ListResponse<TicketMessage>>(`/tickets/${encodeURIComponent(no as string)}/messages?limit=1000`),
+    queryKey: [...queryKeys.messages(no ?? ""), limit],
+    queryFn: () =>
+      api.get<ListResponse<TicketMessage>>(
+        `/tickets/${encodeURIComponent(no as string)}/messages${buildQuery({ tail: 1, limit })}`,
+      ),
     enabled: Boolean(no),
   })
 }
