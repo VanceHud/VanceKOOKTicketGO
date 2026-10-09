@@ -168,17 +168,18 @@ func New(deps Deps) (*Bot, error) {
 
 // 网关事件的分片处理见 dispatch.go。
 
-// enqueueEvent 是网关的 OnEvent 回调：只做入队，绝不阻塞读取协程。
-func (b *Bot) enqueueEvent(ctx context.Context, event kook.Event) {
+// enqueueEvent 是网关的 OnEvent 回调：只做入队，绝不长时间阻塞读取协程。
+// 返回 false 表示拒收（处理队列拥塞），网关将不推进 sn，等待重连后重放。
+func (b *Bot) enqueueEvent(ctx context.Context, event kook.Event) bool {
 	b.mu.RLock()
 	dispatcher := b.events
 	b.mu.RUnlock()
 	if dispatcher == nil {
 		// 尚未初始化（理论上不会发生）：退化为同步处理，保证不丢事件。
 		b.handleEvent(ctx, event)
-		return
+		return true
 	}
-	dispatcher.enqueue(ctx, event)
+	return dispatcher.enqueue(ctx, event)
 }
 
 // Start 建立连接并开始处理事件。

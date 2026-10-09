@@ -25,6 +25,9 @@ const (
 	maxNoteLength   = 2000
 	maxMessageLimit = 2000
 	defaultMsgLimit = 500
+	// maxMessageOffset 是消息 offset 分页的上限：SQLite 的 OFFSET 逐行步进，
+	// 不设上限时一个超大 offset 就能让查询空转。
+	maxMessageOffset = 100000
 )
 
 // ticketActor 依据当前身份构造业务操作者（含审计所需的 IP 与请求 ID）。
@@ -159,6 +162,9 @@ func (s *Server) handleTicketMessages(c *gin.Context) {
 	if offset < 0 {
 		offset = 0
 	}
+	if offset > maxMessageOffset {
+		offset = maxMessageOffset
+	}
 	tail := c.Query("tail") == "1" || strings.EqualFold(c.Query("tail"), "true")
 
 	no := strings.TrimSpace(c.Param("no"))
@@ -175,10 +181,18 @@ func (s *Server) handleTicketMessages(c *gin.Context) {
 		s.failInternal(c, err, "ticket.messages")
 		return
 	}
-	total, err := s.Store.Tickets.CountMessages(no)
-	if err != nil {
-		s.failInternal(c, err, "ticket.messages.count")
-		return
+	// total 只在结果可能被截断时才统计：返回条数不足 limit 说明已到末尾，
+	// total 就是已有条数（offset 模式加上偏移），省掉一次 COUNT 索引扫描。
+	// 该接口在 SSE 事件驱动下会被反复重拉，COUNT 是热路径上的固定开销。
+	total := int64(len(msgs))
+	if !tail {
+		total += int64(offset)
+	}
+	if len(msgs) == limit {
+		if total, err = s.Store.Tickets.CountMessages(no); err != nil {
+			s.failInternal(c, err, "ticket.messages.count")
+			return
+		}
 	}
 	if msgs == nil {
 		msgs = []store.TicketMessage{}
@@ -207,10 +221,8 @@ type noteRequest struct {
 }
 
 // handleTicketAddNote 新增备注（对应原项目 /tkcm）。
+// 工单存在性由 service 内的查询统一判定（ErrNotFound → 404），handler 不再预查一次。
 func (s *Server) handleTicketAddNote(c *gin.Context) {
-	if _, ok := s.lookupTicket(c); !ok {
-		return
-	}
 	var req noteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "请求参数不合法")
@@ -239,10 +251,9 @@ type closeRequest struct {
 }
 
 // handleTicketClose 关闭工单。
+// 工单存在性与状态校验都在 service 内完成（ErrNotFound → 404、状态冲突 → 409），
+// handler 不再预查一次同一行。
 func (s *Server) handleTicketClose(c *gin.Context) {
-	if _, ok := s.lookupTicket(c); !ok {
-		return
-	}
 	var req closeRequest
 	// 空请求体（无 body）是有意允许的：此时按照“不带关闭说明”处理。
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -268,10 +279,8 @@ type lockRequest struct {
 }
 
 // handleTicketLock 手动锁定工单；只接受人工锁定原因，超时锁定由后台任务产生。
+// 存在性与状态校验由 service 完成，handler 不预查。
 func (s *Server) handleTicketLock(c *gin.Context) {
-	if _, ok := s.lookupTicket(c); !ok {
-		return
-	}
 	var req lockRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		s.fail(c, http.StatusBadRequest, "invalid_request", "请求参数不合法")
@@ -291,10 +300,8 @@ func (s *Server) handleTicketLock(c *gin.Context) {
 }
 
 // handleTicketReopen 重新激活已锁定的工单。
+// 存在性与状态校验由 service 完成，handler 不预查。
 func (s *Server) handleTicketReopen(c *gin.Context) {
-	if _, ok := s.lookupTicket(c); !ok {
-		return
-	}
 	updated, err := s.Tickets.Reopen(c.Request.Context(), strings.TrimSpace(c.Param("no")), s.ticketActor(c))
 	if err != nil {
 		s.failTicketError(c, err, "ticket.reopen")

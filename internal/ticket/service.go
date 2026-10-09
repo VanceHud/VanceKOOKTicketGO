@@ -280,12 +280,24 @@ func (s *Service) Close(ctx context.Context, no string, actor Actor, note string
 		return nil, err
 	}
 
-	updated, err := s.store.Tickets.ByNo(no)
-	if err != nil {
-		return nil, err
+	// 把已写入的字段同步到内存副本并直接返回，省掉一次回读 SELECT
+	// （message_count 等未参与本次写入的字段可能滞后于并发归档，属展示级差异）。
+	t.Status = store.TicketClosed
+	t.ClosedAt = &now
+	t.ClosedBy = actor.ID
+	t.ClosedByName = actor.Name
+	t.CloseNote = note
+	t.LockedAt = nil
+	t.LockReason = ""
+	t.UpdatedAt = now
+	if logMsgID != "" {
+		t.LogChannelMsgID = logMsgID
 	}
-	s.after(updated, actor, "ticket.close", fmt.Sprintf("关闭工单 %s", no))
-	return updated, nil
+	if userMsgID != "" {
+		t.LogUserMsgID = userMsgID
+	}
+	s.after(t, actor, "ticket.close", fmt.Sprintf("关闭工单 %s", no))
+	return t, nil
 }
 
 // Lock 锁定工单：开单人不可发言，工单仍可见。
@@ -334,12 +346,13 @@ func (s *Service) Lock(ctx context.Context, no string, actor Actor, reason strin
 		return nil, err
 	}
 
-	updated, err := s.store.Tickets.ByNo(no)
-	if err != nil {
-		return nil, err
-	}
-	s.after(updated, actor, "ticket.lock", fmt.Sprintf("锁定工单 %s（原因：%s）", no, reason))
-	return updated, nil
+	// 同步到内存副本直接返回，省掉一次回读 SELECT（见 Close 的注释）。
+	t.Status = store.TicketLocked
+	t.LockedAt = &now
+	t.LockReason = reason
+	t.UpdatedAt = now
+	s.after(t, actor, "ticket.lock", fmt.Sprintf("锁定工单 %s（原因：%s）", no, reason))
+	return t, nil
 }
 
 // Reopen 重新激活已锁定的工单。
@@ -377,12 +390,13 @@ func (s *Service) Reopen(ctx context.Context, no string, actor Actor) (*store.Ti
 		return nil, err
 	}
 
-	updated, err := s.store.Tickets.ByNo(no)
-	if err != nil {
-		return nil, err
-	}
-	s.after(updated, actor, "ticket.reopen", fmt.Sprintf("重新激活工单 %s", no))
-	return updated, nil
+	// 同步到内存副本直接返回，省掉一次回读 SELECT（见 Close 的注释）。
+	t.Status = store.TicketOpen
+	t.LockedAt = nil
+	t.LockReason = ""
+	t.UpdatedAt = store.Now()
+	s.after(t, actor, "ticket.reopen", fmt.Sprintf("重新激活工单 %s", no))
+	return t, nil
 }
 
 // AddNote 为工单添加备注。

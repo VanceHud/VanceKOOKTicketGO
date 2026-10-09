@@ -5,6 +5,8 @@
  * dangerouslySetInnerHTML 展示结果。
  */
 
+import { memo, useMemo } from "react"
+
 import { renderKMarkdown } from "@/lib/kmarkdown"
 import { cn } from "@/lib/utils"
 
@@ -26,7 +28,9 @@ const previewStyles = [
   "[&_pre_code]:bg-transparent [&_pre_code]:p-0",
 ].join(" ")
 
-export function KMarkdownPreview({
+// memo + useMemo：消息列表里每条文本消息都会渲染一次预览，
+// 父组件任意状态变化（备注输入等）不应触发全部消息重新解析 KMarkdown。
+export const KMarkdownPreview = memo(function KMarkdownPreview({
   source,
   emptyText,
   className,
@@ -35,7 +39,7 @@ export function KMarkdownPreview({
   emptyText: string
   className?: string
 }) {
-  const html = renderKMarkdown(source)
+  const html = useMemo(() => renderKMarkdown(source), [source])
 
   if (!html) {
     return <p className={cn("text-muted-foreground text-sm", className)}>{emptyText}</p>
@@ -48,4 +52,4 @@ export function KMarkdownPreview({
       dangerouslySetInnerHTML={{ __html: html }}
     />
   )
-}
+})

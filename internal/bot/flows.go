@@ -16,9 +16,21 @@ import (
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
 )
 
+// eventFlowTimeout 是单次事件处理的时长上限。
+//
+// 流程 ctx 继承自机器人生命周期（只在 Stop 时取消）：一次开单叠加限流排队
+// （单请求最多 3 次尝试 + 30s 限流惩罚）后可挂数分钟，期间该分片的 worker
+// 被占住、同频道后续事件全部排队。真实流程秒级完成，这里取很宽的上限，
+// 只兜底异常挂起；超时的开单会停在 pending 状态，由后台扫描回收。
+const eventFlowTimeout = 90 * time.Second
+
 // handleEvent 是网关事件的统一入口。
 func (b *Bot) handleEvent(ctx context.Context, event kook.Event) {
 	b.markEvent()
+
+	flowCtx, cancel := context.WithTimeout(ctx, eventFlowTimeout)
+	defer cancel()
+	ctx = flowCtx
 
 	// 单服务器白名单：丢弃来自其它服务器的频道消息事件。
 	if event.ChannelType == kook.ChannelTypeGroup && event.Extra.GuildID != "" {
@@ -541,11 +553,13 @@ func archivedMessage(event kook.Event, ticketNo string) *store.TicketMessage {
 		}
 	case store.MsgTypeCard:
 		// 事件偶尔会带上卡片 JSON（大多数情况下为空），能解析就直接落库。
+		// JSON 只解析一次：校验、摘要与附件提取共用结果
+		// （每条卡片消息原先要完整反序列化 2-3 次）。
 		if content := strings.TrimSpace(event.Content); content != "" {
-			if _, err := kook.ParseCards(content); err == nil {
+			if cards, err := kook.ParseCards(content); err == nil {
 				message.CardJSON = content
-				message.Content = cardContent(content)
-				if attachment, ok := cardPrimaryAttachment(content); ok {
+				message.Content = cardContentOf(cards)
+				if attachment, ok := primaryAttachment(kook.CardAttachmentsOf(cards)); ok {
 					message.MediaURL = attachment.URL
 					message.MediaName = attachment.Name
 					message.MediaType = mediaTypeName(attachment)
@@ -671,11 +685,17 @@ func (b *Bot) enrichCardMessage(ctx context.Context, ticketNo string, messageID 
 			return
 		}
 
-		patch := store.MessagePatch{CardJSON: cardJSON, Content: cardContent(cardJSON)}
-		if attachment, ok := cardPrimaryAttachment(cardJSON); ok {
-			patch.MediaURL = attachment.URL
-			patch.MediaName = attachment.Name
-			patch.MediaType = mediaTypeName(attachment)
+		patch := store.MessagePatch{CardJSON: cardJSON}
+		// JSON 只解析一次：摘要与附件提取共用结果（见 archivedMessage）。
+		if cards, err := kook.ParseCards(cardJSON); err == nil {
+			patch.Content = cardContentOf(cards)
+			if attachment, ok := primaryAttachment(kook.CardAttachmentsOf(cards)); ok {
+				patch.MediaURL = attachment.URL
+				patch.MediaName = attachment.Name
+				patch.MediaType = mediaTypeName(attachment)
+			}
+		} else {
+			patch.Content = "[卡片消息]"
 		}
 		changed, err := b.deps.Store.Tickets.UpdateMessageRich(messageID, patch)
 		if err != nil {
@@ -694,9 +714,9 @@ func (b *Bot) enrichCardMessage(ctx context.Context, ticketNo string, messageID 
 	}
 }
 
-// cardContent 生成卡片消息的入库文本：保留「[卡片消息]」前缀便于检索，并附上摘要。
-func cardContent(cardJSON string) string {
-	summary := kook.EscapeMentionText(kook.CardSummary(cardJSON))
+// cardContentOf 生成卡片消息的入库文本：保留「[卡片消息]」前缀便于检索，并附上摘要。
+func cardContentOf(cards []kook.Card) string {
+	summary := kook.EscapeMentionText(kook.CardSummaryOf(cards))
 	if strings.TrimSpace(summary) == "" {
 		return "[卡片消息]"
 	}
@@ -723,9 +743,8 @@ func eventAttachment(event kook.Event) (kook.Attachment, bool) {
 	return attachment, true
 }
 
-// cardPrimaryAttachment 返回卡片中最值得展示的媒体（优先文件/音视频，其次图片）。
-func cardPrimaryAttachment(cardJSON string) (kook.Attachment, bool) {
-	attachments := kook.CardAttachments(cardJSON)
+// primaryAttachment 返回卡片附件中最值得展示的媒体（优先文件/音视频，其次图片）。
+func primaryAttachment(attachments []kook.Attachment) (kook.Attachment, bool) {
 	if len(attachments) == 0 {
 		return kook.Attachment{}, false
 	}

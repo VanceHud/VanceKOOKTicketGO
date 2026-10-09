@@ -193,12 +193,20 @@ func actorName(c *gin.Context) string {
 	return "anonymous"
 }
 
+// maxPage 是分页页码上限。
+// SQLite 的 OFFSET 需要逐行步进，超大页码等于让查询空转扫描整张表，
+// 一个 ?page=100000000 的请求就是一次低成本 DoS。
+const maxPage = 10000
+
 // pageParams 解析分页参数并收敛到允许区间。
 func pageParams(c *gin.Context) (page, size int) {
 	page = atoiDefault(c.Query("page"), 1)
 	size = store.NormalizePageSize(atoiDefault(c.Query("pageSize"), store.DefaultPageSize))
 	if page < 1 {
 		page = 1
+	}
+	if page > maxPage {
+		page = maxPage
 	}
 	return page, size
 }

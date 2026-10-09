@@ -1,6 +1,6 @@
 /** 审计日志（仅管理员）：登录、配置变更与工单操作的时间线。 */
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Clock, ScrollText } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
@@ -56,30 +56,6 @@ export function AuditPage() {
   const [action, setAction] = useState("")
   const [actor, setActor] = useState("")
   const [target, setTarget] = useState("")
-  // 输入框本地值：与工单列表页一致做 300ms 防抖，
-  // 避免每敲一个字符就触发一次 COUNT + SELECT（两个过滤条件都不可索引）。
-  const [actorInput, setActorInput] = useState("")
-  const [targetInput, setTargetInput] = useState("")
-
-  useEffect(() => {
-    if (actorInput === actor) return
-    const timer = window.setTimeout(() => {
-      setActor(actorInput)
-      setPage(1)
-    }, 300)
-    return () => window.clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actorInput])
-
-  useEffect(() => {
-    if (targetInput === target) return
-    const timer = window.setTimeout(() => {
-      setTarget(targetInput)
-      setPage(1)
-    }, 300)
-    return () => window.clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetInput])
 
   const query = useAuditLogs({ page, pageSize: PAGE_SIZE, action, actor, target })
   const items = query.data?.items ?? []
@@ -117,23 +93,27 @@ export function AuditPage() {
 
           <Input
             placeholder={t("audit.filterActor")}
-            value={actorInput}
-            onChange={(event) => setActorInput(event.target.value)}
+            value={actor}
+            onChange={(event) => {
+              setActor(event.target.value)
+              setPage(1)
+            }}
           />
           <div className="flex gap-2">
             <Input
               placeholder={t("audit.filterTarget")}
-              value={targetInput}
-              onChange={(event) => setTargetInput(event.target.value)}
+              value={target}
+              onChange={(event) => {
+                setTarget(event.target.value)
+                setPage(1)
+              }}
             />
             <Button
               variant="outline"
               onClick={() => {
                 setAction("")
                 setActor("")
-                setActorInput("")
                 setTarget("")
-                setTargetInput("")
                 setPage(1)
               }}
             >

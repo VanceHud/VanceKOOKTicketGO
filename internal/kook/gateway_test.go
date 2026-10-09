@@ -73,7 +73,7 @@ func startGateway(t *testing.T, platform *kooktest.Server, store kook.SessionSto
 	options := kook.GatewayOptions{
 		Client:       client,
 		Logger:       gatewayTestLogger(),
-		OnEvent:      func(_ context.Context, event kook.Event) { events <- event },
+		OnEvent:      func(_ context.Context, event kook.Event) bool { events <- event; return true },
 		SessionStore: store,
 		// 测试里把间隔压到毫秒级：既能跑通心跳/pong，又不拖慢用例。
 		HeartbeatInterval: 50 * time.Millisecond,
