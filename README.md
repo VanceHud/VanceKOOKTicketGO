@@ -110,17 +110,26 @@ KOOK 工单（Ticket）机器人，带自托管 WebUI 与 SQLite 数据库，**�
 | 7 | TOTP 二步验证（数据库字段与登录态已预留） |
 | 8 | 客服指派/抢单、开单表单模板 |
 | 9 | 报表定时导出（CSV 邮件/Webhook 推送）、按客服的自定义工作量统计 |
-| 10 | 多服务器（多 guild）支持、账号解绑接口 |
+| 10 | 单实例内的多服务器（多 guild）数据模型、账号解绑接口（多服务器运维需求已可通过 `deploy.sh` 多实例部署满足，见下方一键部署） |
 
 > 🚀 **一键部署**（推荐）：
 >
 > ```bash
 > git clone https://github.com/VanceHud/VanceKOOKTicketGO.git kook-ticket && cd kook-ticket
-> ./deploy.sh up            # 自动生成 .env、构建镜像、启动、健康检查、打印初始密码
+> ./deploy.sh up            # 无实例时自动进入新增向导；构建镜像、启动、健康检查、打印初始密码
 > ```
 >
 > `./deploy.sh` 还提供 `upgrade`（备份 + 重建 + 健康检查）、`backup` / `restore`、
 > `reset-password`、`status` / `logs`、`doctor`（环境自检）与交互菜单（直接运行 `./deploy.sh`）。
+>
+> 🖥 **多服务器部署**：给多个 KOOK 服务器用，一个实例对应一个服务器（独立数据/端口/容器）：
+>
+> ```bash
+> ./deploy.sh add myguild    # 向导式新增实例（自动分配端口，Token 可留空稍后在 WebUI 填）
+> ./deploy.sh list           # 查看全部实例的端口与状态
+> ./deploy.sh upgrade        # 不带实例名 = 全部实例滚动升级
+> ```
+>
 > 手工部署、反向代理与排错请看下方教程。
 >
 > 📘 **部署教程：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**：
@@ -255,12 +264,12 @@ make dev-frontend    # Vite 开发服务器 :5173，自动代理 /api 到后端
 * 备份与恢复直接用脚本（备份内含数据库与密钥，恢复会校验密钥一致性）：
 
 ```bash
-./deploy.sh backup                 # 在线备份（有 sqlite3）或停服冷备，自动保留最近 10 份
-./deploy.sh restore                # 恢复最新备份（缺省），也可指定文件
-./deploy.sh restore backups/kook-ticket-20260105-120000.tar.gz
+./deploy.sh backup                 # 在线备份（有 sqlite3）或停服冷备，自动保留最近 10 份；不带实例名 = 全部
+./deploy.sh restore myguild        # 恢复该实例最新备份（缺省），也可指定文件
+./deploy.sh restore myguild backups/myguild/kook-ticket-myguild-20260105-120000.tar.gz
 ```
 
-* 备份内容为 `data/` + `deploy-env`（即 `.env`，内含 `APP_SECRET`）。
+* 备份内容为实例数据目录 + `deploy-env`（即该实例的 `.env`，内含 `APP_SECRET`）。
   **密钥必须与数据库一起保管**：只恢复数据库而没有密钥，数据库里加密的 KOOK Token 将无法解密。
 * 恢复时脚本只替换数据目录**里面的文件**，不会替换目录本身
   （Docker 的 bind mount 在容器创建时绑定目录 inode，替换目录会导致容器继续写旧数据）。
@@ -317,9 +326,10 @@ make dist       # 交叉编译发布包（linux/amd64、linux/arm64、darwin/arm
 运维常用命令：
 
 ```bash
-./deploy.sh doctor                           # 环境自检（Docker/端口/磁盘）
-./deploy.sh status | logs | backup | restore # 状态、日志、备份、恢复
-./deploy.sh reset-password admin             # 忘记密码（自动停服后重置再起服）
+./deploy.sh doctor                           # 环境自检（Docker/实例端口冲突/磁盘）
+./deploy.sh status | logs | backup | restore # 状态、日志、备份、恢复（不带实例名 = 全部实例）
+./deploy.sh reset-password myguild admin     # 忘记密码（自动停服后重置再起服）
+./deploy.sh add | list | remove              # 多实例管理（新增 / 列出 / 移除）
 
 # 二进制部署时直接调用程序内置命令
 ./kook-ticket -version

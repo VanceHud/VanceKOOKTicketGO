@@ -1,10 +1,16 @@
-# KOOK Ticket 单容器部署。
+# KOOK Ticket 单实例部署。
 #
 # 首次启动：
 #   1. cp .env.example .env 并按需填写（至少设置 APP_SECRET）
 #   2. docker compose up -d --build
 #   3. 若未设置 ADMIN_PASSWORD，初始密码会打印在日志中：
 #        docker compose logs -f kook-ticket | grep initial_password
+#
+# 多实例部署（一个实例 = 一个 KOOK 服务器）由 deploy.sh 管理，无需手改本文件：
+# 每个实例是一个独立的 compose 项目（-p kook-ticket-<名字>），
+# 用各自的 instances/<名字>/.env 提供插值变量
+# （PORT / BIND_ADDR / CONTAINER_NAME / DATA_DIR_HOST 等），共享同一镜像。
+# 手工单实例部署时这些变量取默认值（kook-ticket 容器 + ./data 卷）。
 #
 # 想让 WebUI 跑在公网，请在容器前加一层反向代理（Nginx/Caddy）并启用 HTTPS，
 # 同时把代理地址加入 TRUSTED_PROXIES，这样限流与审计才能拿到真实客户端 IP。
@@ -16,7 +22,8 @@ services:
       args:
         VERSION: ${VERSION:-1.0.0}
     image: kook-ticket:local
-    container_name: kook-ticket
+    # 多实例时由各实例 .env 注入（kook-ticket-<名字>）；手工部署默认 kook-ticket
+    container_name: ${CONTAINER_NAME:-kook-ticket}
     restart: unless-stopped
 
     # 以宿主机用户身份运行：Linux 上 bind mount 的 ./data 属主与容器内 uid 不一致时，
@@ -62,7 +69,8 @@ services:
 
     volumes:
       # 唯一需要持久化的目录：SQLite 数据库、WAL 文件与自动生成的密钥
-      - ./data:/app/data
+      # 多实例时由各实例 .env 注入（./instances/<名字>/data）；手工部署默认 ./data
+      - ${DATA_DIR_HOST:-./data}:/app/data
 
     # 加固：禁止提权、只读根文件系统（数据卷仍可写）
     security_opt:

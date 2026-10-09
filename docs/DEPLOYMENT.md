@@ -93,25 +93,35 @@
 
 ### 3.0 一键脚本（最省事）
 
-仓库根目录提供了 `deploy.sh`，覆盖“生成 .env → 构建 → 启动 → 备份 → 升级 → 重置密码”的完整流程：
+仓库根目录提供了 `deploy.sh`，覆盖“新增实例 → 构建 → 启动 → 备份 → 升级 → 重置密码”的完整流程，并支持**多实例部署**（一个实例 = 一个 KOOK 服务器，各自独立的 `.env` / 数据目录 / 端口 / 容器，共享同一镜像）：
 
 ```bash
 git clone <你的仓库地址> kook-ticket && cd kook-ticket
-./deploy.sh doctor          # 可选：环境自检（Docker、端口占用、磁盘、sqlite3）
-./deploy.sh up              # 自动生成 .env、构建镜像、启动、健康检查，并打印初始密码
+./deploy.sh doctor          # 可选：环境自检（Docker、实例端口冲突、磁盘、sqlite3）
+./deploy.sh up              # 无实例时自动进入新增向导（名称 default）；有实例则启动全部
+./deploy.sh add myguild     # 向导式新增第二个实例（自动分配端口，Token/Guild/密码可留空）
 ./deploy.sh                 # 不带参数 = 交互菜单
 ```
 
+实例的文件布局：配置在 `instances/<名字>/.env`，数据在 `instances/<名字>/data`，备份在 `backups/<名字>/`。
+
 | 命令 | 作用 |
 |---|---|
-| `init` | 只生成 `.env`（随机 `APP_SECRET`；`ADMIN_PASSWORD` 默认留空 → 程序生成并强制首登改密） |
-| `up` | 构建镜像并启动（首次会自动 init），支持 `--port` / `--bind` / `--tz` / `--dry-run` |
-| `upgrade` | 备份 → 可选 `git pull` → 重建镜像 → 重启 → 健康检查 → 打印版本变化 |
-| `backup` / `restore [文件]` | 备份（含 `.env` 里的密钥）与恢复；自动保留最近 10 份 |
-| `reset-password [用户名]` | 忘记密码时的救援（自动停服 → 一次性容器重置 → 起服） |
-| `status` / `logs` / `config` | 状态与访问地址 / 跟踪日志 / 查看配置（敏感值打码） |
-| `doctor` | 环境自检 |
-| `stop` / `down` / `restart` | 停止 / 删除容器 / 重启 |
+| `add <名字>` | 向导式新增实例：自动分配空闲端口，依次询问 KOOK Token / Guild ID / 管理员密码（均可留空稍后在 WebUI 填），完成后直接启动。也可用 `--token` / `--guild` / `--password` / `--port` 预填跳过询问 |
+| `init [名字]` | 兼容旧命令：等价于 `add`（缺省实例名 default） |
+| `list` | 列出全部实例（端口、容器状态、健康、版本、数据大小） |
+| `up [实例]` | 构建镜像并启动；不带实例名 = 全部实例。支持 `--port` / `--bind` / `--tz` / `--dry-run`（需配合实例名） |
+| `upgrade [实例]` | 备份 → 可选 `git pull` → 重建镜像 → 重启 → 健康检查；不带实例名 = 逐个滚动升级全部 |
+| `backup [实例]` / `restore <实例> [文件]` | 备份（含 `.env` 里的密钥）与恢复；自动保留最近 10 份 |
+| `reset-password <实例> [用户名]` | 忘记密码时的救援（自动停服 → 一次性容器重置 → 起服） |
+| `status [实例]` / `logs [实例]` / `config [实例]` | 全部实例汇总或单实例详情 / 跟踪日志（多实例时并行跟踪全部）/ 查看配置（敏感值打码） |
+| `remove <实例>` | 移除实例：容器删除、`.env` 改名为 `.env.removed`、数据保留；`--purge` 连数据与备份一起删 |
+| `doctor` | 环境自检（含实例间端口冲突检测） |
+| `stop` / `down` / `restart` | 停止 / 删除容器 / 重启（不带实例名 = 全部实例） |
+
+> **从旧版单实例部署升级**：首次运行任意命令时，根目录的 `.env` 与 `data/` 会自动迁移为 `instances/default`（数据不动，容器名沿用 `kook-ticket`），之后用 `./deploy.sh up default` 启动即可。
+>
+> **多实例对外访问**：每个实例一个宿主机端口（`list` 可查）。给外部用户访问时建议按子域名做反向代理（如 `ticket-a.example.com` → 127.0.0.1:9235）。不要把多个实例挂在同一域名的不同路径下——会话 Cookie 不区分路径，会互相覆盖登录态。
 
 脚本已经处理了几个容易踩的坑：
 
@@ -556,10 +566,10 @@ data/
 | 忘记管理员密码 | —— | 见 3.7 / 4.6 的 `-reset-password` |
 | 数据库自检失败/写入报错 | 磁盘满、文件权限被改、WAL 损坏 | 检查磁盘与 `data/` 权限（0700/0600）；从备份恢复 |
 | 容器启动即退出 | `.env` 校验失败（如 `APP_SECRET` 过短、`TICKET_TZ` 非法、`PORT` 非数字） | `docker compose logs` 里会给出明确原因 |
-| 容器反复重启，日志报 `unable to open database file` / 权限不足 | bind mount 的 `data/` 属主与容器运行身份不一致（Linux 常见） | 用 `./deploy.sh up`（会自动写入 `PUID/PGID`）；或 `sudo chown -R 10001:10001 data` |
-| `docker compose exec ... -reset-password` 报 `disk I/O error (522)` | 两个进程同时访问 bind mount 上的 WAL 库（Docker Desktop/virtiofs） | 用 `./deploy.sh reset-password`（会先停服再执行）；不要直接 exec |
-| 恢复后数据看起来没变 | 手工 `mv data` 换目录会保留旧的挂载 inode | 用 `./deploy.sh restore`（只替换目录内文件）；或手工删除 `data/ticket.db*` 后再解压覆盖 |
-| 备份恢复到新机器后 KOOK Token 失效 | 新机器的 `APP_SECRET` 与备份不同（Token 是加密存储的） | 备份内含 `.env`（`deploy-env`），从中取回 `APP_SECRET` 写入 `.env` 后重启 |
+| 容器反复重启，日志报 `unable to open database file` / 权限不足 | bind mount 的数据目录属主与容器运行身份不一致（Linux 常见） | 用 `./deploy.sh up <实例>`（会自动写入 `PUID/PGID`）；或 `sudo chown -R 10001:10001 instances/<实例>/data` |
+| `docker compose exec ... -reset-password` 报 `disk I/O error (522)` | 两个进程同时访问 bind mount 上的 WAL 库（Docker Desktop/virtiofs） | 用 `./deploy.sh reset-password <实例>`（会先停服再执行）；不要直接 exec |
+| 恢复后数据看起来没变 | 手工 `mv data` 换目录会保留旧的挂载 inode | 用 `./deploy.sh restore <实例>`（只替换目录内文件）；或手工删除 `instances/<实例>/data/ticket.db*` 后再解压覆盖 |
+| 备份恢复到新机器后 KOOK Token 失效 | 新机器的 `APP_SECRET` 与备份不同（Token 是加密存储的） | 备份内含 `.env`（`deploy-env`），从中取回 `APP_SECRET` 写入该实例的 `.env` 后重启 |
 
 ---
 

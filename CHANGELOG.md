@@ -7,6 +7,19 @@
 
 ### 新增
 
+- **deploy.sh 多实例部署**：一个实例 = 一个 KOOK 服务器（独立 `.env` / 数据目录 / 端口 / 容器，共享同一镜像）。
+  - `./deploy.sh add <名字>` 向导式新增实例：自动分配空闲端口，依次询问 KOOK Token / Guild ID / 管理员密码
+    （均可留空稍后在 WebUI 填写），完成后直接构建并启动；也可用 `--token` / `--guild` / `--password` / `--port` 预填跳过询问。
+  - `up` / `upgrade` / `backup` / `status` / `logs` / `restart` / `stop` / `down` 等命令全部按实例寻址，
+    不带实例名时作用于全部实例（如 `upgrade` 逐个滚动升级、`logs` 并行跟踪全部容器）。
+  - 新增 `list`（实例汇总表）与 `remove`（移除实例：容器删除、`.env` 改名 `.env.removed`、数据保留；`--purge` 连数据删除）。
+  - `restore` / `reset-password` 需要指定实例（单实例部署可省略）。
+  - 旧版单实例部署（根目录 `.env` + `data/`）首次运行任意命令时自动迁移为 `instances/default`：
+    先停旧容器再移文件（避免双写入），数据不动、容器名沿用 `kook-ticket`，旧平铺备份归入 `backups/default/`。
+  - `doctor` 新增实例间端口冲突检测；修复了旧脚本只在 `doctor` 中探测 Docker、导致 sudo 前缀在
+    `up`/`backup` 等命令中从不生效的问题。
+  - `docker-compose.yml` 的容器名与数据卷改为插值变量（`CONTAINER_NAME` / `DATA_DIR_HOST`），
+    手工单实例部署的默认行为不变。
 - **工单类型**：把「工单面板」升级为「工单类型 → 多个面板」。
   - 一个类型可对应多个面板（频道里的开单按钮卡片），类型负责分类名称、备注、启停与管理员角色；
     管理员角色从面板级上移到类型级，`/aar` 与 WebUI 均在类型上增删，类型下所有工单共享这套权限。

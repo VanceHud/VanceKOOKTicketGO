@@ -34,6 +34,8 @@ web/dist/*
 # ---------------------------------------------------------------------------
 /data/
 /backups/
+# 多实例部署：每个实例的 .env 与数据目录（deploy.sh add 生成）
+/instances/
 *.db
 *.db-wal
 *.db-shm
@@ -64,3 +66,5 @@ test-results/
 *.swp
 *.swo
 *~
+/.mimosa
+.zcodeignore
