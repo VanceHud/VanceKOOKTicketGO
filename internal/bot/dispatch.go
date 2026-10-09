@@ -23,8 +23,8 @@ import (
 // 未完成的工单会停在 pending/进行中状态，在 WebUI 里可见且可人工处理。
 // 这比“每条长流程都把心跳 PONG 堵住 → 断线重连 → 同一次点击被重放”要合算得多。
 //
-// 拥塞语义：队列满时 enqueue 会拒收并返回 false，网关收到 false 后不推进 sn，
-// 下一次 resume 时平台会重新投递这条事件（宁可重复、不可丢失）。
+// 拥塞语义：队列满时 enqueue 会拒收并返回 false，网关不推进 sn 并主动重连，
+// resume 时平台会重新投递这条事件，后续事件不会越过它执行。
 const (
 	eventShards    = 4
 	eventQueueSize = 128
@@ -123,7 +123,7 @@ func (d *eventDispatcher) shardFor(key string) int {
 //
 // 由网关读循环同步调用，等待上限 enqueueWait（远小于 PongTimeout），
 // 不会长时间阻塞读取协程；超时后拒收并返回 false，
-// 网关将不推进 sn，让下一次 resume 重放这条事件。
+// 网关将不推进 sn，并主动重连续传这条事件。
 func (d *eventDispatcher) enqueue(ctx context.Context, event kook.Event) bool {
 	key := d.keyFor(event)
 	queue := d.queues[d.shardFor(key)]
@@ -135,7 +135,7 @@ func (d *eventDispatcher) enqueue(ctx context.Context, event kook.Event) bool {
 	}
 
 	// 队列已满：同一个频道短时间内堆了大量事件（例如刷屏）。
-	// 短暂等待吸收突发，等不到就拒收（由网关冻结 sn 等待重放）。
+	// 短暂等待吸收突发，等不到就拒收（由网关保留 sn 并主动重连续传）。
 	d.log.Warn("事件处理队列已满，短暂等待", "type", event.Type, "key", key)
 	select {
 	case queue <- event:

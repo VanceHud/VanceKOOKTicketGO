@@ -41,7 +41,7 @@ type GatewayOptions struct {
 
 	// OnEvent 在收到事件被调用；实现应当快速返回，耗时操作请自行起协程。
 	// 返回 false 表示实现拒收了该事件（例如处理队列已满）：
-	// 网关此时不会推进 sn，断线续传时平台会重新投递这条事件。
+	// 网关此时不会推进 sn，并主动断开连接，通过续传重新投递这条事件。
 	OnEvent func(ctx context.Context, event Event) bool
 	// OnStatus 在连接状态变化时被调用。
 	OnStatus func(status GatewayStatus)
@@ -107,11 +107,8 @@ type Gateway struct {
 	connectedAt    atomic.Int64
 	eventsReceived atomic.Int64
 	eventsDropped  atomic.Int64
-	// snFrozen 在本条连接上发生过事件拒收后置位：此后不再推进 lastSN，
-	// 让下一次 resume 从拒收点之前重放（宁可重复、不可丢失）。
-	snFrozen  atomic.Bool
-	attempt   atomic.Int32
-	lastError atomic.Value // string
+	attempt        atomic.Int32
+	lastError      atomic.Value // string
 
 	// 以下三个字段只服务于「续传是否真的生效」的检测，每次连接前重置：
 	// resumeAck 表示已收到平台补发完成信号 resumeOK(s=6)；
@@ -283,12 +280,8 @@ func (g *Gateway) persistSession() {
 	}
 }
 
-// advanceSN 推进续传位点。发生过事件拒收（snFrozen）后不再推进：
-// 保持位点停在拒收点之前，下一次 resume 会重放这段事件（宁可重复、不可丢失）。
+// advanceSN 推进受理事件的续传位点；拒收时立即结束连接，不推进位点。
 func (g *Gateway) advanceSN(sn int64) {
-	if g.snFrozen.Load() {
-		return
-	}
 	g.mu.Lock()
 	if sn > g.lastSN {
 		g.lastSN = sn
@@ -500,7 +493,6 @@ func (g *Gateway) serve(ctx context.Context) error {
 	// 注意：这里不再把 attempt 清零。退避计数只在连接「稳定存活过」之后才复位
 	// （见 Run 里的 stableConnection 判定），否则「握手成功即被平台断开」的故障
 	// 模式下每轮退避都从 2s 重新起步，形成连接风暴。
-	g.snFrozen.Store(false)
 	g.lastError.Store("")
 	g.opts.Logger.Info("KOOK 网关已连接", "session_id", helloData.SessionID, "resume", sessionID != "")
 	g.emitStatus()
@@ -550,14 +542,13 @@ func (g *Gateway) serve(ctx context.Context) error {
 				accepted = g.opts.OnEvent(ctx, event)
 			}
 			if !accepted {
-				// 拒收（处理队列拥塞）：冻结续传位点，让下一次 resume 重放这条事件，
-				// 而不是把它标记为已处理后静默丢失。
+				// 拒收（处理队列拥塞）：保留会话与最后受理的 sn，立即断开并
+				// 由 Run 退避后续传。继续受理后续事件会破坏保序，而且健康
+				// 连接可能长期不重连，使被拒收的事件一直得不到补发。
 				g.eventsDropped.Add(1)
-				if !g.snFrozen.Swap(true) {
-					g.opts.Logger.Error("事件被处理队列拒收，已冻结续传位点等待重连后重放",
-						"sn", frame.SN, "type", event.Type)
-				}
-				continue
+				g.opts.Logger.Warn("事件被处理队列拒收，保留续传位点并主动重连",
+					"sn", frame.SN, "type", event.Type)
+				return fmt.Errorf("事件处理队列拒收 sn=%d，重连续传", frame.SN)
 			}
 			g.advanceSN(frame.SN)
 			// 受理后按去抖间隔落库：崩溃/重启时从最近一次写入的 sn 之后续传。

@@ -181,14 +181,14 @@ func (s *Server) handleTicketMessages(c *gin.Context) {
 		s.failInternal(c, err, "ticket.messages")
 		return
 	}
-	// total 只在结果可能被截断时才统计：返回条数不足 limit 说明已到末尾，
-	// total 就是已有条数（offset 模式加上偏移），省掉一次 COUNT 索引扫描。
+	// 返回非空且不足 limit 时可推算 total（offset 模式加上偏移），
+	// 但 offset > 0 的空页可能已经越过末尾，必须 COUNT 才能知道真实总数。
 	// 该接口在 SSE 事件驱动下会被反复重拉，COUNT 是热路径上的固定开销。
 	total := int64(len(msgs))
 	if !tail {
 		total += int64(offset)
 	}
-	if len(msgs) == limit {
+	if len(msgs) == limit || (!tail && offset > 0 && len(msgs) == 0) {
 		if total, err = s.Store.Tickets.CountMessages(no); err != nil {
 			s.failInternal(c, err, "ticket.messages.count")
 			return

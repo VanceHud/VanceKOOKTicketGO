@@ -3,10 +3,15 @@ package api
 import (
 	"compress/gzip"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
@@ -83,5 +88,71 @@ func TestSmallAPIResponsesAreNotGzipped(t *testing.T) {
 	}
 	if res.status != http.StatusOK {
 		t.Fatalf("请求失败: %d", res.status)
+	}
+}
+
+// TestGzipPreservesRecoveredErrorBody 验证外层 Recover 的错误体不会进入
+// 已经收尾的压缩缓冲；普通请求与支持 gzip 的请求均返回结构化错误。
+func TestGzipPreservesRecoveredErrorBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, encoding := range []string{"", "gzip"} {
+		t.Run(encoding, func(t *testing.T) {
+			router := gin.New()
+			router.Use(auth.RequestID(), auth.Recover(slog.New(slog.NewTextHandler(io.Discard, nil))))
+			router.GET("/probe", gzipResponses(), func(*gin.Context) { panic("测试异常") })
+			req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+			req.Header.Set("Accept-Encoding", encoding)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+			body := recorder.Body.String()
+			if recorder.Code != http.StatusInternalServerError || !strings.Contains(body, "internal_error") || !strings.Contains(body, recorder.Header().Get(auth.HeaderRequestID)) {
+				t.Fatalf("应返回带请求 ID 的结构化 500，实际 status=%d body=%q", recorder.Code, body)
+			}
+		})
+	}
+}
+
+// TestGzipNegotiatesQualityValues 验证 q=0 和显式声明的优先级，
+// 同时检查允许压缩时的响应仍可完整解压。
+func TestGzipNegotiatesQualityValues(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := []struct {
+		encoding string
+		gzip     bool
+	}{
+		{"", false},
+		{"br, deflate", false},
+		{"gzip", true},
+		{"GZIP; Q=0.5", true},
+		{"gzip;q=0.001", true},
+		{"gzip;q=0", false},
+		{"gzip;q=0.000", false},
+		{"*;q=0", false},
+		{"*;q=0.5", true},
+		{"gzip;q=0, *;q=1", false},
+		{"*;q=1, gzip;q=0", false},
+		{"gzip;q=1, *;q=0", true},
+		{"gzip;q=invalid", false},
+		{"gzip;q=2", false},
+		{"gzip;q=-1", false},
+		{"gzip;q=NaN", false},
+	}
+	payload := strings.Repeat("响应内容", 300)
+	for _, tc := range cases {
+		t.Run(tc.encoding, func(t *testing.T) {
+			router := gin.New()
+			router.GET("/probe", gzipResponses(), func(c *gin.Context) { c.String(http.StatusOK, payload) })
+			req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+			req.Header.Set("Accept-Encoding", tc.encoding)
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+			if got := recorder.Header().Get("Content-Encoding") == "gzip"; got != tc.gzip {
+				t.Fatalf("Accept-Encoding=%q 时 gzip=%v，期望 %v", tc.encoding, got, tc.gzip)
+			}
+			res := response{headers: recorder.Header(), raw: recorder.Body.String()}
+			if got := gzipBody(t, res); got != payload {
+				t.Fatal("编码协商后的响应内容不完整")
+			}
+		})
 	}
 }

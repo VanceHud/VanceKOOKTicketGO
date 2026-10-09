@@ -3,6 +3,7 @@ package api
 import (
 	"compress/gzip"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -33,23 +34,53 @@ func gzipResponses() gin.HandlerFunc {
 		}
 		w := &gzipResponseWriter{ResponseWriter: c.Writer}
 		c.Writer = w
-		defer w.finish()
+		defer func() {
+			// 外层 Recover 在 panic 展开后才写错误响应；此时必须已恢复底层
+			// writer，否则错误体会进入已经结束生命周期的压缩缓冲而丢失。
+			c.Writer = w.ResponseWriter
+			w.finish()
+		}()
 		c.Next()
 	}
 }
 
-// acceptsGzip 判断 Accept-Encoding 是否包含 gzip 或 *。
+// acceptsGzip 按质量值判断是否接受 gzip：q=0 表示拒绝，
+// 显式的 gzip 声明优先于通配符，不因 *;q=1 覆盖 gzip;q=0。
 func acceptsGzip(header string) bool {
+	var gzipFound bool
+	var gzipQuality, wildcardQuality float64
 	for _, part := range strings.Split(header, ",") {
-		encoding := strings.TrimSpace(part)
-		if i := strings.IndexByte(encoding, ';'); i >= 0 {
-			encoding = strings.TrimSpace(encoding[:i])
+		parts := strings.Split(part, ";")
+		encoding := strings.TrimSpace(parts[0])
+		isGzip := strings.EqualFold(encoding, "gzip")
+		if !isGzip && encoding != "*" {
+			continue
 		}
-		if strings.EqualFold(encoding, "gzip") || strings.EqualFold(encoding, "*") {
-			return true
+		quality := 1.0
+		for _, parameter := range parts[1:] {
+			key, value, ok := strings.Cut(parameter, "=")
+			if !strings.EqualFold(strings.TrimSpace(key), "q") {
+				continue
+			}
+			q, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+			if !ok || err != nil || !(q >= 0 && q <= 1) {
+				quality = 0
+			} else {
+				quality = q
+			}
+			break
+		}
+		if isGzip {
+			gzipFound = true
+			gzipQuality = quality
+		} else {
+			wildcardQuality = quality
 		}
 	}
-	return false
+	if gzipFound {
+		return gzipQuality > 0
+	}
+	return wildcardQuality > 0
 }
 
 // gzipResponseWriter 延迟决定是否压缩：先缓冲到 gzipMinLength，
