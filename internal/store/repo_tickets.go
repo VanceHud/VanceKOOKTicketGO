@@ -479,12 +479,6 @@ func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Ov
 		Trend:        make([]TrendPoint, 0, days),
 	}
 
-	if err := r.db.Model(&Ticket{}).Where("started_at >= ?", todayStart.UTC()).Count(&ov.OpenedToday).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&Ticket{}).Where("closed_at >= ?", todayStart.UTC()).Count(&ov.ClosedToday).Error; err != nil {
-		return nil, err
-	}
 	if err := r.db.Model(&Ticket{}).
 		Select("COUNT(DISTINCT user_id)").Scan(&ov.UniqueUsers).Error; err != nil {
 		return nil, err
@@ -510,21 +504,6 @@ func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Ov
 	ov.Closed = ov.StatusCounts[TicketClosed]
 	ov.Active = ov.StatusCounts[TicketPending] + ov.Open + ov.Locked
 
-	type statRow struct {
-		StartedAt    time.Time
-		ClosedAt     *time.Time
-		FirstReplyAt *time.Time
-	}
-	// 流式读取，避免把所有工单装入内存，也不能用固定条数上限静默漏算。
-	rows, err := r.db.Model(&Ticket{}).
-		Select("started_at, closed_at, first_reply_at").
-		Where("started_at >= ? OR closed_at >= ? OR first_reply_at >= ?", rangeStart.UTC(), rangeStart.UTC(), rangeStart.UTC()).
-		Rows()
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	type bucket struct{ opened, closed int64 }
 	buckets := make(map[string]*bucket, days)
 	order := make([]string, 0, days)
@@ -537,11 +516,9 @@ func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Ov
 	var replySum, resolutionSum float64
 	var replyCount, resolutionCount int64
 
-	for rows.Next() {
-		var row statRow
-		if err := r.db.ScanRows(rows, &row); err != nil {
-			return nil, err
-		}
+	// 流式读取（见 forEachActiveTicket：三列 OR 会全表扫描，拆成索引查询），
+	// 今日对比与趋势在同一轮循环里统计，不再单独发 COUNT。
+	err := r.forEachActiveTicket(rangeStart, func(row analyticsRow) {
 		if !row.StartedAt.IsZero() && !row.StartedAt.Before(rangeStart.UTC()) {
 			if b, ok := buckets[row.StartedAt.In(loc).Format("2006-01-02")]; ok {
 				b.opened++
@@ -562,8 +539,14 @@ func (r *TicketsRepo) Overview(now time.Time, loc *time.Location, days int) (*Ov
 				replyCount++
 			}
 		}
-	}
-	if err := rows.Err(); err != nil {
+		if !row.StartedAt.Before(todayStart.UTC()) {
+			ov.OpenedToday++
+		}
+		if row.ClosedAt != nil && !row.ClosedAt.Before(todayStart.UTC()) {
+			ov.ClosedToday++
+		}
+	})
+	if err != nil {
 		return nil, err
 	}
 

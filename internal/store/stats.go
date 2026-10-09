@@ -77,6 +77,58 @@ type Analytics struct {
 	ClosedYesterday int64 `json:"closedYesterday"`
 }
 
+// analyticsRow 是统计扫描的工单行（Analytics 与 Overview 共用）。
+type analyticsRow struct {
+	ID              uint
+	Status          string
+	SourceChannelID string
+	TypeName        string
+	ClosedByName    string
+	StartedAt       time.Time
+	ClosedAt        *time.Time
+	FirstReplyAt    *time.Time
+	MessageCount    int
+}
+
+// forEachActiveTicket 遍历「区间内有活动」的工单（started_at / closed_at /
+// first_reply_at 任一不早于 rangeStart），每条工单回调恰好一次。
+//
+// 不能把三个条件合并成 OR：SQLite 对 OR 不做索引合并，会退化为全表扫描
+// （实测 SCAN tickets，工单积累后是全系统最重的查询）。
+// 拆成三条独立查询后每条都走对应列上的单列索引，代价是同一条工单可能被
+// 多条查询命中，这里按主键去重；fn 内的各聚合本身都有区间下界判断，
+// 因此把 rangeStart 放宽到更早（见 Analytics 对昨日对比的处理）不会影响结果。
+func (r *TicketsRepo) forEachActiveTicket(rangeStart time.Time, fn func(row analyticsRow)) error {
+	const cols = "id, status, source_channel_id, type_name, closed_by_name, started_at, closed_at, first_reply_at, message_count"
+	seen := make(map[uint]struct{})
+	for _, cond := range []string{"started_at >= ?", "closed_at >= ?", "first_reply_at >= ?"} {
+		rows, err := r.db.Model(&Ticket{}).Select(cols).Where(cond, rangeStart.UTC()).Rows()
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var row analyticsRow
+			if err := r.db.ScanRows(rows, &row); err != nil {
+				rows.Close()
+				return err
+			}
+			if _, dup := seen[row.ID]; dup {
+				continue
+			}
+			seen[row.ID] = struct{}{}
+			fn(row)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Analytics 聚合细化统计。
 //
 // 与 Overview 的分工：
@@ -113,26 +165,6 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 		result.Hourly[hour].Hour = hour
 	}
 
-	type analyticsRow struct {
-		Status          string
-		SourceChannelID string
-		TypeName        string
-		ClosedByName    string
-		StartedAt       time.Time
-		ClosedAt        *time.Time
-		FirstReplyAt    *time.Time
-		MessageCount    int
-	}
-
-	rows, err := r.db.Model(&Ticket{}).
-		Select("status, source_channel_id, type_name, closed_by_name, started_at, closed_at, first_reply_at, message_count").
-		Where("started_at >= ? OR closed_at >= ? OR first_reply_at >= ?", rangeStart.UTC(), rangeStart.UTC(), rangeStart.UTC()).
-		Rows()
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var (
 		replyDurations      []float64
 		resolutionDurations []float64
@@ -145,11 +177,15 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 		messageSum          int64
 	)
 
-	for rows.Next() {
-		var row analyticsRow
-		if err := r.db.ScanRows(rows, &row); err != nil {
-			return nil, err
-		}
+	// days==1 时 rangeStart 即今日零点，昨日区间落在扫描范围之外；
+	// 把扫描下界放宽到昨日零点即可在循环里一并统计昨日对比
+	// （各聚合都有独立的区间判断，放宽不会改变口径）。
+	scanStart := rangeStart
+	if yesterdayStart.Before(scanStart) {
+		scanStart = yesterdayStart
+	}
+
+	err := r.forEachActiveTicket(scanStart, func(row analyticsRow) {
 		// 开单量、关闭率、来源、单均消息数按同一批区间内开单计算。
 		inCohort := !row.StartedAt.Before(rangeStart.UTC())
 		if inCohort {
@@ -187,12 +223,21 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 				replyDurations = append(replyDurations, reply)
 			}
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// 后续还有 SQL 查询，主动释放持有的连接。
-	if err := rows.Close(); err != nil {
+		// 今日 / 昨日对比与主扫描合并，省掉 4 条独立 COUNT。
+		if !row.StartedAt.Before(todayStart.UTC()) {
+			result.OpenedToday++
+		} else if !row.StartedAt.Before(yesterdayStart.UTC()) {
+			result.OpenedYesterday++
+		}
+		if row.ClosedAt != nil {
+			if !row.ClosedAt.Before(todayStart.UTC()) {
+				result.ClosedToday++
+			} else if !row.ClosedAt.Before(yesterdayStart.UTC()) {
+				result.ClosedYesterday++
+			}
+		}
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -254,24 +299,6 @@ func (r *TicketsRepo) Analytics(now time.Time, loc *time.Location, days int) (*A
 	if err := r.db.Model(&TicketMessage{}).
 		Where("created_at >= ?", rangeStart.UTC()).
 		Count(&result.ArchivedMessages).Error; err != nil {
-		return nil, err
-	}
-
-	// 今日 / 昨日对比
-	if err := r.db.Model(&Ticket{}).Where("started_at >= ?", todayStart.UTC()).Count(&result.OpenedToday).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&Ticket{}).
-		Where("started_at >= ? AND started_at < ?", yesterdayStart.UTC(), todayStart.UTC()).
-		Count(&result.OpenedYesterday).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&Ticket{}).Where("closed_at >= ?", todayStart.UTC()).Count(&result.ClosedToday).Error; err != nil {
-		return nil, err
-	}
-	if err := r.db.Model(&Ticket{}).
-		Where("closed_at >= ? AND closed_at < ?", yesterdayStart.UTC(), todayStart.UTC()).
-		Count(&result.ClosedYesterday).Error; err != nil {
 		return nil, err
 	}
 

@@ -345,6 +345,19 @@ func backgroundTasks(
 		}
 	}
 
+	// 查询统计增量刷新同样按天节流：消息归档持续改变数据分布，
+	// 统计过时后规划器会重新开始猜（选错索引）。
+	var lastOptimize time.Time
+	optimizeStats := func() {
+		if !lastOptimize.IsZero() && time.Since(lastOptimize) < 24*time.Hour {
+			return
+		}
+		lastOptimize = time.Now()
+		if err := st.Optimize(); err != nil {
+			logger.Warn("刷新查询统计失败", "err", err)
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -363,6 +376,7 @@ func backgroundTasks(
 			loginLimiter.GC()
 			codeLimiter.GC()
 			purgeAudit()
+			optimizeStats()
 		case <-timeoutScan.C:
 			locked, err := ticketService.ScanTimeout(ctx)
 			if err != nil {

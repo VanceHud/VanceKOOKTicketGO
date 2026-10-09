@@ -41,7 +41,7 @@ func NewRouter(d Deps) *gin.Engine {
 	// 健康检查不需要认证。
 	engine.GET("/healthz", server.handleHealth)
 
-	api := engine.Group("/api/v1", requestBodyLimit())
+	api := engine.Group("/api/v1", requestBodyLimit(), gzipResponses())
 
 	// —— 认证相关 ——
 	api.POST("/auth/login", server.handleLogin)
