@@ -187,8 +187,12 @@ func (r *TicketsRepo) List(f TicketFilter) ([]Ticket, int64, error) {
 	}
 	size := NormalizePageSize(f.PageSize)
 
+	// Order/Offset/Limit 必须作用在克隆出的语句上：链式方法会原地修改共享语句，
+	// 若直接挂在 q 上，后面的 Count 会带着 LIMIT/OFFSET 执行
+	// （GORM 的 Count 只清理 SELECT 与 ORDER BY），
+	// count(*) 单行结果被 OFFSET 跳过后 total 恒为 0——第二页起「共 0 条」的根因。
 	var items []Ticket
-	err := q.Order("started_at DESC, id DESC").
+	err := q.Session(&gorm.Session{}).Order("started_at DESC, id DESC").
 		Offset((page - 1) * size).Limit(size).
 		Find(&items).Error
 	if err != nil {
