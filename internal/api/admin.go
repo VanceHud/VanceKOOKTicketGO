@@ -17,6 +17,7 @@ import (
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/config"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/secure"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
 
@@ -154,7 +155,11 @@ func (s *Server) handleSettingsUpdate(c *gin.Context) {
 
 	changed := make([]string, 0, 8)
 	updatedNames := false
+	upserts := map[string]string{}
+	deletes := []string{}
 
+	// 先校验并收集全部变更，最后经 Settings.Apply 在单个事务内一次性提交：
+	// 逐键独立提交时任一步失败会留下半套配置，而保存成功会立刻触发机器人重连。
 	setPlain := func(key, label string, value *string, requireKookID bool) bool {
 		if value == nil {
 			return true
@@ -164,10 +169,7 @@ func (s *Server) handleSettingsUpdate(c *gin.Context) {
 			s.fail(c, http.StatusBadRequest, "invalid_request", fmt.Sprintf("%s 必须是 KOOK 的 ID（数字串）", label))
 			return false
 		}
-		if err := s.Store.Settings.Set(key, v); err != nil {
-			s.failInternal(c, err, "settings.update."+key)
-			return false
-		}
+		upserts[key] = v
 		changed = append(changed, key)
 		return true
 	}
@@ -178,9 +180,16 @@ func (s *Server) handleSettingsUpdate(c *gin.Context) {
 			s.fail(c, http.StatusBadRequest, "invalid_request", "KOOK token 长度不合法")
 			return
 		}
-		if err := s.Store.Settings.SetSecret(store.SettingKookToken, token, s.Config.AppSecret); err != nil {
-			s.failInternal(c, err, "settings.update.token")
-			return
+		if token == "" {
+			// 空明文表示清除已保存的 token。
+			deletes = append(deletes, store.SettingKookToken)
+		} else {
+			encrypted, err := secure.Encrypt(s.Config.AppSecret, token)
+			if err != nil {
+				s.failInternal(c, fmt.Errorf("加密 KOOK token 失败: %w", err), "settings.update.token")
+				return
+			}
+			upserts[store.SettingKookToken] = encrypted
 		}
 		// 审计只记录“是否更新”，绝不记录内容。
 		changed = append(changed, "kook_token")
@@ -218,10 +227,7 @@ func (s *Server) handleSettingsUpdate(c *gin.Context) {
 			s.fail(c, http.StatusBadRequest, "invalid_request", "名称长度不能超过 64 个字符")
 			return
 		}
-		if err := s.Store.Settings.Set(item.key, v); err != nil {
-			s.failInternal(c, err, "settings.update.name")
-			return
-		}
+		upserts[item.key] = v
 		*item.mark = true
 	}
 	if updatedNames {
@@ -234,11 +240,15 @@ func (s *Server) handleSettingsUpdate(c *gin.Context) {
 			s.fail(c, http.StatusBadRequest, "invalid_request", "超时小时数必须在 0–720 之间（0 表示不自动锁定）")
 			return
 		}
-		if err := s.Store.Settings.SetInt(store.SettingOutdateHours, hours); err != nil {
-			s.failInternal(c, err, "settings.update.outdate")
+		upserts[store.SettingOutdateHours] = strconv.Itoa(hours)
+		changed = append(changed, store.SettingOutdateHours)
+	}
+
+	if len(upserts) > 0 || len(deletes) > 0 {
+		if err := s.Store.Settings.Apply(store.SettingChange{Upserts: upserts, Deletes: deletes}); err != nil {
+			s.failInternal(c, err, "settings.update")
 			return
 		}
-		changed = append(changed, store.SettingOutdateHours)
 	}
 
 	s.audit(c, "settings.update", "settings", "更新配置项："+strings.Join(changed, ", "))

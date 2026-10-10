@@ -99,8 +99,13 @@ func (h *Handler) serveFile(c *gin.Context, name string, file fs.File, info fs.F
 	c.Header("X-Content-Type-Options", "nosniff")
 
 	// 带内容哈希的构建产物可以长期缓存；其余（index.html、favicon 等）不缓存。
+	// 可压缩资源一律带 Vary: Accept-Encoding：共享缓存若先存了未压缩变体，
+	// 之后会把它发给支持 gzip 的客户端（压缩分支在下方设置，这里覆盖其余路径）。
 	if strings.HasPrefix(name, "assets/") {
 		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		if compressibleType(contentType) {
+			c.Header("Vary", "Accept-Encoding")
+		}
 	} else {
 		c.Header("Cache-Control", "no-store")
 	}

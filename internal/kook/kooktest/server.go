@@ -70,6 +70,9 @@ type Server struct {
 	// SuppressResumeAck 为真时受理续传但不下发 resumeOK(s=6)，
 	// 用于模拟「续传实际没生效、事件仍留在旧会话」的平台异常。
 	SuppressResumeAck bool
+	// GatewayEvents 在 HELLO 后自动下发，sn 从 1 开始；续传时只补发
+	// 客户端位点之后的事件，用于验证拥塞后的恢复与顺序。为空时不自动推送。
+	GatewayEvents []kook.Event
 	// Delay 让每次 REST 调用慢下来，便于测试并发行为（默认 0）。
 	Delay time.Duration
 	// SuppressRateHeaders 为真时不返回限流响应头，
@@ -409,9 +412,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(endpoint, "direct-message") {
 			prefix = "dm"
 		}
+		id := fmt.Sprintf("%s-%d", prefix, atomic.AddInt64(&s.nextID, 1))
 		message := kook.Message{
-			ID:      fmt.Sprintf("%s-%d", prefix, atomic.AddInt64(&s.nextID, 1)),
-			MsgID:   fmt.Sprintf("%s-%d", prefix, s.nextID),
+			ID:      id,
+			MsgID:   id,
 			Type:    toInt(params["type"]),
 			Content: fmt.Sprint(params["content"]),
 		}
@@ -585,6 +589,22 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}})
 	if err := s.write(conn, websocket.TextMessage, hello); err != nil {
 		return
+	}
+
+	// 保留同一批事件，续传时从最后受理的 sn 之后补发。
+	resumeSN, _ := strconv.ParseInt(query.Get("sn"), 10, 64)
+	for i, event := range s.GatewayEvents {
+		sn := int64(i + 1)
+		if query.Get("resume") == "1" && sn <= resumeSN {
+			continue
+		}
+		payload, _ := json.Marshal(map[string]any{"s": kook.SignalEvent, "sn": sn, "d": event})
+		if err := s.write(conn, websocket.TextMessage, payload); err != nil {
+			return
+		}
+	}
+	if len(s.GatewayEvents) > 0 {
+		atomic.StoreInt64(&s.sn, int64(len(s.GatewayEvents)))
 	}
 
 	// 续传完成后平台会补发离线事件，并以 resumeOK(s=6) 结束。

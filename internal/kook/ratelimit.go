@@ -93,6 +93,9 @@ const (
 	maxWaitSlice = 2 * time.Second
 	// unknownBucketPoll 是“尚无额度信息”的桶被占用时的轮询间隔。
 	unknownBucketPoll = 50 * time.Millisecond
+	// fallbackResetDelay 是平台响应缺 Reset 头但额度已耗尽时的保守重置等待：
+	// 没有它，left 永远无法回补，该桶会陷入 50ms 轮询活锁。
+	fallbackResetDelay = time.Second
 )
 
 // rateInfo 是一次响应里解析出的限流信息。
@@ -129,7 +132,18 @@ type routeBucket struct {
 
 // refreshLocked 在窗口到期后按平台额度重新计数。
 func (b *routeBucket) refreshLocked(now time.Time) {
-	if !b.learned || b.limit <= 0 || b.resetAt.IsZero() || now.Before(b.resetAt) {
+	if !b.learned || b.limit <= 0 {
+		return
+	}
+	if b.resetAt.IsZero() {
+		// 从未学到 Reset 头（平台不回、代理剥离）：额度耗尽时按本地窗口兜底回补，
+		// 否则 left 永远等不到重置，该桶会陷入 50ms 轮询活锁。
+		if b.left < 1 {
+			b.left = b.limit
+		}
+		return
+	}
+	if now.Before(b.resetAt) {
 		return
 	}
 	b.left = b.limit
@@ -281,6 +295,13 @@ func (l *rateLimiter) observe(endpoint, usedKey string, info rateInfo) {
 	}
 	if info.reset > 0 {
 		target.resetAt = now.Add(info.reset)
+	} else if info.remaining >= 0 && info.remaining < 1 {
+		// 额度已耗尽但没有 Reset 头：给一个保守的本地重置时间，
+		// 不早于已知的重置时间（避免把平台明确给出的更长等待缩短）。
+		fallback := now.Add(fallbackResetDelay)
+		if target.resetAt.Before(fallback) {
+			target.resetAt = fallback
+		}
 	}
 }
 

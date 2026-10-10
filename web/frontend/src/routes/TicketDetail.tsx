@@ -5,7 +5,7 @@
  * 操作按钮仅对客服及以上角色展示，服务端仍会二次校验权限。
  */
 
-import { useEffect, useRef, useState } from "react"
+import { memo, useEffect, useRef, useState } from "react"
 import {
   ArrowLeft,
   Bot,
@@ -55,7 +55,7 @@ import {
   useTicketNotes,
 } from "@/lib/queries"
 import { toastError, toastSuccess } from "@/lib/toast"
-import type { Ticket } from "@/lib/types"
+import type { Ticket, TicketMessage } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 type DialogKind = "close" | "lock" | "reopen"
@@ -262,46 +262,9 @@ export function TicketDetailPage() {
                   </div>
                 ) : null}
                 <ul className="space-y-4 pb-4">
-                  {messagesQuery.data?.items.map((message) => {
-                    const isSystem = message.type === "system"
-                    return (
-                      <li key={message.id} className={cn("flex gap-3", isSystem && "opacity-80")}>
-                        <div
-                          className={cn(
-                            "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border",
-                            message.isBot ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
-                          )}
-                        >
-                          {message.isBot ? <Bot className="size-4" /> : <User className="size-4" />}
-                        </div>
-                        <div className="min-w-0 flex-1 space-y-1">
-                          <div className="flex flex-wrap items-center gap-2 text-xs">
-                            <span className="font-medium">{message.userName || message.userId}</span>
-                            {message.isBot ? (
-                              <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
-                                {t("ticket.fromBot")}
-                              </Badge>
-                            ) : null}
-                            {message.type !== "text" ? (
-                              <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
-                                {t(`msgType.${message.type}`, { defaultValue: message.type })}
-                              </Badge>
-                            ) : null}
-                            <span className="text-muted-foreground" title={formatDateTime(message.createdAt, i18n.language)}>
-                              {formatDateTime(message.createdAt, i18n.language)}
-                            </span>
-                          </div>
-                          {message.type === "card" ? (
-                            <KookCardView json={message.cardJson} fallback={message.content} />
-                          ) : (
-                            <div className="bg-muted/50 rounded-lg px-3 py-2 text-sm break-words">
-                              <MessageBody message={message} />
-                            </div>
-                          )}
-                        </div>
-                      </li>
-                    )
-                  })}
+                  {messagesQuery.data?.items.map((message) => (
+                    <MessageItem key={message.id} message={message} language={i18n.language} />
+                  ))}
                 </ul>
                 <div ref={timelineEndRef} />
               </ScrollArea>
@@ -446,3 +409,53 @@ function InfoRow({ label, value, mono }: { label: string; value: string; mono?: 
     </div>
   )
 }
+
+/**
+ * 单条消息的时间线行。
+ *
+ * memo：本页承载着几百条消息与备注输入框等本地状态，此前任何输入都会让
+ * 整条时间线重新渲染（卡片 JSON / KMarkdown 全部重新解析）；
+ * 抽成 memo 组件后，输入只重渲染输入框本身。language 作为 prop 传入，
+ * 切换语言时仍会整体刷新。
+ */
+const MessageItem = memo(function MessageItem({ message, language }: { message: TicketMessage; language: string }) {
+  const { t } = useTranslation()
+  const isSystem = message.type === "system"
+  return (
+    <li className={cn("flex gap-3", isSystem && "opacity-80")}>
+      <div
+        className={cn(
+          "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full border",
+          message.isBot ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+        )}
+      >
+        {message.isBot ? <Bot className="size-4" /> : <User className="size-4" />}
+      </div>
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-medium">{message.userName || message.userId}</span>
+          {message.isBot ? (
+            <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+              {t("ticket.fromBot")}
+            </Badge>
+          ) : null}
+          {message.type !== "text" ? (
+            <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
+              {t(`msgType.${message.type}`, { defaultValue: message.type })}
+            </Badge>
+          ) : null}
+          <span className="text-muted-foreground" title={formatDateTime(message.createdAt, language)}>
+            {formatDateTime(message.createdAt, language)}
+          </span>
+        </div>
+        {message.type === "card" ? (
+          <KookCardView json={message.cardJson} fallback={message.content} />
+        ) : (
+          <div className="bg-muted/50 rounded-lg px-3 py-2 text-sm break-words">
+            <MessageBody message={message} />
+          </div>
+        )}
+      </div>
+    </li>
+  )
+})

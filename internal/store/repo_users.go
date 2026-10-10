@@ -238,10 +238,20 @@ func (r *SessionsRepo) DeleteForUser(userID uint) error {
 // DeleteExpired 清理过期会话：绝对过期（expires_at）与空闲过期（idleCutoff 之前
 // 不再活跃）两种。空闲过期若不清理，只能等用户再次访问时惰性删除，
 // 会一直占用 MaxSessionsPerUser 的额度。
+//
+// 两个条件拆成两条 DELETE：OR 条件无法使用索引（SQLite 不做 OR 索引合并，
+// 实测全表扫描），拆开后 expires_at 走索引、last_seen_at 走复合索引前缀。
 func (r *SessionsRepo) DeleteExpired(now, idleCutoff time.Time) (int64, error) {
-	res := r.db.Where("expires_at < ? OR last_seen_at < ?", now.UTC(), idleCutoff.UTC()).
-		Delete(&Session{})
-	return res.RowsAffected, res.Error
+	res := r.db.Where("expires_at < ?", now.UTC()).Delete(&Session{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	removed := res.RowsAffected
+	res = r.db.Where("last_seen_at < ?", idleCutoff.UTC()).Delete(&Session{})
+	if res.Error != nil {
+		return removed, res.Error
+	}
+	return removed + res.RowsAffected, nil
 }
 
 // CountForUser 统计账号当前有效会话数，用于限制并发会话。
@@ -324,7 +334,17 @@ func (r *AuthCodesRepo) InvalidateActive(kookUserID, purpose string, at time.Tim
 }
 
 // DeleteExpired 清理过期或已使用的一次性码。
+// 两个条件拆成两条 DELETE：OR 条件无法使用索引（实测全表扫描），
+// 拆开后 expires_at 走索引。
 func (r *AuthCodesRepo) DeleteExpired(now time.Time) (int64, error) {
-	res := r.db.Where("expires_at < ? OR used_at IS NOT NULL", now.UTC()).Delete(&AuthCode{})
-	return res.RowsAffected, res.Error
+	res := r.db.Where("expires_at < ?", now.UTC()).Delete(&AuthCode{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	removed := res.RowsAffected
+	res = r.db.Where("used_at IS NOT NULL").Delete(&AuthCode{})
+	if res.Error != nil {
+		return removed, res.Error
+	}
+	return removed + res.RowsAffected, nil
 }

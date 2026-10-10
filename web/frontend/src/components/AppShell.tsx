@@ -5,13 +5,12 @@
  * SSE 连接在登录后建立，事件会自动刷新对应页面数据。
  */
 
-import { useState } from "react"
+import { Suspense, lazy, useEffect, useState } from "react"
 import { Radio, Search } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { Outlet } from "react-router"
 
 import { AppSidebar } from "@/components/AppSidebar"
-import { CommandPalette } from "@/components/CommandPalette"
 import { LocaleToggle } from "@/components/LocaleToggle"
 import { ThemeToggle } from "@/components/ThemeToggle"
 import { Badge } from "@/components/ui/badge"
@@ -23,11 +22,29 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useAuth } from "@/lib/auth"
 import { useRealtimeEvents } from "@/lib/sse"
 
+// 命令面板打开前不可见：连同 cmdk 一起懒加载，避免它常驻首屏 entry chunk。
+const CommandPalette = lazy(() =>
+  import("@/components/CommandPalette").then((module) => ({ default: module.CommandPalette })),
+)
+
 export function AppShell() {
   const { me } = useAuth()
   const { t } = useTranslation()
   const [paletteOpen, setPaletteOpen] = useState(false)
   const connected = useRealtimeEvents(Boolean(me))
+
+  // 全局快捷键：Cmd/Ctrl+K 打开命令面板。
+  // 注册在外壳而不是 CommandPalette：面板是懒加载的，首次打开前并不存在。
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault()
+        setPaletteOpen((open) => !open)
+      }
+    }
+    window.addEventListener("keydown", handler)
+    return () => window.removeEventListener("keydown", handler)
+  }, [])
 
   return (
     <SidebarProvider>
@@ -96,7 +113,11 @@ export function AppShell() {
         </div>
       </SidebarInset>
 
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      {paletteOpen ? (
+        <Suspense fallback={null}>
+          <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+        </Suspense>
+      ) : null}
       <Toaster position="top-right" richColors closeButton />
     </SidebarProvider>
   )

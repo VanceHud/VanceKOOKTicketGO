@@ -105,7 +105,7 @@ func sqliteDSN(path string, foreignKeys bool) string {
 		flag = "1"
 	}
 	return fmt.Sprintf(
-		"%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(%s)&_pragma=synchronous(NORMAL)&_txlock=immediate",
+		"%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(%s)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-16000)&_pragma=temp_store(memory)&_txlock=immediate",
 		path, flag)
 }
 
@@ -191,9 +191,39 @@ func (s *Store) Migrate() error {
 	if err := s.migrateTicketTypes(); err != nil {
 		return fmt.Errorf("数据库迁移失败: %w", err)
 	}
+	s.refreshQueryPlannerStats()
 	s.reportForeignKeyViolations()
 	hardenSQLiteFiles(s.path)
 	return nil
+}
+
+// refreshQueryPlannerStats 在迁移后刷新查询规划器统计信息。
+//
+// tickets 上有十余个索引，规划器在没有 sqlite_stat1 时按均匀分布估算行数，
+// 已知会在「状态过滤 + 时间排序」的列表查询里放着复合索引不用。
+// 无统计时做一次全量 ANALYZE（首次启动或升级后）；已有统计时执行轻量的
+// PRAGMA optimize，由 SQLite 自行判断哪些表需要增量分析。
+// 失败只告警不阻断：统计缺失只影响计划质量，不影响正确性。
+func (s *Store) refreshQueryPlannerStats() {
+	var statTable int64
+	if err := s.db.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'").Scan(&statTable).Error; err != nil {
+		slog.Warn("查询统计表失败（不影响启动）", "err", err)
+		return
+	}
+	stmt := "PRAGMA optimize"
+	if statTable == 0 {
+		stmt = "ANALYZE"
+	}
+	if err := s.db.Exec(stmt).Error; err != nil {
+		slog.Warn("刷新查询统计失败（不影响启动）", "stmt", stmt, "err", err)
+	}
+}
+
+// Optimize 让 SQLite 增量更新查询统计（PRAGMA optimize）。
+// 供后台维护任务周期调用：数据分布随消息归档持续变化，统计过时后
+// 规划器会重新开始猜。官方建议在空闲期调用，代价通常很小。
+func (s *Store) Optimize() error {
+	return s.db.Exec("PRAGMA optimize").Error
 }
 
 // reportForeignKeyViolations 迁移后自检外键一致性。
@@ -395,19 +425,34 @@ func truncateRunes(value string, limit int) string {
 // dropRedundantIndexes 删除不再被模型声明、也无人查询的索引。
 //
 // AutoMigrate 只会创建/更新索引，不会删除模型上已移除的旧索引，
-// 升级后的老库需要显式清理：
-//   - ticket_messages(msg_id)：没有任何查询按消息 ID 过滤（补全走主键）；
-//   - ticket_messages(user_id)：没有任何查询按消息作者过滤；
-//   - ticket_type_roles(type_id) 单列：联合唯一索引已覆盖其前缀。
-//
-// 消息表是插入最频繁的表，这些索引只带来写放大。
+// 升级后的老库需要显式清理（各条目的理由见下方注释）。
+// 消息表是插入最频繁的表，冗余索引只带来写放大。
 func dropRedundantIndexes(db *gorm.DB) error {
-	for _, name := range []string{
-		"idx_ticket_messages_msg_id",
-		"idx_ticket_messages_user_id",
-		"idx_ticket_type_roles_type_id",
-	} {
-		if err := db.Exec("DROP INDEX IF EXISTS " + name).Error; err != nil {
+	drops := []func() error{
+		// ticket_messages(msg_id)：没有任何查询按消息 ID 过滤（补全走主键）。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_ticket_messages_msg_id").Error },
+		// ticket_messages(user_id)：没有任何查询按消息作者过滤。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_ticket_messages_user_id").Error },
+		// ticket_messages(ticket_no)：复合索引 idx_ticket_messages_timeline 的前缀已覆盖。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_ticket_messages_ticket_no").Error },
+		// ticket_type_roles(type_id) 单列：联合唯一索引已覆盖其前缀。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_ticket_type_roles_type_id").Error },
+		// tickets(status) 单列：idx_tickets_status_started 与 idx_tickets_timeout 的前缀已覆盖。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_tickets_status").Error },
+		// tickets(type_id) 单列：idx_tickets_type_started 的前缀已覆盖。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_tickets_type_id").Error },
+		// ticket_notes 两个单列索引：复合索引 idx_ticket_notes_timeline 已覆盖等值 + 排序。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_ticket_notes_ticket_no").Error },
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_ticket_notes_created_at").Error },
+		// sessions(user_id) 单列：复合索引 idx_sessions_user_last_seen 已覆盖。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_sessions_user_id").Error },
+		// auth_codes(kook_user_id) 单列：复合索引 idx_auth_codes_user_purpose 已覆盖。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_auth_codes_kook_user_id").Error },
+		// emoji_grants(kook_user_id) 单列：复合索引 idx_emoji_grants_user_granted 已覆盖。
+		func() error { return db.Exec("DROP INDEX IF EXISTS idx_emoji_grants_kook_user_id").Error },
+	}
+	for _, drop := range drops {
+		if err := drop(); err != nil {
 			return err
 		}
 	}

@@ -94,12 +94,16 @@ type Ticket struct {
 	// PanelID 关联面板，面板删除后置空。
 	PanelID *uint `gorm:"index" json:"panelId,omitempty"`
 	// TypeID 关联工单类型，类型删除后置空。
-	TypeID *uint `gorm:"index" json:"typeId,omitempty"`
+	// 与 StartedAt 组成复合索引：列表页「按类型过滤 + 按开单时间倒序分页」
+	// 直接走索引反扫，不再产生临时排序。
+	TypeID *uint `gorm:"index:idx_tickets_type_started,priority:1" json:"typeId,omitempty"`
 	// TypeName 是开单时的类型名快照：类型改名或删除后，历史工单仍显示当时的分类。
 	TypeName string `gorm:"size:64" json:"typeName,omitempty"`
 
-	Status     string     `gorm:"index;index:idx_tickets_timeout,priority:1;size:16;not null" json:"status"`
-	StartedAt  time.Time  `gorm:"index" json:"startedAt"`
+	// Status 与 StartedAt 组成复合索引（列表页最常用的「状态过滤 + 时间排序」）；
+	// 单列 status 索引被该复合索引与 idx_tickets_timeout 的前缀同时覆盖，不再单独建。
+	Status     string     `gorm:"index:idx_tickets_status_started,priority:1;index:idx_tickets_timeout,priority:1;size:16;not null" json:"status"`
+	StartedAt  time.Time  `gorm:"index;index:idx_tickets_status_started,priority:2;index:idx_tickets_type_started,priority:2" json:"startedAt"`
 	LockedAt   *time.Time `json:"lockedAt,omitempty"`
 	LockReason string     `gorm:"size:16" json:"lockReason,omitempty"`
 	ClosedAt   *time.Time `gorm:"index" json:"closedAt,omitempty"`
@@ -129,8 +133,10 @@ func (t Ticket) IsActive() bool {
 
 // TicketMessage 是工单频道内的一条聊天记录。
 type TicketMessage struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	TicketNo string `gorm:"index;index:idx_ticket_messages_timeline,priority:1;size:20;not null" json:"ticketNo"`
+	ID uint `gorm:"primaryKey" json:"id"`
+	// TicketNo 只参与复合索引 idx_ticket_messages_timeline（前缀即单列等值查询），
+	// 不再单独建索引：消息表是插入最频繁的表，冗余索引是纯写放大。
+	TicketNo string `gorm:"index:idx_ticket_messages_timeline,priority:1;size:20;not null" json:"ticketNo"`
 	// MsgID 是 KOOK 消息 ID，可为空（系统生成的事件）。
 	// 不加索引：没有任何查询按它过滤（补全走主键），消息表是插入最频繁的表，
 	// 每个冗余索引都是纯写放大。
@@ -162,15 +168,16 @@ type TicketMessage struct {
 
 // TicketNote 是管理员对工单写下的备注（对应原项目的 /tkcm）。
 type TicketNote struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	TicketNo string `gorm:"index;size:20;not null" json:"ticketNo"`
+	ID uint `gorm:"primaryKey" json:"id"`
+	// TicketNo 与 CreatedAt 组成复合索引：详情页按工单取备注按时间正序展示。
+	TicketNo string `gorm:"index:idx_ticket_notes_timeline,priority:1;size:20;not null" json:"ticketNo"`
 
 	AuthorID   string `gorm:"size:64" json:"authorId"`
 	AuthorName string `gorm:"size:128" json:"authorName"`
 	// Source 标记备注来源：web 或 kook。
 	Source    string    `gorm:"size:8" json:"source"`
 	Content   string    `gorm:"type:text" json:"content"`
-	CreatedAt time.Time `gorm:"index" json:"createdAt"`
+	CreatedAt time.Time `gorm:"index:idx_ticket_notes_timeline,priority:2" json:"createdAt"`
 }
 
 // 工单类型相关常量。
@@ -274,12 +281,14 @@ type EmojiRule struct {
 
 // EmojiGrant 记录用户最近一次通过表情获得的角色，用于换色时撤销旧角色。
 type EmojiGrant struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	KookUserID string    `gorm:"index;size:64;not null" json:"kookUserId"`
+	ID uint `gorm:"primaryKey" json:"id"`
+	// KookUserID 与 GrantedAt 组成复合索引：查某用户最近一次发放（换表情撤销旧角色）
+	// 不再产生临时排序；GrantedAt 另有单列索引服务发放记录列表的时间倒序。
+	KookUserID string    `gorm:"index:idx_emoji_grants_user_granted,priority:1;size:64;not null" json:"kookUserId"`
 	RuleID     uint      `gorm:"index" json:"ruleId"`
 	EmojiID    string    `gorm:"size:64" json:"emojiId"`
 	RoleID     string    `gorm:"size:64" json:"roleId"`
-	GrantedAt  time.Time `json:"grantedAt"`
+	GrantedAt  time.Time `gorm:"index;index:idx_emoji_grants_user_granted,priority:2" json:"grantedAt"`
 }
 
 // WebUser 是 WebUI 账号。
@@ -322,13 +331,15 @@ type Session struct {
 	ID uint `gorm:"primaryKey" json:"-"`
 	// TokenHash 是会话 token 的 SHA-256，唯一索引用于按 token 查会话。
 	TokenHash string `gorm:"uniqueIndex;size:64;not null" json:"-"`
-	UserID    uint   `gorm:"index;not null" json:"-"`
+	// UserID 与 LastSeenAt 组成复合索引：登录时按「最近活跃」淘汰旧会话
+	// （ORDER BY last_seen_at）不再产生临时排序。
+	UserID uint `gorm:"index:idx_sessions_user_last_seen,priority:1;not null" json:"-"`
 
 	IP        string `gorm:"size:64" json:"-"`
 	UserAgent string `gorm:"size:256" json:"-"`
 
 	ExpiresAt  time.Time `gorm:"index;not null" json:"-"`
-	LastSeenAt time.Time `json:"-"`
+	LastSeenAt time.Time `gorm:"index:idx_sessions_user_last_seen,priority:2" json:"-"`
 	CreatedAt  time.Time `json:"-"`
 }
 
@@ -338,8 +349,10 @@ type AuthCode struct {
 	// CodeHash 是码的 SHA-256；明文只在 KOOK 私聊中出现，不落库。
 	CodeHash string `gorm:"uniqueIndex;size:64;not null" json:"-"`
 
-	Purpose    string `gorm:"size:16;not null" json:"purpose"`
-	KookUserID string `gorm:"index;size:64;not null" json:"kookUserId"`
+	Purpose string `gorm:"size:16;not null" json:"purpose"`
+	// KookUserID 与 Purpose、CreatedAt 组成复合索引：
+	// 签发前查最近一码 / 失效旧码（kook_user_id + purpose 等值 + created_at 排序）直接走索引。
+	KookUserID string `gorm:"index:idx_auth_codes_user_purpose,priority:1;size:64;not null" json:"kookUserId"`
 	// KookUserName 与 RoleHint 便于审计与首登提示。
 	KookUserName string `gorm:"size:128" json:"kookUserName"`
 	RoleHint     string `gorm:"size:16" json:"roleHint,omitempty"`
@@ -350,7 +363,7 @@ type AuthCode struct {
 	ExpiresAt time.Time  `gorm:"index;not null" json:"expiresAt"`
 	UsedAt    *time.Time `json:"usedAt,omitempty"`
 	UsedIP    string     `gorm:"size:64" json:"usedIp,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
+	CreatedAt time.Time  `gorm:"index:idx_auth_codes_user_purpose,priority:3" json:"createdAt"`
 }
 
 // IsUsable 判断一次性码是否仍可使用。

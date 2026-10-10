@@ -11,7 +11,7 @@
  * - 图片、音视频、文件只做展示与下载，按钮不绑定任何回调（点击不会触发机器人动作）。
  */
 
-import { useState } from "react"
+import { memo, useMemo, useState } from "react"
 import { Download, FileAudio, FileText, FileVideo, ImageOff, Timer } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
@@ -279,8 +279,10 @@ function CardModuleView({ module }: { module: KookModule }) {
  *
  * cards 为空（旧记录或补全失败）时退回纯文本展示，保证历史记录仍可读。
  */
-export function KookCardView({ json, fallback }: { json?: string; fallback: string }) {
-  const cards = parseCards(json)
+// memo + useMemo：卡片 JSON 解析成本随消息数线性放大，
+// 父组件无关状态变化（备注输入、弹窗开关）不应触发整条时间线重新解析。
+export const KookCardView = memo(function KookCardView({ json, fallback }: { json?: string; fallback: string }) {
+  const cards = useMemo(() => parseCards(json), [json])
 
   if (cards.length === 0) {
     return <p className="text-sm break-words whitespace-pre-wrap">{fallback}</p>
@@ -301,4 +303,4 @@ export function KookCardView({ json, fallback }: { json?: string; fallback: stri
       ))}
     </div>
   )
-}
+})

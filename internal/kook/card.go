@@ -269,11 +269,17 @@ func ParseCards(content string) ([]Card, error) {
 //
 // 用途：聊天记录检索、导出与不支持卡片渲染时的兜底展示。
 // 无法解析或没有文本时返回空串，由调用方决定兜底文案。
+// 已解析过卡片的调用方请用 CardSummaryOf，避免重复反序列化。
 func CardSummary(content string) string {
 	cards, err := ParseCards(content)
 	if err != nil {
 		return ""
 	}
+	return CardSummaryOf(cards)
+}
+
+// CardSummaryOf 从已解析的卡片中提取可读文本摘要。
+func CardSummaryOf(cards []Card) string {
 	var lines []string
 	for _, card := range cards {
 		for _, module := range card.Modules {
@@ -289,11 +295,17 @@ func CardSummary(content string) string {
 //
 // 平台已把文件消息转为卡片消息下发，事件的 content 为空，
 // 只有解析卡片才能拿到可下载的地址与文件名。
+// 已解析过卡片的调用方请用 CardAttachmentsOf，避免重复反序列化。
 func CardAttachments(content string) []Attachment {
 	cards, err := ParseCards(content)
 	if err != nil {
 		return nil
 	}
+	return CardAttachmentsOf(cards)
+}
+
+// CardAttachmentsOf 从已解析的卡片中提取媒体资源。
+func CardAttachmentsOf(cards []Card) []Attachment {
 	var out []Attachment
 	for _, card := range cards {
 		for _, module := range card.Modules {

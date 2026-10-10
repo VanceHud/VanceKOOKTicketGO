@@ -27,6 +27,9 @@ type GatewayStatus struct {
 	LastError      string     `json:"lastError,omitempty"`
 	ConnectedAt    *time.Time `json:"connectedAt,omitempty"`
 	EventsReceived int64      `json:"eventsReceived"`
+	// EventsDropped 是因处理队列拥塞而被拒收的事件数。
+	// 拒收的事件不会推进 sn，断线续传时平台会重新投递（可能产生少量重复）。
+	EventsDropped int64 `json:"eventsDropped"`
 }
 
 // GatewayOptions 是网关构造参数。
@@ -36,8 +39,10 @@ type GatewayOptions struct {
 	Compress bool
 	Logger   *slog.Logger
 
-	// OnEvent 在收到事件时被调用；实现应当快速返回，耗时操作请自行起协程。
-	OnEvent func(ctx context.Context, event Event)
+	// OnEvent 在收到事件被调用；实现应当快速返回，耗时操作请自行起协程。
+	// 返回 false 表示实现拒收了该事件（例如处理队列已满）：
+	// 网关此时不会推进 sn，并主动断开连接，通过续传重新投递这条事件。
+	OnEvent func(ctx context.Context, event Event) bool
 	// OnStatus 在连接状态变化时被调用。
 	OnStatus func(status GatewayStatus)
 
@@ -68,9 +73,10 @@ type GatewayOptions struct {
 
 // SessionStore 持久化网关会话，用于跨进程重启（升级、重建容器）恢复会话。
 //
-// 网关在 HELLO 之后、以及每次 OnEvent 回调返回后写入 sn；续传时平台从该 sn
+// 网关在 HELLO 之后、以及每次 OnEvent 回调受理事件后写入 sn；续传时平台从该 sn
 // 之后补发事件。注意：若 OnEvent 只做入队（异步处理，见 bot 包的事件分发），
-// 崩溃时队列里尚未处理的事件不会被平台重新投递，这个取舍由调用方决定。
+// 崩溃时队列里尚未处理的事件不会被平台重新投递，这个取舍由调用方决定；
+// 但 OnEvent 返回 false（拒收）的事件不会推进 sn，重连后会被平台重新投递。
 type SessionStore interface {
 	LoadGatewaySession() (sessionID string, sn int64, err error)
 	// SaveGatewaySession 写入会话；sessionID 为空表示清空（会话已失效）。
@@ -100,6 +106,7 @@ type Gateway struct {
 
 	connectedAt    atomic.Int64
 	eventsReceived atomic.Int64
+	eventsDropped  atomic.Int64
 	attempt        atomic.Int32
 	lastError      atomic.Value // string
 
@@ -174,6 +181,7 @@ func (g *Gateway) Status() GatewayStatus {
 		LastSN:         sn,
 		Attempt:        int(g.attempt.Load()),
 		EventsReceived: g.eventsReceived.Load(),
+		EventsDropped:  g.eventsDropped.Load(),
 	}
 	if raw := g.lastError.Load(); raw != nil {
 		status.LastError, _ = raw.(string)
@@ -199,6 +207,12 @@ func (g *Gateway) Run(ctx context.Context) error {
 			// 主动停止：关闭 socket 引发的错误不属于故障，不写入 LastError
 			g.setDisconnected("客户端已停止")
 			return ctx.Err()
+		}
+		// 稳定存活过一段时间的连接断开视为新故障：退避从头计。
+		// 短命连接（握手成功即被平台断开、续传被拒等）不清零，让退避持续增长，
+		// 避免 2s 一次的连接风暴。
+		if ts := g.connectedAt.Load(); ts > 0 && time.Since(time.Unix(0, ts)) >= stableConnection {
+			g.attempt.Store(0)
 		}
 		g.setDisconnected(errorText(err))
 
@@ -234,6 +248,11 @@ func (g *Gateway) backoff() time.Duration {
 	return d
 }
 
+// stableConnection 是连接被视为「稳定存活」的时长阈值：
+// 存活超过该时长的连接断开时，重连退避从头计（2s）；
+// 更短命的连接断开时退避继续指数增长，防止快速掉线循环演变成连接风暴。
+const stableConnection = 60 * time.Second
+
 // SessionPersistInterval 是事件驱动落库的最小间隔。
 //
 // 每条事件都同步落库会把读循环拖慢（SQLite 单写者，且必须及时读取 PONG 帧，
@@ -259,6 +278,15 @@ func (g *Gateway) persistSession() {
 	if err := g.opts.SessionStore.SaveGatewaySession(sessionID, sn); err != nil {
 		g.opts.Logger.Warn("持久化网关会话失败", "session_id", sessionID, "sn", sn, "err", err)
 	}
+}
+
+// advanceSN 推进受理事件的续传位点；拒收时立即结束连接，不推进位点。
+func (g *Gateway) advanceSN(sn int64) {
+	g.mu.Lock()
+	if sn > g.lastSN {
+		g.lastSN = sn
+	}
+	g.mu.Unlock()
 }
 
 // persistSessionSoon 按 SessionPersistInterval 去抖地落库，供事件分支调用。
@@ -415,7 +443,8 @@ func (g *Gateway) serve(ctx context.Context) error {
 	// 先读取 HELLO，确认握手成功并拿到 session_id。
 	// 注意：带失效会话续传时，平台会直接下发 reconnect(s=5) 而不是
 	// 带错误码的 HELLO，必须在这里识别并丢弃旧会话（见 readHello）。
-	hello, err := g.readHello(conn)
+	reader := newGatewayReader(conn)
+	hello, err := g.readHello(reader)
 	if err != nil {
 		return err
 	}
@@ -461,7 +490,9 @@ func (g *Gateway) serve(ctx context.Context) error {
 	g.drainPongs()
 
 	g.connectedAt.Store(time.Now().UnixNano())
-	g.attempt.Store(0)
+	// 注意：这里不再把 attempt 清零。退避计数只在连接「稳定存活过」之后才复位
+	// （见 Run 里的 stableConnection 判定），否则「握手成功即被平台断开」的故障
+	// 模式下每轮退避都从 2s 重新起步，形成连接风暴。
 	g.lastError.Store("")
 	g.opts.Logger.Info("KOOK 网关已连接", "session_id", helloData.SessionID, "resume", sessionID != "")
 	g.emitStatus()
@@ -480,7 +511,7 @@ func (g *Gateway) serve(ctx context.Context) error {
 	}
 
 	for {
-		frame, err := g.readFrame(conn)
+		frame, err := reader.readFrame()
 		if err != nil {
 			if g.resumeSilent.Load() {
 				g.opts.Logger.Warn("续传会话长时间没有任何下行数据，改用全新会话重连",
@@ -493,25 +524,34 @@ func (g *Gateway) serve(ctx context.Context) error {
 		switch frame.Signal {
 		case SignalEvent:
 			g.lastEventAt.Store(time.Now().UnixNano())
-			g.mu.Lock()
-			if frame.SN > g.lastSN {
-				g.lastSN = frame.SN
-			}
-			g.mu.Unlock()
 
 			if len(frame.Data) == 0 {
+				g.advanceSN(frame.SN)
 				continue
 			}
 			var event Event
 			if err := json.Unmarshal(frame.Data, &event); err != nil {
 				g.opts.Logger.Warn("解析事件失败", "err", err)
+				// 无法解析的事件无法处理，但 sn 仍要推进，否则会卡住续传位点。
+				g.advanceSN(frame.SN)
 				continue
 			}
 			g.eventsReceived.Add(1)
+			accepted := true
 			if g.opts.OnEvent != nil {
-				g.opts.OnEvent(ctx, event)
+				accepted = g.opts.OnEvent(ctx, event)
 			}
-			// 回调返回后按去抖间隔落库：崩溃/重启时从最近一次写入的 sn 之后续传。
+			if !accepted {
+				// 拒收（处理队列拥塞）：保留会话与最后受理的 sn，立即断开并
+				// 由 Run 退避后续传。继续受理后续事件会破坏保序，而且健康
+				// 连接可能长期不重连，使被拒收的事件一直得不到补发。
+				g.eventsDropped.Add(1)
+				g.opts.Logger.Warn("事件被处理队列拒收，保留续传位点并主动重连",
+					"sn", frame.SN, "type", event.Type)
+				return fmt.Errorf("事件处理队列拒收 sn=%d，重连续传", frame.SN)
+			}
+			g.advanceSN(frame.SN)
+			// 受理后按去抖间隔落库：崩溃/重启时从最近一次写入的 sn 之后续传。
 			// （OnEvent 若只是入队异步处理，见 SessionStore 的说明。）
 			g.persistSessionSoon()
 
@@ -556,9 +596,9 @@ func (g *Gateway) serve(ctx context.Context) error {
 // 因此这里对 s=5 一律按「会话已失效」处理：清空本地会话后返回错误，
 // 由 Run 退避后以全新会话重连。其余非 HELLO 信令（PONG 等）在握手阶段本不该
 // 出现，忽略并继续等待即可——读取截止时间在整段握手期间始终生效，不会挂死。
-func (g *Gateway) readHello(conn *websocket.Conn) (rawFrame, error) {
+func (g *Gateway) readHello(reader *gatewayReader) (rawFrame, error) {
 	for {
-		frame, err := g.readFrame(conn)
+		frame, err := reader.readFrame()
 		if err != nil {
 			return rawFrame{}, fmt.Errorf("读取 HELLO 失败: %w", err)
 		}
@@ -645,20 +685,45 @@ type rawFrame struct {
 
 const maxGatewayFrameBytes = 8 << 20
 
+// gatewayReader 为一条连接复用读取与解压资源。
+//
+// 压缩模式下每条事件原本要产生三次大分配：conn.ReadMessage 的帧缓冲、
+// zlib reader（内部 deflate 状态约数十 KB）、io.ReadAll 的逐次扩容输出。
+// 聊天密集的服务器上这是持续的 GC 压力。这里全部改为连接级复用：
+// 帧与解压输出各持一个 bytes.Buffer（容量涨到历史峰值后稳定），
+// zlib reader 通过 Reset 跨帧复用。json.Unmarshal 会把 d 字段复制进
+// RawMessage，因此解压缓冲在解析完成后即可复用。
+type gatewayReader struct {
+	conn       *websocket.Conn
+	frameBuf   bytes.Buffer
+	payloadBuf bytes.Buffer
+	zr         io.ReadCloser // 惰性创建的 zlib reader，跨帧复用（Reset）
+}
+
+func newGatewayReader(conn *websocket.Conn) *gatewayReader {
+	return &gatewayReader{conn: conn}
+}
+
 // readFrame 读取并解析一帧（必要时解压）。
-func (g *Gateway) readFrame(conn *websocket.Conn) (rawFrame, error) {
-	messageType, payload, err := conn.ReadMessage()
+func (r *gatewayReader) readFrame() (rawFrame, error) {
+	messageType, reader, err := r.conn.NextReader()
 	if err != nil {
 		return rawFrame{}, err
 	}
+	r.frameBuf.Reset()
+	if _, err := io.Copy(&r.frameBuf, io.LimitReader(reader, maxGatewayFrameBytes+1)); err != nil {
+		return rawFrame{}, err
+	}
+	if r.frameBuf.Len() > maxGatewayFrameBytes {
+		return rawFrame{}, fmt.Errorf("网关帧超过 %d 字节上限", maxGatewayFrameBytes)
+	}
 
-	raw := payload
+	raw := r.frameBuf.Bytes()
 	if messageType == websocket.BinaryMessage {
-		decompressed, err := decompress(payload)
+		raw, err = r.decompress(raw)
 		if err != nil {
 			return rawFrame{}, fmt.Errorf("解压网关数据失败: %w", err)
 		}
-		raw = decompressed
 	}
 
 	var frame rawFrame
@@ -670,27 +735,52 @@ func (g *Gateway) readFrame(conn *websocket.Conn) (rawFrame, error) {
 
 // decompress 解压 KOOK 下发的 zlib(deflate) 数据。
 //
-// 文档说明数据是 zlib 压缩，但为兼容不同实现，这里先按 zlib（含头）解压，
-// 失败再回退到 raw deflate。
-func decompress(payload []byte) ([]byte, error) {
-	if reader, err := zlib.NewReader(bytes.NewReader(payload)); err == nil {
-		defer func() { _ = reader.Close() }()
-		return readGatewayPayload(reader)
+// 文档说明数据是 zlib 压缩，但为兼容不同实现，先按 zlib（含头）解压，
+// 读取失败再回退到 raw deflate。zlib reader 惰性创建后跨帧复用
+// （标准库保证 NewReader 的返回值实现 Resetter）；
+// raw deflate 回退路径罕见，保持按次分配。
+func (r *gatewayReader) decompress(payload []byte) ([]byte, error) {
+	if r.zr == nil {
+		zr, err := zlib.NewReader(bytes.NewReader(payload))
+		if err != nil {
+			// 非 zlib 格式（无头）：走 raw deflate 回退，不缓存。
+			return r.decompressFlate(payload)
+		}
+		r.zr = zr
 	}
-	reader := flate.NewReader(bytes.NewReader(payload))
-	defer func() { _ = reader.Close() }()
-	return readGatewayPayload(reader)
-}
-
-func readGatewayPayload(reader io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(reader, maxGatewayFrameBytes+1))
-	if err != nil {
+	if err := r.zr.(zlib.Resetter).Reset(bytes.NewReader(payload), nil); err != nil {
 		return nil, err
 	}
-	if len(data) > maxGatewayFrameBytes {
+	if data, err := r.readAll(r.zr); err == nil {
+		return data, nil
+	}
+	// 读取失败：可能是对端实际下发的是 raw deflate，走回退重试本帧。
+	return r.decompressFlate(payload)
+}
+
+// decompressFlate 按 raw deflate（无 zlib 头）解压，一次性使用。
+func (r *gatewayReader) decompressFlate(payload []byte) ([]byte, error) {
+	reader := flate.NewReader(bytes.NewReader(payload))
+	defer func() { _ = reader.Close() }()
+	return r.readAll(reader)
+}
+
+// readAll 把解压输出读入复用缓冲并施加大小上限。
+func (r *gatewayReader) readAll(reader io.Reader) ([]byte, error) {
+	r.payloadBuf.Reset()
+	if _, err := io.Copy(&r.payloadBuf, io.LimitReader(reader, maxGatewayFrameBytes+1)); err != nil {
+		return nil, err
+	}
+	if r.payloadBuf.Len() > maxGatewayFrameBytes {
 		return nil, fmt.Errorf("网关数据超过 %d 字节上限", maxGatewayFrameBytes)
 	}
-	return data, nil
+	return r.payloadBuf.Bytes(), nil
+}
+
+// decompress 解压单条数据（不复用状态），供测试与一次性场景。
+func decompress(payload []byte) ([]byte, error) {
+	reader := &gatewayReader{}
+	return reader.decompress(payload)
 }
 
 func (g *Gateway) setDisconnected(reason string) {

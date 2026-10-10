@@ -75,6 +75,33 @@ func (r *SettingsRepo) Set(key, value string) error {
 	return upsertSetting(r.db, key, value)
 }
 
+// SettingChange 是一次原子配置变更：Upserts 全部写入，Deletes 全部删除。
+type SettingChange struct {
+	Upserts map[string]string
+	Deletes []string
+}
+
+// Apply 在单个事务内应用一组配置变更。
+//
+// 设置页一次保存会同时更新十来个键（服务器/分组/频道 ID、展示名、超时阈值、
+// token），逐键独立提交时任一步失败（磁盘满、busy 超时）会留下半套配置，
+// 而保存成功后会立刻按变更项触发机器人重连——必须要么全部生效、要么全部不变。
+func (r *SettingsRepo) Apply(change SettingChange) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		for _, key := range change.Deletes {
+			if err := tx.Where("key = ?", key).Delete(&Setting{}).Error; err != nil {
+				return err
+			}
+		}
+		for key, value := range change.Upserts {
+			if err := upsertSetting(tx, key, value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // upsertSetting 在给定句柄（连接或事务）上写入配置项。
 func upsertSetting(tx *gorm.DB, key, value string) error {
 	item := Setting{Key: key, Value: value, UpdatedAt: Now()}
