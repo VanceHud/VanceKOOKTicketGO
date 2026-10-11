@@ -256,15 +256,32 @@ func (s *Server) SendReconnect(code int, errText string) {
 	}
 }
 
-// Push 向所有已连接的网关客户端推送一个事件。
+// Push 向所有已连接的网关客户端推送一个事件（sn 自动递增）。
 func (s *Server) Push(eventType int, body any) {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 	if len(s.conns) == 0 {
 		return
 	}
-	sn := atomic.AddInt64(&s.sn, 1)
-	frame := map[string]any{"s": kook.SignalEvent, "sn": sn, "d": body}
+	s.broadcastLocked(kook.SignalEvent, atomic.AddInt64(&s.sn, 1), body)
+}
+
+// PushWithSN 以指定 sn 向所有已连接的网关客户端推送事件。
+//
+// 真实平台按 PING 上报的 sn 重传其后消息时可能包含已受理事件，
+// 测试用它模拟这类重复投递，验证客户端的去重行为。
+func (s *Server) PushWithSN(eventType int, body any, sn int64) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if len(s.conns) == 0 {
+		return
+	}
+	s.broadcastLocked(kook.SignalEvent, sn, body)
+}
+
+// broadcastLocked 把事件帧写给所有连接；调用方需持有 connMu。
+func (s *Server) broadcastLocked(signal int, sn int64, body any) {
+	frame := map[string]any{"s": signal, "sn": sn, "d": body}
 	payload, err := json.Marshal(frame)
 	if err != nil {
 		return

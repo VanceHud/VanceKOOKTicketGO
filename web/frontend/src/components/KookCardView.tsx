@@ -17,9 +17,20 @@ import { useTranslation } from "react-i18next"
 
 import { KMarkdownPreview } from "@/components/KMarkdownPreview"
 import { formatDateTime } from "@/lib/format"
-import { elementText, parseCards, textOf, type CardText, type KookElement, type KookModule } from "@/lib/kookcard"
+import {
+  elementText,
+  fieldsOf,
+  parseCards,
+  safeCountdownTime,
+  type CardText,
+  type KookElement,
+  type KookModule,
+} from "@/lib/kookcard"
 import { cn } from "@/lib/utils"
 import { safeMediaUrl } from "@/lib/media"
+
+/** 合法十六进制颜色（卡片 color 字段来自用户消息，进 inline style 前必须校验）。 */
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
 
 /** 卡片主题对应的边框与底色（对齐 KOOK 客户端的主题色）。 */
 const CARD_THEMES: Record<string, string> = {
@@ -44,12 +55,30 @@ const BUTTON_THEMES: Record<string, string> = {
 }
 
 function RichText({ value, className }: { value: CardText | undefined; className?: string }) {
-  const text = textOf(value)
-  if (!text.content.trim()) return null
-  if (text.markdown) {
-    return <KMarkdownPreview source={text.content} emptyText="" className={className} />
+  // 逐字段渲染：paragraph 允许混排 plain-text 与 kmarkdown 字段，
+  // 每个字段按自身类型展示，避免 plain 字段里的 * [ 被误格式化。
+  const fields = fieldsOf(value)
+  if (fields.length === 0) return null
+  if (fields.length === 1) {
+    const field = fields[0]
+    if (field.markdown) {
+      return <KMarkdownPreview source={field.content} emptyText="" className={className} />
+    }
+    return <p className={cn("text-sm leading-relaxed break-words whitespace-pre-wrap", className)}>{field.content}</p>
   }
-  return <p className={cn("text-sm leading-relaxed break-words whitespace-pre-wrap", className)}>{text.content}</p>
+  return (
+    <div className={cn("space-y-1", className)}>
+      {fields.map((field, index) =>
+        field.markdown ? (
+          <KMarkdownPreview key={index} source={field.content} emptyText="" />
+        ) : (
+          <p key={index} className="text-sm leading-relaxed break-words whitespace-pre-wrap">
+            {field.content}
+          </p>
+        ),
+      )}
+    </div>
+  )
 }
 
 /** CardImage 带加载失败兜底的图片元素。 */
@@ -259,18 +288,24 @@ function CardModuleView({ module }: { module: KookModule }) {
         </div>
       )
 
-    case "countdown":
+    case "countdown": {
+      const time = safeCountdownTime(module.endTime)
       return (
         <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
           <Timer className="size-3.5" />
-          {module.endTime
-            ? t("ticket.countdownTo", { time: formatDateTime(new Date(module.endTime).toISOString(), i18n.language) })
-            : t("ticket.countdown")}
+          {time ? t("ticket.countdownTo", { time: formatDateTime(time, i18n.language) }) : t("ticket.countdown")}
         </p>
       )
+    }
 
     default:
-      return null
+      // 未知模块给出占位提示而不是无声消失：用户能看到这条消息里还有
+      // 未渲染的内容，排查「网页上少了一块」时也有线索。
+      return (
+        <p className="text-muted-foreground text-xs italic">
+          {t("ticket.unsupportedModule", { type: module.type ?? "" })}
+        </p>
+      )
   }
 }
 
@@ -294,7 +329,8 @@ export const KookCardView = memo(function KookCardView({ json, fallback }: { jso
         <div
           key={index}
           className={cn("space-y-2.5 rounded-lg border px-3 py-2.5", CARD_THEMES[card.theme ?? "primary"] ?? CARD_THEMES.primary)}
-          style={card.color ? { borderColor: card.color } : undefined}
+          // color 来自用户卡片 JSON，仅接受十六进制颜色，防止任意字符串进 CSSOM。
+          style={card.color && HEX_COLOR.test(card.color) ? { borderColor: card.color } : undefined}
         >
           {(card.modules ?? []).map((module, moduleIndex) => (
             <CardModuleView key={moduleIndex} module={module} />

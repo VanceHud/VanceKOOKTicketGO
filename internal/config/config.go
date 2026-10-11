@@ -53,6 +53,10 @@ type Config struct {
 	KookGuildID      string
 	// KookAPIBase 可覆盖 KOOK API 地址（默认官方地址）。
 	KookAPIBase string
+	// KookRatePerSecond / KookRateBurst 覆盖 KOOK REST 客户端的全局限速
+	// （默认 8/s、突发 4）。0 表示使用内置默认；多实例部署可按实例调节。
+	KookRatePerSecond float64
+	KookRateBurst     int
 
 	// AppSecret 用于加密存储敏感字段（KOOK token）与派生会话相关密钥。
 	AppSecret []byte
@@ -121,6 +125,13 @@ func Load() (*Config, error) {
 	}
 	c.DryRun = dryRun
 
+	if c.KookRatePerSecond, err = envFloat("KOOK_RATE_PER_SECOND", 0); err != nil {
+		return nil, err
+	}
+	if c.KookRateBurst, err = envInt("KOOK_RATE_BURST", 0); err != nil {
+		return nil, err
+	}
+
 	switch c.SecureCookieMode {
 	case SecureCookieAuto, SecureCookieAlways, SecureCookieNever:
 	default:
@@ -166,6 +177,9 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	if c.KookRatePerSecond < 0 || c.KookRateBurst < 0 {
+		return fmt.Errorf("KOOK_RATE_PER_SECOND 与 KOOK_RATE_BURST 不能为负数（0 表示使用默认限速）")
+	}
 	if c.LoginMaxFails < 1 {
 		return fmt.Errorf("LOGIN_MAX_FAILS 必须 >= 1")
 	}
@@ -287,6 +301,19 @@ func envInt(key string, def int) (int, error) {
 	v, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("%s 必须是整数: %w", key, err)
+	}
+	return v, nil
+}
+
+// envFloat 解析浮点数配置；空值返回默认值。
+func envFloat(key string, def float64) (float64, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s 必须是数字: %w", key, err)
 	}
 	return v, nil
 }

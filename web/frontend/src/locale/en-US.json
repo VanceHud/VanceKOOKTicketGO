@@ -195,6 +195,7 @@
     "attachment": "Attachment",
     "countdown": "Countdown",
     "countdownTo": "Countdown to {{time}}",
+    "unsupportedModule": "Unsupported card module ({{type}})",
     "fromBot": "Bot",
     "notesTitle": "Internal notes",
     "notesEmpty": "No notes yet",

@@ -26,7 +26,11 @@ import (
 // 拥塞语义：队列满时 enqueue 会拒收并返回 false，网关不推进 sn 并主动重连，
 // resume 时平台会重新投递这条事件，后续事件不会越过它执行。
 const (
-	eventShards    = 4
+	// eventShards 是分片数。单个长流程（开单最长 90s）会串行化落在同一分片的
+	// 其它频道，分片越多碰撞概率越低：16 片下单个慢流程最多影响 1/16 的频道。
+	// 内存代价仅为每片一个队列缓冲，可忽略。
+	eventShards = 16
+	// eventQueueSize 是单个分片的队列容量。
 	eventQueueSize = 128
 	// enqueueWait 是队列满时的短暂等待上限，用于吸收瞬时突发。
 	// 必须远小于网关的 PongTimeout（默认 6s）：enqueue 由网关读循环同步调用，

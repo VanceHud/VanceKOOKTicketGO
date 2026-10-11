@@ -77,6 +77,14 @@ export function TicketDetailPage() {
   const ticket = ticketQuery.data
 
   const timelineEndRef = useRef<HTMLDivElement | null>(null)
+  // 自动滚动状态（存 ref 而非 state，避免滚动/消息到达引发重渲染）：
+  // nearBottom 记录用户是否贴底；didInitialScroll 标记首次加载；
+  // anchorOnPrepend 标记「加载更早的消息」触发的顶部追加；prevScrollHeight
+  // 用于计算顶部追加的高度差，保持用户正在阅读的位置不跳。
+  const nearBottomRef = useRef(true)
+  const didInitialScrollRef = useRef(false)
+  const anchorOnPrependRef = useRef(false)
+  const prevScrollHeightRef = useRef(0)
   const [dialog, setDialog] = useState<DialogKind | null>(null)
   const [closeNote, setCloseNote] = useState("")
   const [noteDraft, setNoteDraft] = useState("")
@@ -93,10 +101,38 @@ export function TicketDetailPage() {
   }, [searchParams, setSearchParams])
 
   // 聊天记录按时间正序展示，加载完成后自动滚到底部（与 IM 阅读习惯一致）。
+  // 直接操作 radix ScrollArea 视口的 scrollTop：scrollIntoView 会连带滚动
+  // 外层页面（把整个页面拽走）；且仅在用户本来就贴底（或首次加载）时跟随，
+  // 正在上方阅读历史时，SSE 刷新拉取的新消息不应把视口强拉回底部。
   const messageCount = messagesQuery.data?.items.length ?? 0
   useEffect(() => {
-    timelineEndRef.current?.scrollIntoView({ block: "end" })
+    const viewport = timelineEndRef.current?.closest("[data-radix-scroll-area-viewport]") as HTMLElement | null
+    if (!viewport) return
+    if (!didInitialScrollRef.current) {
+      viewport.scrollTop = viewport.scrollHeight
+      didInitialScrollRef.current = true
+    } else if (nearBottomRef.current) {
+      viewport.scrollTop = viewport.scrollHeight
+    } else if (anchorOnPrependRef.current) {
+      // 「加载更早的消息」把内容追加在顶部：补偿高度差，停在原来读的位置。
+      viewport.scrollTop += viewport.scrollHeight - prevScrollHeightRef.current
+      anchorOnPrependRef.current = false
+    }
+    prevScrollHeightRef.current = viewport.scrollHeight
   }, [messageCount])
+
+  // 监听视口滚动，记录用户是否贴底（距底 < 80px）。
+  // 依赖 isSuccess：时间线在数据到达后才挂载，之后元素跨刷新保持稳定。
+  useEffect(() => {
+    if (!messagesQuery.isSuccess) return
+    const viewport = timelineEndRef.current?.closest("[data-radix-scroll-area-viewport]") as HTMLElement | null
+    if (!viewport) return
+    const onScroll = () => {
+      nearBottomRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 80
+    }
+    viewport.addEventListener("scroll", onScroll, { passive: true })
+    return () => viewport.removeEventListener("scroll", onScroll)
+  }, [messagesQuery.isSuccess])
 
   const invalidateTicket = () => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.ticket(no ?? "") })
@@ -255,7 +291,11 @@ export function TicketDetailPage() {
                       variant="outline"
                       size="sm"
                       disabled={messageLimit >= 2000}
-                      onClick={() => setMessageLimit((current) => nextMessageLimit(current))}
+                      onClick={() => {
+                        // 标记顶部追加：滚动补偿逻辑据此保持阅读位置（见上方 effect）。
+                        anchorOnPrependRef.current = true
+                        setMessageLimit((current) => nextMessageLimit(current))
+                      }}
                     >
                       {t("ticket.loadEarlier")}
                     </Button>

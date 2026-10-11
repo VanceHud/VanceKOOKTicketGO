@@ -45,7 +45,8 @@ type Config struct {
 	LogChannelID   string
 	DebugChannelID string
 	OutdateHours   int
-	// RatePerSecond 与 RateBurst 控制对 KOOK 的调用速率；留空使用默认值（4/s，容量 4）。
+	// RatePerSecond 与 RateBurst 控制对 KOOK 的调用速率；留空（0）使用默认值
+	// （8/s，容量 4），可用环境变量 KOOK_RATE_PER_SECOND / KOOK_RATE_BURST 覆盖。
 	RatePerSecond float64
 	RateBurst     int
 }
@@ -175,9 +176,11 @@ func (b *Bot) enqueueEvent(ctx context.Context, event kook.Event) bool {
 	dispatcher := b.events
 	b.mu.RUnlock()
 	if dispatcher == nil {
-		// 尚未初始化（理论上不会发生）：退化为同步处理，保证不丢事件。
-		b.handleEvent(ctx, event)
-		return true
+		// 尚未初始化（理论上不会发生）。绝不能退化为同步处理：单条事件的
+		// 流程最长 90s，会把网关读循环堵死（读不到 PONG → 心跳误判断线）。
+		// 拒收让网关保留 sn 并重连续传，事件不会丢。
+		b.deps.Logger.Error("事件分发器尚未初始化，拒收事件等待重连续传", "type", event.Type)
+		return false
 	}
 	return dispatcher.enqueue(ctx, event)
 }
@@ -839,7 +842,8 @@ func (c *ttlCache) set(key string, value any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	if !now.Before(c.nextSweep) || len(c.items) >= maxCacheItems {
+	// 过期清扫按分钟限频即可（见 nextSweep）；容量满时走廉价淘汰而不是全表扫描。
+	if !now.Before(c.nextSweep) {
 		for k, item := range c.items {
 			if !now.Before(item.expires) {
 				delete(c.items, k)
@@ -848,16 +852,34 @@ func (c *ttlCache) set(key string, value any) {
 		c.nextSweep = now.Add(time.Minute)
 	}
 	if _, exists := c.items[key]; !exists && len(c.items) >= maxCacheItems {
-		var oldest string
-		var expires time.Time
-		for k, item := range c.items {
-			if expires.IsZero() || item.expires.Before(expires) {
-				oldest, expires = k, item.expires
-			}
-		}
-		delete(c.items, oldest)
+		c.evictOneLocked(now)
 	}
 	c.items[key] = cacheItem{value: value, expires: now.Add(c.ttl)}
+}
+
+// evictOneLocked 在容量满时淘汰一个条目。
+//
+// set 在每条消息的热路径上，缓存打满后若每次都全表扫描找「最早过期」，
+// 一次 set 就是 O(maxCacheItems)。这里改为抽查（map 遍历顺序随机）：
+// 优先淘汰已过期条目，没有则随机牺牲一条。缓存只是性能优化，
+// 淘汰质量略降不影响正确性。
+func (c *ttlCache) evictOneLocked(now time.Time) {
+	victim := ""
+	for k, item := range c.items {
+		if !now.Before(item.expires) {
+			victim = k
+			break
+		}
+	}
+	if victim == "" {
+		for k := range c.items {
+			victim = k
+			break
+		}
+	}
+	if victim != "" {
+		delete(c.items, victim)
+	}
 }
 
 func (c *ttlCache) clear() {

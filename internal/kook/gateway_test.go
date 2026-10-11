@@ -220,6 +220,49 @@ func TestGatewayFallsBackWhenResumeRejectedByReconnect(t *testing.T) {
 	}
 }
 
+// TestGatewayDropsRetransmittedEvents 是去重回归测试：
+//
+// 官方文档要求「已经处理过的 sn，直接抛弃不处理」：平台按 PING 上报的 sn
+// 重传其后消息时可能包含已受理事件。不去重会导致重复归档消息、重复执行
+// 按钮动作（表现为用户收到两条相同的提示卡片）。
+func TestGatewayDropsRetransmittedEvents(t *testing.T) {
+	platform := kooktest.New()
+	t.Cleanup(platform.Close)
+
+	store := &memorySessionStore{}
+	events := startGateway(t, platform, store)
+	waitFor(t, "建立连接", func() bool { return len(platform.WSConnects()) >= 1 })
+
+	user := kook.User{ID: "9001", Username: "asker"}
+	platform.Push(kook.EventTypeText, kooktest.TextMessageEvent("chan-1", "9001", "第一条", user))
+	select {
+	case <-events:
+	case <-time.After(5 * time.Second):
+		t.Fatal("未收到首条事件")
+	}
+
+	// 平台重传同一条事件（相同 sn）：应被丢弃，不进入 OnEvent。
+	platform.PushWithSN(kook.EventTypeText, kooktest.TextMessageEvent("chan-1", "9001", "第一条", user), 1)
+
+	// 再推一条新事件（新 sn）：应正常受理，证明去重没有误伤正常投递。
+	platform.Push(kook.EventTypeText, kooktest.TextMessageEvent("chan-1", "9001", "第二条", user))
+	select {
+	case event := <-events:
+		if event.Content != "第二条" {
+			t.Fatalf("去重后应受理新事件「第二条」，实际收到 %q", event.Content)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("去重后应继续受理新事件")
+	}
+
+	// 重传的那条不应投递：此时事件通道里不应再有积压。
+	select {
+	case event := <-events:
+		t.Fatalf("重传的重复事件不应投递，实际收到: %+v", event)
+	default:
+	}
+}
+
 // TestGatewayRebuildsSessionWhenResumeSilent 是回归测试：
 //
 // 平台受理了 resume 却既不补发事件、也不回 resumeOK(s=6) 时，连接看起来完全正常

@@ -32,7 +32,8 @@ type Options struct {
 	BaseURL string
 	// HTTPClient 可选，默认带 15s 超时。
 	HTTPClient *http.Client
-	// RatePerSecond 与 Burst 控制客户端侧限速，默认 4/s、容量 4。
+	// RatePerSecond 与 Burst 控制客户端侧限速，默认 8/s、容量 4；
+	// 可通过环境变量 KOOK_RATE_PER_SECOND / KOOK_RATE_BURST 覆盖（多实例部署时按实例调节）。
 	RatePerSecond float64
 	Burst         int
 	Logger        *slog.Logger
@@ -97,8 +98,50 @@ type apiEnvelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
-// maxAttempts 是遇到限流时的最大尝试次数。
+// maxAttempts 是遇到限流或瞬态故障时的最大尝试次数。
 const maxAttempts = 3
+
+// transientRetryBase 是瞬态故障（网络错误、平台 5xx）重试的基础退避：
+// 第 1 次重试等 500ms，第 2 次等 1s。
+const transientRetryBase = 500 * time.Millisecond
+
+// idempotentEndpoints 是重复调用无副作用的 POST 端点。
+//
+// 网络超时后无法确认平台是否已执行请求，只有幂等端点才敢自动重试；
+// 创建类（发消息、建频道、建游戏）重试可能重复发送/重复创建，一律不重试。
+// GET 天然幂等，不在此列（见 isIdempotent）。
+var idempotentEndpoints = map[string]bool{
+	"guild-role/grant":      true, // 重复授权同一角色无副作用
+	"guild-role/revoke":     true,
+	"channel-role/update":   true, // 重复设置同一权限位结果一致
+	"message/update":        true, // 重复更新为相同内容结果一致
+	"message/delete":        true, // 重复删除返回错误但无副作用
+	"direct-message/update": true,
+	"direct-message/delete": true,
+	"game/update":           true,
+	"game/delete-activity":  true,
+	"user/offline":          true,
+}
+
+// isIdempotent 判断端点在请求结果未知（超时、连接中断）时能否安全重发。
+func isIdempotent(method, endpoint string) bool {
+	if method == http.MethodGet {
+		return true
+	}
+	return idempotentEndpoints[strings.TrimPrefix(endpoint, "/")]
+}
+
+// isTransient 判断错误是否为瞬态故障：网络中断、超时（非 APIError）或平台 5xx。
+// 业务错误（4xx、code!=0）重试无意义，直接返回。
+func isTransient(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.HTTPStatus >= 500
+	}
+	// 非 APIError：构造请求失败、网络错误、读取响应失败。
+	// 前两者是确定性失败，重试只会快速再失败一次，无害。
+	return true
+}
 
 // call 执行一次接口调用。
 //
@@ -106,9 +149,15 @@ const maxAttempts = 3
 //   - POST 使用 JSON 请求体（KOOK 同时接受表单与 JSON，官方多语言 SDK 均使用 JSON）；
 //   - 请求前按「全局速率 + 该接口所属限流桶」排队；
 //   - 响应里的 X-Rate-Limit-* 只用于更新对应桶的额度，不会拖慢其它接口；
-//   - 遇到 429 会依据 Retry-After / X-Rate-Limit-Reset 退避重试。
+//   - 遇到 429 会依据 Retry-After / X-Rate-Limit-Reset 退避重试；
+//     全局惩罚（停顿 + 降速）只在平台明确提示全局限流（X-Rate-Limit-Global）
+//     或响应不带限流头时才施加——桶级限流由该桶自己的额度闸门排队，
+//     不应让一个非关键接口的 429 拖慢所有工单关键调用；
+//   - 幂等端点遇到网络错误 / 平台 5xx 会小退避重试（官方未提供 REST 错误码
+//     文档，按保守策略自愈瞬态故障）；创建类端点不自动重试。
 func (c *Client) call(ctx context.Context, method, endpoint string, params map[string]any, out any) error {
 	var lastErr error
+	lastRateLimited := false
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		key := c.limiter.keyFor(endpoint)
@@ -129,34 +178,55 @@ func (c *Client) call(ctx context.Context, method, endpoint string, params map[s
 		lastErr = err
 
 		var apiErr *APIError
-		if !errors.As(err, &apiErr) || !apiErr.Is(ErrRateLimited) {
-			return err
+		if errors.As(err, &apiErr) && apiErr.Is(ErrRateLimited) {
+			lastRateLimited = true
+			// 被限流：按平台给出的窗口与指数退避中的较大者等待后重试。
+			backoff := time.Duration(attempt) * 2 * time.Second
+			if info.retryAfter > backoff {
+				backoff = info.retryAfter
+			}
+			if info.reset > backoff {
+				backoff = info.reset
+			}
+			if backoff > maxPenalty {
+				backoff = maxPenalty
+			}
+			// 全局惩罚只作用于平台明确提示的全局限流或无桶信息的响应；
+			// 桶级 429 已由 observe 记录的 remaining=0 / resetAt 让该桶排队。
+			if info.global || !info.found {
+				c.limiter.penalize(backoff)
+			}
+			c.log.Warn("KOOK 接口被限流，稍后重试",
+				"endpoint", endpoint, "attempt", attempt, "backoff", backoff.String(),
+				"bucket", info.bucket, "global", info.global, "rate", c.limiter.currentRate())
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			continue
 		}
 
-		// 被限流：临时降速后重试。等待时间取平台给出的窗口与指数退避中的较大者，
-		// 但不超过惩罚上限；惩罚只影响全局速率，不会永久压低。
-		backoff := time.Duration(attempt) * 2 * time.Second
-		if info.retryAfter > backoff {
-			backoff = info.retryAfter
+		// 瞬态故障（网络错误 / 5xx）：幂等端点小退避重试自愈；
+		// 非幂等端点（发消息、建频道等）直接返回，由调用方决定如何提示。
+		if attempt < maxAttempts && isIdempotent(method, endpoint) && isTransient(err) {
+			backoff := transientRetryBase * time.Duration(attempt)
+			c.log.Warn("KOOK 接口瞬态失败，稍后重试",
+				"endpoint", endpoint, "attempt", attempt, "backoff", backoff.String(), "err", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			continue
 		}
-		if info.reset > backoff {
-			backoff = info.reset
-		}
-		if backoff > maxPenalty {
-			backoff = maxPenalty
-		}
-		c.limiter.penalize(backoff)
-		c.log.Warn("KOOK 接口被限流，稍后重试",
-			"endpoint", endpoint, "attempt", attempt, "backoff", backoff.String(),
-			"bucket", info.bucket, "global", info.global, "rate", c.limiter.currentRate())
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
+		return err
 	}
-	return fmt.Errorf("%w: %v", ErrRateLimited, lastErr)
+	if lastRateLimited {
+		return fmt.Errorf("%w: %v", ErrRateLimited, lastErr)
+	}
+	return lastErr
 }
 
 func (c *Client) do(ctx context.Context, method, endpoint string, params map[string]any, out any) (rateInfo, error) {

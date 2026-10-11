@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net/url"
 	"strings"
 	"sync"
@@ -30,6 +31,9 @@ type GatewayStatus struct {
 	// EventsDropped 是因处理队列拥塞而被拒收的事件数。
 	// 拒收的事件不会推进 sn，断线续传时平台会重新投递（可能产生少量重复）。
 	EventsDropped int64 `json:"eventsDropped"`
+	// EventsDuplicated 是按官方文档去重规则丢弃的重复事件数：
+	// 平台按 PING 上报的 sn 重传其后消息时，可能包含已受理的事件。
+	EventsDuplicated int64 `json:"eventsDuplicated,omitempty"`
 }
 
 // GatewayOptions 是网关构造参数。
@@ -88,27 +92,32 @@ type SessionStore interface {
 // 行为对齐官方文档：
 //  1. 获取网关地址（可带压缩）
 //  2. 连接后等待 HELLO，从中取得 session_id
-//  3. 每 30s 发送一次心跳 PING，6s 内未收到 PONG 视为超时
+//  3. 每 30s（±随机 5s 抖动）发送一次心跳 PING，6s 内未收到 PONG 视为超时
 //  4. 断线时使用 resume=1&session_id=..&sn=.. 续传，避免丢事件；
 //     会话可通过 SessionStore 落库，进程重启后同样续传
 //  5. 失败按 2s、4s、8s… 指数退避重试，上限 60s
 //  6. 续传失败时（HELLO 错误码，或握手阶段/连接中收到 reconnect(s=5)）
 //     清空本地 session_id 与 sn，以全新会话重连
+//  7. 已受理过的 sn 直接丢弃（官方文档要求）：平台按 PING 上报的 sn 重传
+//     时可能包含已处理事件，去重避免重复归档与重复执行动作
 type Gateway struct {
 	opts GatewayOptions
 
 	mu        sync.Mutex
 	sessionID string
 	lastSN    int64
-	// persistedSN / lastPersistAt 支持按时间去抖的事件落库（见 persistSessionSoon）。
-	persistedSN   int64
-	lastPersistAt time.Time
+	// persistedSN 支持按事件驱动的去抖落库（见 persistSessionSoon / persistLoop）。
+	persistedSN int64
+	// snSeen / snOrder 是已受理 sn 的去重窗口（最近 snDedupWindow 条，见 acceptSN）。
+	snSeen  map[int64]struct{}
+	snOrder []int64
 
-	connectedAt    atomic.Int64
-	eventsReceived atomic.Int64
-	eventsDropped  atomic.Int64
-	attempt        atomic.Int32
-	lastError      atomic.Value // string
+	connectedAt      atomic.Int64
+	eventsReceived   atomic.Int64
+	eventsDropped    atomic.Int64
+	eventsDuplicated atomic.Int64
+	attempt          atomic.Int32
+	lastError        atomic.Value // string
 
 	// 以下三个字段只服务于「续传是否真的生效」的检测，每次连接前重置：
 	// resumeAck 表示已收到平台补发完成信号 resumeOK(s=6)；
@@ -118,7 +127,8 @@ type Gateway struct {
 	lastEventAt  atomic.Int64
 	resumeSilent atomic.Bool
 
-	pongCh chan struct{}
+	pongCh      chan struct{}
+	persistWake chan struct{}
 }
 
 // NewGateway 创建网关客户端。
@@ -147,7 +157,12 @@ func NewGateway(opts GatewayOptions) (*Gateway, error) {
 	if opts.DialTimeout <= 0 {
 		opts.DialTimeout = 15 * time.Second
 	}
-	g := &Gateway{opts: opts, pongCh: make(chan struct{}, 1)}
+	g := &Gateway{
+		opts:        opts,
+		pongCh:      make(chan struct{}, 1),
+		persistWake: make(chan struct{}, 1),
+		snSeen:      make(map[int64]struct{}),
+	}
 	g.lastError.Store("")
 	g.restoreSession()
 	return g, nil
@@ -177,11 +192,12 @@ func (g *Gateway) Status() GatewayStatus {
 	g.mu.Unlock()
 
 	status := GatewayStatus{
-		SessionID:      sessionID,
-		LastSN:         sn,
-		Attempt:        int(g.attempt.Load()),
-		EventsReceived: g.eventsReceived.Load(),
-		EventsDropped:  g.eventsDropped.Load(),
+		SessionID:        sessionID,
+		LastSN:           sn,
+		Attempt:          int(g.attempt.Load()),
+		EventsReceived:   g.eventsReceived.Load(),
+		EventsDropped:    g.eventsDropped.Load(),
+		EventsDuplicated: g.eventsDuplicated.Load(),
 	}
 	if raw := g.lastError.Load(); raw != nil {
 		status.LastError, _ = raw.(string)
@@ -253,16 +269,26 @@ func (g *Gateway) backoff() time.Duration {
 // 更短命的连接断开时退避继续指数增长，防止快速掉线循环演变成连接风暴。
 const stableConnection = 60 * time.Second
 
-// SessionPersistInterval 是事件驱动落库的最小间隔。
-//
-// 每条事件都同步落库会把读循环拖慢（SQLite 单写者，且必须及时读取 PONG 帧，
-// PongTimeout 只有 6 秒）；去抖后崩溃时最多重放这段时间内的事件，
-// 与断线续传补发的事件走完全相同的处理路径，代价可接受。
+// SessionPersistInterval 是事件驱动落库的兜底周期：即使唤醒信号丢失，
+// 待落库的位点也会在这个间隔内被 persistLoop 写下去。
 const SessionPersistInterval = 2 * time.Second
+
+// persistDebounce 是被事件唤醒后、真正落库前的合并窗口：
+// 消息突发时把多条事件合并成一次写入，避免高峰期频繁写库。
+const persistDebounce = 500 * time.Millisecond
+
+// snDedupWindow 是已受理 sn 的去重窗口大小。
+//
+// 平台按 PING 上报的 sn 重传其后消息时可能包含已受理事件（官方文档要求
+// 「已经处理过的 sn，直接抛弃不处理」），窗口覆盖最近受理的 sn 即可识别
+// 这类紧邻上报位点的重传；更久远的重复退化为重复处理，与旧行为一致。
+const snDedupWindow = 512
 
 // persistSession 把当前会话与已处理到的 sn 写入持久化存储。
 //
 // 失败只记日志：落库是「重启后仍能收到事件」的增强，不应影响当前连接。
+// 注意：本函数会做同步 DB 写，只允许在 persistLoop 协程或读循环之外调用
+// （serve 在 HELLO 后与断开前的调用都在安全位置）。
 func (g *Gateway) persistSession() {
 	if g.opts.SessionStore == nil {
 		return
@@ -270,7 +296,6 @@ func (g *Gateway) persistSession() {
 	g.mu.Lock()
 	sessionID, sn := g.sessionID, g.lastSN
 	g.persistedSN = sn
-	g.lastPersistAt = time.Now()
 	g.mu.Unlock()
 	if strings.TrimSpace(sessionID) == "" {
 		return
@@ -280,38 +305,63 @@ func (g *Gateway) persistSession() {
 	}
 }
 
-// advanceSN 推进受理事件的续传位点；拒收时立即结束连接，不推进位点。
-func (g *Gateway) advanceSN(sn int64) {
+// acceptSN 记录一条已受理的事件：推进续传位点并登记去重窗口。
+//
+// 拒收（OnEvent 返回 false）的事件不得调用本函数：位点不推进、窗口不登记，
+// 重连续传时平台才会重新投递这条事件。
+func (g *Gateway) acceptSN(sn int64) {
 	g.mu.Lock()
 	if sn > g.lastSN {
 		g.lastSN = sn
 	}
+	if _, ok := g.snSeen[sn]; !ok {
+		g.snSeen[sn] = struct{}{}
+		g.snOrder = append(g.snOrder, sn)
+		if excess := len(g.snOrder) - snDedupWindow; excess > 0 {
+			for _, old := range g.snOrder[:excess] {
+				delete(g.snSeen, old)
+			}
+			g.snOrder = g.snOrder[excess:]
+		}
+	}
 	g.mu.Unlock()
 }
 
-// persistSessionSoon 按 SessionPersistInterval 去抖地落库，供事件分支调用。
+// snAccepted 判断 sn 是否已受理过（去重窗口内）。
+func (g *Gateway) snAccepted(sn int64) bool {
+	g.mu.Lock()
+	_, ok := g.snSeen[sn]
+	g.mu.Unlock()
+	return ok
+}
+
+// persistSessionSoon 请求后台协程尽快落库当前会话位点。
 //
-// 读循环内不能每条事件都做同步写入：消息突发时写事务会与消息归档竞争，
-// 读循环被拖慢后 PONG 读取延迟，可能触发心跳超时误判断线，进而重放事件。
-// 连接断开时 serve 会做一次最终落库（defer），正常停机不会丢位置。
+// 读循环内绝不做同步 DB 写：SQLite 单写者 + busy_timeout(5s)，消息归档高峰时
+// 一次落库可能阻塞数秒，读循环被拖慢后 PONG 读取延迟，会触发心跳超时误判断线
+// （PongTimeout 只有 6 秒）。这里只发信号，写入由 persistLoop 完成。
 func (g *Gateway) persistSessionSoon() {
 	if g.opts.SessionStore == nil {
 		return
 	}
 	g.mu.Lock()
 	stale := g.lastSN != g.persistedSN
-	due := g.lastPersistAt.IsZero() || time.Since(g.lastPersistAt) >= SessionPersistInterval
 	g.mu.Unlock()
-	if stale && due {
-		g.persistSession()
+	if stale {
+		select {
+		case g.persistWake <- struct{}{}:
+		default:
+		}
 	}
 }
 
 // persistLoop 周期性把待落库的 sn 写入存储。
 //
-// 事件去抖后需要一个"最迟多久一定落库"的保证：没有新事件时，
-// 最后一次变化也要在 SessionPersistInterval 内写下去，
-// 否则崩溃后会从明显更旧的 sn 重放（虽然平台能补发，但重放量不可控）。
+// 三个保证：
+//  1. 及时性：persistSessionSoon 的唤醒在 persistDebounce 的合并窗口后落库；
+//  2. 延迟上界：即使唤醒信号丢失，SessionPersistInterval 的周期 tick 也会兜底；
+//  3. 读循环零 DB 写：所有 SaveGatewaySession 都在本协程执行
+//     （serve 在 HELLO 后与断开前的直接调用除外，那两处不在读循环内）。
 func (g *Gateway) persistLoop(ctx context.Context) {
 	ticker := time.NewTicker(SessionPersistInterval)
 	defer ticker.Stop()
@@ -320,7 +370,27 @@ func (g *Gateway) persistLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			g.persistSessionSoon()
+		case <-g.persistWake:
+			// 去抖合并：等待期间新到的唤醒只延长窗口、不重置计时。
+			timer := time.NewTimer(persistDebounce)
+		wait:
+			for {
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-g.persistWake:
+				case <-ticker.C:
+				case <-timer.C:
+					break wait
+				}
+			}
+		}
+		g.mu.Lock()
+		stale := g.lastSN != g.persistedSN
+		g.mu.Unlock()
+		if stale {
+			g.persistSession()
 		}
 	}
 }
@@ -347,7 +417,11 @@ func (g *Gateway) drainPongs() {
 func (g *Gateway) clearSession() {
 	g.mu.Lock()
 	g.sessionID, g.lastSN = "", 0
-	g.persistedSN, g.lastPersistAt = 0, time.Now()
+	g.persistedSN = 0
+	// 新会话的 sn 从 1 重新计数，去重窗口必须一并清空，
+	// 否则旧窗口里的 sn 会把新会话的合法事件误判为重复。
+	g.snSeen = make(map[int64]struct{})
+	g.snOrder = g.snOrder[:0]
 	g.mu.Unlock()
 	if g.opts.SessionStore != nil {
 		if err := g.opts.SessionStore.SaveGatewaySession("", 0); err != nil {
@@ -525,15 +599,25 @@ func (g *Gateway) serve(ctx context.Context) error {
 		case SignalEvent:
 			g.lastEventAt.Store(time.Now().UnixNano())
 
+			// 官方文档：「已经处理过的 sn，直接抛弃不处理」。平台按 PING 上报
+			// 的 sn 重传其后消息时可能包含已受理事件，不去重会导致重复归档
+			// 消息、重复执行按钮动作。乱序取舍：sn 落后于位点但不在窗口内的
+			// 事件（罕见）仍按到达序处理，与旧行为一致。
+			if g.snAccepted(frame.SN) {
+				g.eventsDuplicated.Add(1)
+				g.opts.Logger.Debug("丢弃平台重传的重复事件", "sn", frame.SN)
+				continue
+			}
+
 			if len(frame.Data) == 0 {
-				g.advanceSN(frame.SN)
+				g.acceptSN(frame.SN)
 				continue
 			}
 			var event Event
 			if err := json.Unmarshal(frame.Data, &event); err != nil {
 				g.opts.Logger.Warn("解析事件失败", "err", err)
 				// 无法解析的事件无法处理，但 sn 仍要推进，否则会卡住续传位点。
-				g.advanceSN(frame.SN)
+				g.acceptSN(frame.SN)
 				continue
 			}
 			g.eventsReceived.Add(1)
@@ -550,8 +634,8 @@ func (g *Gateway) serve(ctx context.Context) error {
 					"sn", frame.SN, "type", event.Type)
 				return fmt.Errorf("事件处理队列拒收 sn=%d，重连续传", frame.SN)
 			}
-			g.advanceSN(frame.SN)
-			// 受理后按去抖间隔落库：崩溃/重启时从最近一次写入的 sn 之后续传。
+			g.acceptSN(frame.SN)
+			// 受理后通知后台协程落库：崩溃/重启时从最近一次写入的 sn 之后续传。
 			// （OnEvent 若只是入队异步处理，见 SessionStore 的说明。）
 			g.persistSessionSoon()
 
@@ -638,16 +722,30 @@ func reconnectReason(data json.RawMessage) string {
 	}
 }
 
+// heartbeatJitterCap 是心跳间隔随机抖动的上限（官方文档：30s ± 随机 5s）。
+const heartbeatJitterCap = 5 * time.Second
+
 // heartbeatLoop 发送心跳并校验 PONG。
+//
+// 官方文档要求心跳间隔带随机抖动（30s ± 5s）：固定间隔会让同时启动的
+// 多个实例在同一瞬间集中发送心跳，抖动把节奏错开。
 func (g *Gateway) heartbeatLoop(ctx context.Context, conn *websocket.Conn) {
-	ticker := time.NewTicker(g.opts.HeartbeatInterval)
-	defer ticker.Stop()
+	jitter := g.opts.HeartbeatInterval / 6
+	if jitter > heartbeatJitterCap {
+		jitter = heartbeatJitterCap
+	}
 
 	for {
+		interval := g.opts.HeartbeatInterval
+		if jitter > 0 {
+			interval += time.Duration(rand.Int64N(int64(2*jitter)+1) - int64(jitter))
+		}
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 
 		g.mu.Lock()
@@ -658,6 +756,9 @@ func (g *Gateway) heartbeatLoop(ctx context.Context, conn *websocket.Conn) {
 		if err != nil {
 			continue
 		}
+		// 发送前清空残留 PONG：上一轮心跳的迟到回复不能作为本轮的通过凭据，
+		// 否则一次真实的超时检测会被整整推迟一个心跳周期（最长 30s）。
+		g.drainPongs()
 		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 			g.opts.Logger.Debug("发送心跳失败", "err", err)
 			_ = conn.Close()

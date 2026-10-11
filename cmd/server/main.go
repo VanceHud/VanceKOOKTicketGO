@@ -141,7 +141,7 @@ func run(resetUser, newPassword string) error {
 		Store:     st,
 		Bus:       bus,
 		Tickets:   ticketService,
-		Config:    runtimeConfigProvider(st, cfg.AppSecret),
+		Config:    runtimeConfigProvider(st, cfg.AppSecret, cfg.KookRatePerSecond, cfg.KookRateBurst),
 		Logger:    logger,
 		Location:  cfg.Location,
 		AppSecret: cfg.AppSecret,
@@ -282,7 +282,9 @@ func resetPassword(st *store.Store, username, newPassword string, logger *slog.L
 //
 // Token 以 AES-GCM 密文存储，这里按需解密；解密失败（密钥被更换）时返回空 Token，
 // 让机器人停在“未配置”状态，界面会提示重新填写。
-func runtimeConfigProvider(st *store.Store, appSecret []byte) bot.ConfigFunc {
+// ratePerSecond / rateBurst 来自环境变量（0 表示使用客户端内置默认 8/s、突发 4），
+// 多实例部署时可为每个实例单独调节对 KOOK 的调用速率。
+func runtimeConfigProvider(st *store.Store, appSecret []byte, ratePerSecond float64, rateBurst int) bot.ConfigFunc {
 	return func(ctx context.Context) (*bot.Config, error) {
 		token, _, err := st.Settings.GetSecret(store.SettingKookToken, appSecret)
 		if err != nil && !errors.Is(err, secure.ErrDecrypt) {
@@ -295,6 +297,8 @@ func runtimeConfigProvider(st *store.Store, appSecret []byte) bot.ConfigFunc {
 			LogChannelID:   settingValue(st, store.SettingLogChannelID),
 			DebugChannelID: settingValue(st, store.SettingDebugChannelID),
 			OutdateHours:   st.Settings.OutdateHours(),
+			RatePerSecond:  ratePerSecond,
+			RateBurst:      rateBurst,
 		}, nil
 	}
 }

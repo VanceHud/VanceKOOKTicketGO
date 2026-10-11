@@ -280,13 +280,21 @@ func seedTickets(st *store.Store, loc *time.Location, rng *rand.Rand, now time.T
 					return err
 				}
 			}
-			// 部分工单追加一条卡片消息，验证卡片渲染（含文件模块）。
+			// 部分工单追加一条卡片消息，验证卡片渲染：
+			// header / kmarkdown（加粗、剧透、引用、分隔线、主题色）/ 混排
+			// paragraph / context / 倒计时 / 文件模块。
 			if i%5 == 0 {
 				cardJSON := `[{"type":"card","theme":"info","modules":[` +
 					`{"type":"header","text":{"type":"plain-text","content":"处理进度"}},` +
-					`{"type":"section","text":{"type":"kmarkdown","content":"已定位到问题原因，**预计今天内完成**"}},` +
+					`{"type":"section","text":{"type":"kmarkdown","content":"已定位到问题原因，**预计今天内完成**，(spl)细节稍后公布(spl)"}},` +
+					`{"type":"section","text":{"type":"paragraph","fields":[` +
+					`{"type":"plain-text","content":"字面 * 星号与 [ 方括号不做格式化"},` +
+					`{"type":"kmarkdown","content":"(font)注意：变更需要复核(font)[warning]"}]}},` +
 					`{"type":"context","elements":[{"type":"plain-text","content":"TicketBot 自动同步"}]},` +
-					`{"type":"file","src":"https://example.com/report.pdf","title":"处理报告.pdf"}]}]`
+					`{"type":"countdown","mode":"second","endTime":` + fmt.Sprint(time.Now().Add(48*time.Hour).UnixMilli()) + `},` +
+					`{"type":"file","src":"https://example.com/report.pdf","title":"处理报告.pdf"}]},` +
+					`{"type":"card","theme":"warning","modules":[` +
+					`{"type":"section","text":{"type":"kmarkdown","content":"> 引用：用户反馈的原始描述\n\n---\n后续步骤见附件"}}]}]`
 				if err := st.Tickets.AddMessage(&store.TicketMessage{
 					TicketNo:  t.No,
 					MsgID:     demoUserID(9400 + i),
@@ -301,6 +309,28 @@ func seedTickets(st *store.Store, loc *time.Location, rng *rand.Rand, now time.T
 					MediaType: "file",
 					IsBot:     true,
 					CreatedAt: replyAt.Add(4 * time.Minute),
+				}); err != nil {
+					return err
+				}
+			}
+
+			// 部分工单追加一条畸形卡片消息：非法倒计时 endTime、非法 color、
+			// 未知模块——验证 WebUI 渲染绝不崩溃（旧实现会整页白屏）。
+			if i%5 == 2 {
+				badCardJSON := `[{"type":"card","theme":"danger","color":"javascript:alert(1)","modules":[` +
+					`{"type":"countdown","mode":"second","endTime":"not-a-number"},` +
+					`{"type":"mystery-module","value":1}]}]`
+				if err := st.Tickets.AddMessage(&store.TicketMessage{
+					TicketNo:  t.No,
+					MsgID:     demoUserID(9500 + i),
+					ChannelID: t.ChannelID,
+					UserID:    "bot",
+					UserName:  "TicketBot",
+					Content:   "[卡片消息] 畸形卡片（渲染健壮性验证）",
+					MsgType:   store.MsgTypeCard,
+					CardJSON:  badCardJSON,
+					IsBot:     true,
+					CreatedAt: replyAt.Add(5 * time.Minute),
 				}); err != nil {
 					return err
 				}

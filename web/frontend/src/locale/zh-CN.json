@@ -195,6 +195,7 @@
     "attachment": "附件",
     "countdown": "倒计时",
     "countdownTo": "倒计时至 {{time}}",
+    "unsupportedModule": "不支持的卡片模块（{{type}}）",
     "fromBot": "机器人",
     "notesTitle": "内部备注",
     "notesEmpty": "还没有备注",

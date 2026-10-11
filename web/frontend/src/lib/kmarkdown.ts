@@ -1,9 +1,11 @@
 /**
- * 极简 KMarkdown 渲染器：仅用于面板文案的实时预览。
+ * 极简 KMarkdown 渲染器：用于工单聊天记录展示与面板文案的实时预览。
  *
  * 说明：
- * - KOOK 的 KMarkdown 只支持 **加粗**、*斜体*、~~删除线~~、`行内代码`、```代码块```、
- *   > 引用、--- 分隔线、[链接](url)，以及 (ins)/(met)/(rol)/(chn) 等自定义标签；
+ * - 覆盖 KOOK 官方文档声明的语法：**加粗**、*斜体*、~~删除线~~、`行内代码`、
+ *   ```代码块```、> 引用、--- 分隔线、[链接](url)、(ins) 下划线、(spl) 剧透、
+ *   (font) 主题色 (font)[theme]（官方限定卡片内可用，卡片文本走本渲染器）、
+ *   (met)/(rol)/(chn) 提及、`\` 转义；
  *   `# 标题`、`__下划线__`、`- 列表` 这些 Markdown 写法 KOOK 并不认识。
  * - 后端发送前会做一次归一化（internal/kook/kmd.go）：首行 `# 标题` 改用卡片 header
  *   模块，`__下划线__` 转成 (ins)，`- 列表` 转成「• 」。
@@ -21,16 +23,32 @@ function escapeHtml(input: string): string {
     .replace(/'/g, "&#39;")
 }
 
-/** renderInline 处理行内标记（加粗、斜体、代码、链接、提及等）。 */
+/** makeMark 生成一次行内渲染内唯一的占位符标记（私用区字符 + 随机串）。
+ *
+ * 旧实现用固定的 `\uE000<序号>\uE000`：用户文本恰好包含该序列时，
+ * 行内代码的还原会错位或重复。随机前缀让碰撞概率忽略不计。 */
+function makeMark(): string {
+  return `\uE000${Math.random().toString(36).slice(2, 10)}\uE001`
+}
+
+/** renderInline 处理行内标记（加粗、斜体、代码、链接、提及、剧透、主题色等）。 */
 function renderInline(text: string): string {
   let out = escapeHtml(text)
 
-  // 行内代码先取出占位，避免其中的 * _ ~ 被当作格式标记。
-  // 占位符使用 Unicode 私用区字符，正常文案不会出现。
+  // 行内代码先取出占位，避免其中的 * _ ~ ( 等被当作格式标记。
+  const codeMark = makeMark()
   const codeSpans: string[] = []
   out = out.replace(/`([^`\n]+)`/g, (_match, code: string) => {
     codeSpans.push(`<code>${code}</code>`)
-    return `\uE000${codeSpans.length - 1}\uE000`
+    return `${codeMark}${codeSpans.length - 1}${codeMark}`
+  })
+
+  // 转义（官方语法 `\特殊字符`）：被转义的字符按字面渲染，不参与标记解析。
+  const escapeMark = makeMark()
+  const escapedChars: string[] = []
+  out = out.replace(/\\([\\`*_~[\]()])/g, (_match, ch: string) => {
+    escapedChars.push(ch)
+    return `${escapeMark}${escapedChars.length - 1}${escapeMark}`
   })
 
   out = out
@@ -49,13 +67,23 @@ function renderInline(text: string): string {
     .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
     // 斜体
     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    // 剧透：默认隐藏内容，点击揭示（KMarkdownPreview 用事件委托切换揭示状态）。
+    .replace(/\(spl\)([^(\n]+)\(spl\)/g, '<span class="mdk-spoiler" tabindex="0">$1</span>')
+    // 主题色：官方语法 (font)内容(font)[theme]，theme 限定字母（防 class 注入），
+    // 未识别的主题只是没有对应颜色，不影响展示。
+    .replace(/\(font\)([^(\n]+)\(font\)(?:\[([a-zA-Z]+)\])?/g, (_match, content: string, theme: string) => {
+      const cls = theme ? `mdk-font mdk-font-${theme}` : "mdk-font"
+      return `<span class="${cls}">${content}</span>`
+    })
     // 提及
     .replace(/\(met\)\s*([^)\s]+)\s*\(met\)/g, '<span class="mdk-mention">@$1</span>')
     .replace(/\(rol\)\s*([^)\s]+)\s*\(rol\)/g, '<span class="mdk-mention">@角色$1</span>')
     .replace(/\(chn\)\s*([^)\s]+)\s*\(chn\)/g, '<span class="mdk-mention">#频道$1</span>')
 
-  // 还原行内代码。
-  out = out.replace(/\uE000(\d+)\uE000/g, (_match, idx: string) => codeSpans[Number(idx)] ?? "")
+  // 还原转义字符与行内代码。
+  out = out
+    .replace(new RegExp(`${escapeMark}(\\d+)${escapeMark}`, "g"), (_match, idx: string) => escapedChars[Number(idx)] ?? "")
+    .replace(new RegExp(`${codeMark}(\\d+)${codeMark}`, "g"), (_match, idx: string) => codeSpans[Number(idx)] ?? "")
   return out
 }
 
@@ -117,7 +145,15 @@ export function renderKMarkdown(source: string): string {
       continue
     }
 
-    // 引用
+    // 分隔线：独立成行的 ---（官方 KMarkdown 语法）。
+    if (/^\s*-{3,}\s*$/.test(line)) {
+      flushParagraph(paragraph)
+      blocks.push(`<hr/>`)
+      index += 1
+      continue
+    }
+
+    // 引用（官方语法：`> 引用内容`，连续引用行合并为一块，空行结束）。
     if (/^\s*>\s?/.test(line)) {
       flushParagraph(paragraph)
       const quoted: string[] = []

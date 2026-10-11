@@ -25,14 +25,14 @@ export function dateLocale(language: string): Locale {
  * 判断时间是否可用。
  *
  * 后端理论上不会下发零值时间（Go 侧已用指针 + omitempty），
- * 但接口由多种来源拼装，这里再兜一层：早于 1970 的时间一律视为无值，
- * 避免界面出现 0001-01-01 这类明显异常的时间。
+ * 但接口由多种来源拼装，这里再兜一层：早于 2001 年的时间一律视为无值，
+ * 避免界面出现 0001-01-01、1970-01-xx（秒级时间戳被当毫秒解析）这类异常时间。
  */
 function isValidDate(value?: string | null): value is string {
   if (!value) return false
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return false
-  return date.getFullYear() >= 1970
+  return date.getFullYear() >= 2001
 }
 
 /** 完整日期时间（业务时区），例如 2026-01-05 14:03:11。 */
