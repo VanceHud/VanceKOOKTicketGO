@@ -8,6 +8,9 @@ import { api, buildQuery } from "@/lib/api"
 import { setDisplayTimezone } from "@/lib/timezone"
 import type {
   AdminRole,
+  AIKnowledge,
+  AIKnowledgeListParams,
+  AISettingsResponse,
   AuditLog,
   AuditParams,
   BotActivityResponse,
@@ -50,6 +53,8 @@ export const queryKeys = {
   kookChannels: ["kook-channels"] as const,
   games: (type: number) => ["games", type] as const,
   botActivity: ["bot-activity"] as const,
+  aiSettings: ["ai-settings"] as const,
+  aiKnowledge: (params: AIKnowledgeListParams) => ["ai-knowledge", params] as const,
 }
 
 export function useTickets(params: TicketListParams): UseQueryResult<ListResponse<Ticket>> {
@@ -178,4 +183,19 @@ export function useGames(type: number): UseQueryResult<GameListResponse> {
 /** 机器人当前在玩/在听动态与自动恢复开关。 */
 export function useBotActivity(): UseQueryResult<BotActivityResponse> {
   return useQuery({ queryKey: queryKeys.botActivity, queryFn: () => api.get<BotActivityResponse>("/bot/activity") })
+}
+
+/** AI 设置（含掩码 Key 与用量统计）。 */
+export function useAISettings(): UseQueryResult<AISettingsResponse> {
+  return useQuery({ queryKey: queryKeys.aiSettings, queryFn: () => api.get<AISettingsResponse>("/ai/settings") })
+}
+
+/** 知识库分页列表。 */
+export function useAIKnowledge(params: AIKnowledgeListParams): UseQueryResult<ListResponse<AIKnowledge>> {
+  return useQuery({
+    queryKey: queryKeys.aiKnowledge(params),
+    queryFn: () =>
+      api.get<ListResponse<AIKnowledge>>(`/ai/knowledge${buildQuery({ ...params } as Record<string, string | number>)}`),
+    placeholderData: (previous) => previous,
+  })
 }

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ai"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 )
@@ -177,6 +178,20 @@ func (m *Manager) DeleteMessage(ctx context.Context, msgID string) error {
 	}
 	return instance.DeleteMessage(ctx, msgID)
 }
+
+// SendAIReply 把 AI 生成的回复发到工单频道（实现 ai.Sender）。
+//
+// 经当前连接实例转发：机器人重连后新实例自然接管，AI 服务不感知连接生命周期。
+func (m *Manager) SendAIReply(ctx context.Context, t *store.Ticket, content string) error {
+	instance, err := m.requireInstance()
+	if err != nil {
+		return err
+	}
+	return instance.SendAIReply(ctx, t, content)
+}
+
+// 编译期确认 Manager 实现 ai.Sender。
+var _ ai.Sender = (*Manager)(nil)
 
 // ChannelInfo 返回频道信息。
 func (m *Manager) ChannelInfo(ctx context.Context, channelID string) (*kook.Channel, error) {

@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ai"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/keyedlock"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
@@ -84,6 +85,10 @@ type Deps struct {
 	AppSecret     []byte
 	RequestStop   func() // /kill 命令触发优雅退出
 	HeartbeatTick time.Duration
+	// AI 是 AI 业务服务；nil 表示未启用（所有钩子直接跳过）。
+	// 由 main 装配；本包只调用其钩子（OnMessage 等），发送方向由
+	// Manager 实现 ai.Sender 注入回服务（见 Manager.SendAIReply）。
+	AI *ai.Service
 }
 
 // Bot 是机器人实例：一个实例对应一次 KOOK 连接。

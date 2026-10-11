@@ -31,8 +31,23 @@ export interface Ticket {
   closeNote?: string
   firstReplyAt?: string | null
   messageCount: number
+  /** AI 自动应答状态：空 = 未启用，active = AI 应答中，takeover = 人工已接管。 */
+  aiState?: string
+  /** LLM 生成的工单摘要。 */
+  aiSummary?: string
+  aiSummaryAt?: string | null
+  /** AI 的类型建议（原始 JSON，详情接口会附带解析后的 aiClassificationSuggestion）。 */
+  aiClassification?: string
+  /** 服务端解析后的分类建议（仅详情接口返回）。 */
+  aiClassificationSuggestion?: AIClassification
   createdAt: string
   updatedAt: string
+}
+
+/** AI 的工单类型建议。 */
+export interface AIClassification {
+  type: string
+  reason: string
 }
 
 export interface TicketMessage {
@@ -45,6 +60,8 @@ export interface TicketMessage {
   content: string
   type: string
   isBot: boolean
+  /** 这条消息是 AI 自动应答生成的（时间线渲染「AI」徽章）。 */
+  isAi?: boolean
   createdAt: string
   /** 富媒体（图片/视频/文件/语音）的资源地址，旧记录可能为空。 */
   mediaUrl?: string
@@ -274,6 +291,8 @@ export interface TicketType {
   /** 给管理员看的内部备注，不展示给开单人。 */
   description: string
   enabled: boolean
+  /** 该类型工单是否启用 AI 自动应答（还需全局开关同时打开）。 */
+  aiAutoReply: boolean
   createdAt: string
   updatedAt: string
   roles?: TicketTypeRole[]
@@ -422,4 +441,58 @@ export interface ApiErrorPayload {
     message: string
     requestId?: string
   }
+}
+
+/** AI 设置（响应体：API Key 只有掩码，无明文）。 */
+export interface AISettingsResponse {
+  enabled: boolean
+  baseUrl: string
+  model: string
+  embeddingModel: string
+  temperature: number
+  systemPrompt: string
+  footer: string
+  quietSeconds: number
+  maxReplies: number
+  contextMessages: number
+  knowledgeTopK: number
+  autoSummaryOnClose: boolean
+  callRetentionDays: number
+  hasApiKey: boolean
+  apiKeyMasked: string
+  usage?: AIUsageStats
+}
+
+/** AI 调用与知识库规模统计（近 N 天）。 */
+export interface AIUsageStats {
+  days: number
+  totalCalls: number
+  failedCalls: number
+  promptTokens: number
+  completionTokens: number
+  knowledgeEntries: number
+  autoRepliedTickets: number
+}
+
+/** 知识库条目：人工回复捕获或手动录入的「问题 → 回答」。 */
+export interface AIKnowledge {
+  id: number
+  question: string
+  answer: string
+  /** ticket = 从工单人工回复捕获；manual = 手动录入。 */
+  source: "ticket" | "manual" | string
+  ticketNo?: string
+  /** 该条是对 AI 回复的人工纠正，检索时加权。 */
+  isCorrection: boolean
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AIKnowledgeListParams {
+  q?: string
+  source?: string
+  enabled?: string
+  page?: number
+  pageSize?: number
 }

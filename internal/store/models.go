@@ -39,6 +39,20 @@ const (
 	MsgTypeUnknown = "unknown"
 )
 
+// 工单的 AI 应答状态。
+const (
+	// AITicketActive 表示 AI 自动应答生效中（开单人发言会触发 AI 回复）。
+	AITicketActive = "active"
+	// AITicketTakeover 表示人工客服已接管，AI 不再自动回复。
+	AITicketTakeover = "takeover"
+)
+
+// 知识条目的来源。
+const (
+	KnowledgeSourceTicket = "ticket"
+	KnowledgeSourceManual = "manual"
+)
+
 // WebUI 账号角色，权限从高到低。
 const (
 	RoleAdmin    = "admin"
@@ -122,6 +136,18 @@ type Ticket struct {
 	LogChannelMsgID string `gorm:"size:64" json:"-"`
 	LogUserMsgID    string `gorm:"size:64" json:"-"`
 
+	// AIState 是 AI 自动应答状态：空 = 未启用（类型未开或全局关闭），
+	// active = AI 应答中，takeover = 人工已接管。与 Status 状态机正交，
+	// 不参与工单流转校验。
+	AIState string `gorm:"size:16" json:"aiState,omitempty"`
+	// AISummary 是 LLM 生成的工单摘要（详情页展示、导出携带）。
+	AISummary string `gorm:"type:text" json:"aiSummary,omitempty"`
+	// AISummaryAt 记录摘要生成时间。
+	AISummaryAt *time.Time `json:"aiSummaryAt,omitempty"`
+	// AIClassification 是 AI 的类型建议（JSON：{"type","reason"}），
+	// 仅作展示与一键应用，不自动改类型。
+	AIClassification string `gorm:"type:text" json:"aiClassification,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `gorm:"index:idx_tickets_timeout,priority:2" json:"updatedAt"`
 }
@@ -163,6 +189,10 @@ type TicketMessage struct {
 	// 事件的卡片消息 content 为空，归档时会异步调用 message/view 补全。
 	CardJSON string `gorm:"type:text" json:"cardJson,omitempty"`
 
+	// IsAI 标记这条消息是 AI 自动应答生成的（由机器人发出但显式入库），
+	// 时间线据此渲染「AI」徽章，学习闭环也用它识别人工纠正信号。
+	IsAI bool `json:"isAi,omitempty"`
+
 	CreatedAt time.Time `gorm:"index;index:idx_ticket_messages_timeline,priority:2" json:"createdAt"`
 }
 
@@ -203,9 +233,12 @@ type TicketType struct {
 	Description string `gorm:"size:256" json:"description"`
 	// Enabled 不带 default 标签：GORM 对带默认值的字段会忽略零值，
 	// 导致“新建即停用”的类型被静默写成启用。零值必须如实入库。
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Enabled bool `json:"enabled"`
+	// AIAutoReply 控制该类型工单是否启用 AI 自动应答（还需全局开关同时打开）。
+	// 不带 default 标签，理由同 Enabled。
+	AIAutoReply bool      `json:"aiAutoReply"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 
 	Roles []TicketTypeRole `gorm:"foreignKey:TypeID" json:"roles,omitempty"`
 	// Panels 是该类型下的面板（一个类型可对应多个面板）。
@@ -423,6 +456,59 @@ type AuditLog struct {
 	CreatedAt time.Time `gorm:"index" json:"createdAt"`
 }
 
+// AIKnowledge 是一条「问题 → 回答」知识，供 AI 自动应答时作为 few-shot 示例检索。
+//
+// 两个来源：
+//   - ticket：人工客服在工单内的回复被自动捕获（学习闭环），
+//     幂等去重由仓储层在事务内「先查后插」保证（见 AIRepo.CaptureKnowledge）；
+//     不用 (ticket_no, answer_msg_id) 唯一索引：manual 条目两列均为空串，
+//     SQLite 唯一索引会把多条手工 FAQ 判成重复；
+//   - manual：管理员在 WebUI 手动录入的 FAQ。
+//
+// Embedding 是问题文本的向量（JSON 编码的 float32 数组），
+// 配置了 embedding 模型时由捕获/录入流程异步补全，检索按余弦相似度；
+// 未配置时为空，检索退化为关键词匹配。
+type AIKnowledge struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// Question 是用户侧的问题描述（工单场景里是开单人的连续消息拼接）。
+	Question string `gorm:"type:text;not null" json:"question"`
+	// Answer 是人工客服的回复或人工录入的答案。
+	Answer string `gorm:"type:text;not null" json:"answer"`
+	// Source 取 KnowledgeSourceTicket / KnowledgeSourceManual。
+	Source string `gorm:"size:16;index;not null" json:"source"`
+	// TicketNo 记录来源工单（manual 来源为空），便于追溯与按工单清理。
+	TicketNo string `gorm:"size:20;index" json:"ticketNo,omitempty"`
+	// AnswerMsgID 是来源消息的平台 ID（manual 来源为空），仅用于去重。
+	AnswerMsgID string `gorm:"size:64" json:"-"`
+	// IsCorrection 标记该条是对 AI 回复的人工纠正（AI 回复之后管理员又给了不同答案），
+	// 检索时加权——这是「从人工回复中学习」最直接的信号。
+	IsCorrection bool `json:"isCorrection"`
+	// Embedding 是 Question 的向量（JSON 数组文本），空表示未向量化。
+	Embedding string `gorm:"type:text" json:"-"`
+	// Enabled 不带 default 标签，理由同 TicketType.Enabled。
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `gorm:"index" json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// AICall 记录一次 LLM 调用（用量与排障），随保留期清理。
+type AICall struct {
+	ID uint `gorm:"primaryKey" json:"id"`
+	// TicketNo 是关联工单（test 调用为空）。
+	TicketNo string `gorm:"size:20;index" json:"ticketNo,omitempty"`
+	// Kind 取 reply / summary / classify / test。
+	Kind string `gorm:"size:16;index" json:"kind"`
+	// Model 是实际使用的模型名。
+	Model string `gorm:"size:64" json:"model"`
+	// Error 非空表示调用失败（截断后的错误摘要）。
+	Error string `gorm:"size:256" json:"error,omitempty"`
+
+	PromptTokens     int       `json:"promptTokens"`
+	CompletionTokens int       `json:"completionTokens"`
+	DurationMs       int64     `json:"durationMs"`
+	CreatedAt        time.Time `gorm:"index" json:"createdAt"`
+}
+
 // AllModels 返回需要自动迁移的全部模型。
 func AllModels() []any {
 	return []any{
@@ -442,5 +528,7 @@ func AllModels() []any {
 		&RoleMapping{},
 		&AuditLog{},
 		&BotActivity{},
+		&AIKnowledge{},
+		&AICall{},
 	}
 }

@@ -29,6 +29,8 @@ const UsersPage = lazyPage(() => import("@/routes/Users"), "UsersPage")
 const BotStatusPage = lazyPage(() => import("@/routes/BotStatus"), "BotStatusPage")
 const ActivityPage = lazyPage(() => import("@/routes/Activity"), "ActivityPage")
 const SettingsPage = lazyPage(() => import("@/routes/Settings"), "SettingsPage")
+const AISettingsPage = lazyPage(() => import("@/routes/AISettings"), "AISettingsPage")
+const KnowledgePage = lazyPage(() => import("@/routes/Knowledge"), "KnowledgePage")
 const AuditPage = lazyPage(() => import("@/routes/Audit"), "AuditPage")
 const NotFoundPage = lazyPage(() => import("@/routes/NotFound"), "NotFoundPage")
 
@@ -73,6 +75,8 @@ export function App() {
             <Route path="/bot" element={<BotStatusPage />} />
             <Route path="/activity" element={<ActivityPage />} />
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/ai-settings" element={<AISettingsPage />} />
+            <Route path="/ai-knowledge" element={<KnowledgePage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="*" element={<NotFoundPage />} />
           </Route>

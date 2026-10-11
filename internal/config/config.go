@@ -58,6 +58,16 @@ type Config struct {
 	KookRatePerSecond float64
 	KookRateBurst     int
 
+	// LLM（OpenAI 兼容 API）连接信息，仅在提供环境变量时非空，
+	// 用于首启装载到数据库（Key 加密存储）。
+	// LLMBaseURL / LLMModel / LLMEmbeddingModel 仅在库中无值时写入（不覆盖 WebUI 修改）；
+	// LLMAPIKey 提供即覆盖（便于轮换）。
+	LLMBaseURL        string
+	LLMAPIKey         string
+	LLMAPIKeyFromEnv  bool
+	LLMModel          string
+	LLMEmbeddingModel string
+
 	// AppSecret 用于加密存储敏感字段（KOOK token）与派生会话相关密钥。
 	AppSecret []byte
 	// SecretSource 记录密钥来源，便于运维排查（env 或文件路径）。
@@ -111,6 +121,11 @@ func Load() (*Config, error) {
 	}
 
 	c.KookTokenFromEnv = c.KookToken != ""
+	c.LLMBaseURL = strings.TrimSpace(os.Getenv("LLM_BASE_URL"))
+	c.LLMAPIKey = strings.TrimSpace(os.Getenv("LLM_API_KEY"))
+	c.LLMAPIKeyFromEnv = c.LLMAPIKey != ""
+	c.LLMModel = strings.TrimSpace(os.Getenv("LLM_MODEL"))
+	c.LLMEmbeddingModel = strings.TrimSpace(os.Getenv("LLM_EMBEDDING_MODEL"))
 	c.DBPath = env("DB_PATH", filepath.Join(c.DataDir, "ticket.db"))
 
 	level, err := parseLogLevel(env("LOG_LEVEL", "info"))

@@ -79,6 +79,8 @@ type Deps struct {
 	Version  string
 	// Bot 为机器人管理器；未配置或未接入时为 nil，所有用法都必须 nil 安全。
 	Bot BotController
+	// AI 为 AI 业务服务；未启用时为 nil，所有用法都必须 nil 安全。
+	AI AIController
 }
 
 // Server 承载全部 HTTP handler。

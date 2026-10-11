@@ -22,6 +22,8 @@ type Result struct {
 	TokenLoaded bool
 	// GuildIDLoaded 表示本次从环境变量装载了服务器 ID。
 	GuildIDLoaded bool
+	// LLMKeyLoaded 表示本次从环境变量装载了 LLM API Key（已加密存库）。
+	LLMKeyLoaded bool
 }
 
 // Init 执行初始化，保证：
@@ -59,10 +61,44 @@ func Init(st *store.Store, cfg *config.Config, log *slog.Logger) (*Result, error
 		}
 	}
 
+	// LLM 连接信息：Key 提供即写入（覆盖旧值，便于轮换）；
+	// BaseURL / 模型名仅补空（不覆盖 WebUI 里的修改）。
+	if cfg.LLMAPIKeyFromEnv {
+		if err := st.Settings.SetSecret(store.SettingAIAPIKeyEnc, cfg.LLMAPIKey, cfg.AppSecret); err != nil {
+			return nil, fmt.Errorf("保存 LLM API Key 失败: %w", err)
+		}
+		result.LLMKeyLoaded = true
+		log.Info("已从环境变量装载 LLM API Key", "masked", config.RedactsToken(cfg.LLMAPIKey))
+	}
+	if err := seedSettingIfEmpty(st, store.SettingAIBaseURL, cfg.LLMBaseURL); err != nil {
+		return nil, err
+	}
+	if err := seedSettingIfEmpty(st, store.SettingAIModel, cfg.LLMModel); err != nil {
+		return nil, err
+	}
+	if err := seedSettingIfEmpty(st, store.SettingAIEmbeddingModel, cfg.LLMEmbeddingModel); err != nil {
+		return nil, err
+	}
+
 	if err := st.Settings.MarkInitialized(); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+// seedSettingIfEmpty 在键不存在或为空时写入默认值（不覆盖已有配置）。
+func seedSettingIfEmpty(st *store.Store, key, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	existing, ok, err := st.Settings.Get(key)
+	if err != nil {
+		return err
+	}
+	if ok && strings.TrimSpace(existing) != "" {
+		return nil
+	}
+	return st.Settings.Set(key, strings.TrimSpace(value))
 }
 
 // ensureAdmin 保证存在管理员账号。

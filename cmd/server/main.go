@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ai"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/api"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/bootstrap"
@@ -136,6 +137,17 @@ func run(resetUser, newPassword string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// AI 服务：自动应答 / 摘要 / 分类 / 知识闭环。全局开关默认关闭，
+	// 未配置 LLM 时所有钩子静默跳过，不影响既有工单流程。
+	aiService := ai.New(ai.Deps{
+		Store:     st,
+		Bus:       bus,
+		Logger:    logger,
+		AppSecret: cfg.AppSecret,
+	})
+	aiService.Start()
+	defer aiService.Stop()
+
 	// 机器人管理器：读取数据库中的配置（Token 已加密存储）并按需连接 KOOK。
 	botManager, err := bot.NewManager(bot.Deps{
 		Store:     st,
@@ -148,11 +160,14 @@ func run(resetUser, newPassword string) error {
 		// /kill 命令触发与 Ctrl+C 相同的优雅退出路径
 		RequestStop:   stop,
 		HeartbeatTick: 30 * time.Second,
+		AI:            aiService,
 	})
 	if err != nil {
 		return fmt.Errorf("初始化机器人失败: %w", err)
 	}
 	defer botManager.Stop()
+	// AI 回复的发送通道经机器人连接转发（Manager 实现 ai.Sender）。
+	aiService.SetSender(botManager)
 
 	router := api.NewRouter(api.Deps{
 		Config:   cfg,
@@ -167,6 +182,7 @@ func run(resetUser, newPassword string) error {
 		Started:  store.Now(),
 		Version:  Version,
 		Bot:      botManager,
+		AI:       aiService,
 	})
 
 	// 启动机器人；失败不阻塞 WebUI —— 管理员可在界面上修正配置后点击重连。
@@ -179,7 +195,7 @@ func run(resetUser, newPassword string) error {
 	bgDone := make(chan struct{})
 	go func() {
 		defer close(bgDone)
-		backgroundTasks(ctx, logger, st, sessions, loginLimiter, codeLimiter, ticketService, cfg.AuditRetention)
+		backgroundTasks(ctx, logger, st, sessions, loginLimiter, codeLimiter, ticketService, cfg.AuditRetention, cfg.AppSecret)
 	}()
 
 	server := &http.Server{
@@ -321,6 +337,7 @@ func backgroundTasks(
 	codeLimiter *auth.WindowLimiter,
 	ticketService *ticket.Service,
 	auditRetention time.Duration,
+	appSecret []byte,
 ) {
 	maintenance := time.NewTicker(5 * time.Minute)
 	timeoutScan := time.NewTicker(10 * time.Minute)
@@ -362,6 +379,24 @@ func backgroundTasks(
 		}
 	}
 
+	// AI 调用记录清理同样按天节流（保留期在 AI 设置里配置，0 = 永久保留）。
+	var lastAICallPurge time.Time
+	purgeAICalls := func() {
+		if !lastAICallPurge.IsZero() && time.Since(lastAICallPurge) < 24*time.Hour {
+			return
+		}
+		lastAICallPurge = time.Now()
+		cfg, err := st.AI.Config(appSecret)
+		if err != nil {
+			logger.Warn("读取 AI 配置失败（跳过调用记录清理）", "err", err)
+			return
+		}
+		retention := time.Duration(cfg.CallRetentionDays) * 24 * time.Hour
+		if err := st.AI.CleanupAICalls(retention); err != nil {
+			logger.Warn("清理 AI 调用记录失败", "err", err)
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -380,6 +415,7 @@ func backgroundTasks(
 			loginLimiter.GC()
 			codeLimiter.GC()
 			purgeAudit()
+			purgeAICalls()
 			optimizeStats()
 		case <-timeoutScan.C:
 			locked, err := ticketService.ScanTimeout(ctx)

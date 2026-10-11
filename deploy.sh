@@ -1326,7 +1326,8 @@ pick_instance() {
     warn "还没有任何实例"
     return 1
   fi
-  printf '现有实例：%s\n' "$names"
+  # 菜单里以 n="$(pick_instance)" 捕获返回值，提示行必须走 stderr，否则会被拼进实例名
+  printf '现有实例：%s\n' "$names" >&2
   read -r -p "实例名: " n || return 1
   [[ -n "$n" ]] || return 1
   printf '%s' "$n"

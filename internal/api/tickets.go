@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ai"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/auth"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/store"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/ticket"
@@ -137,13 +138,22 @@ func (s *Server) lookupTicket(c *gin.Context) (*store.Ticket, bool) {
 	return t, true
 }
 
+// ticketDetailResponse 在工单之上附加服务端解析后的 AI 分类建议，
+// 前端无需再解析 aiClassification 的 JSON 字符串。
+type ticketDetailResponse struct {
+	store.Ticket
+	AIClassificationSuggestion *ai.Classification `json:"aiClassificationSuggestion,omitempty"`
+}
+
 // handleTicketDetail 返回工单详情。
 func (s *Server) handleTicketDetail(c *gin.Context) {
 	t, ok := s.lookupTicket(c)
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, t)
+	resp := ticketDetailResponse{Ticket: *t}
+	resp.AIClassificationSuggestion = ai.ParseClassification(t.AIClassification)
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleTicketMessages 返回工单聊天记录。

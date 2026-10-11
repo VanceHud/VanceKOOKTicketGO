@@ -10,12 +10,15 @@ import {
   ArrowLeft,
   Bot,
   Download,
+  FileText,
   LockKeyhole,
   MessageSquare,
   RefreshCw,
+  Sparkles,
   StickyNote,
   UnlockKeyhole,
   User,
+  Wand2,
   XCircle,
 } from "lucide-react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
@@ -190,6 +193,39 @@ export function TicketDetailPage() {
     onError: (error) => toastError(error),
   })
 
+  // —— AI 操作：摘要 / 分类 / 自动应答开关 ——
+  const aiSummaryMutation = useMutation({
+    mutationFn: () => api.post(`/tickets/${encodeURIComponent(no as string)}/ai/summary`),
+    onSuccess: () => toastSuccess(t("ticket.aiSummaryTriggered")),
+    onError: (error) => toastError(error),
+  })
+
+  const aiClassifyMutation = useMutation({
+    mutationFn: () => api.post(`/tickets/${encodeURIComponent(no as string)}/ai/classify`),
+    onSuccess: () => toastSuccess(t("ticket.aiClassifyTriggered")),
+    onError: (error) => toastError(error),
+  })
+
+  const aiApplyMutation = useMutation({
+    mutationFn: (typeName: string) =>
+      api.post<Ticket>(`/tickets/${encodeURIComponent(no as string)}/ai/classify/apply`, { type: typeName }),
+    onSuccess: () => {
+      toastSuccess(t("ticket.aiClassifyApplied"))
+      invalidateTicket()
+    },
+    onError: (error) => toastError(error),
+  })
+
+  const aiToggleMutation = useMutation({
+    mutationFn: (enable: boolean) =>
+      api.post<Ticket>(`/tickets/${encodeURIComponent(no as string)}/ai/toggle`, { enable }),
+    onSuccess: () => {
+      toastSuccess(t("ticket.aiToggled"))
+      invalidateTicket()
+    },
+    onError: (error) => toastError(error),
+  })
+
   if (ticketQuery.isPending) return <InlineLoader />
   if (ticketQuery.isError) return <ErrorState error={ticketQuery.error} onRetry={() => void ticketQuery.refetch()} />
   if (!ticket) return <ErrorState error={new Error(t("ticket.notFound"))} />
@@ -212,6 +248,16 @@ export function TicketDetailPage() {
         description={`${ticket.userName} · ${t("ticket.startedAt")} ${formatDateTime(ticket.startedAt, i18n.language)}`}
       >
         <StatusBadge status={ticket.status} />
+        {ticket.aiState === "active" ? (
+          <Badge variant="outline" className="border-primary/40 text-primary font-normal">
+            <Sparkles className="size-3" />
+            {t("ticket.aiStateActive")}
+          </Badge>
+        ) : ticket.aiState === "takeover" ? (
+          <Badge variant="outline" className="text-muted-foreground font-normal">
+            {t("ticket.aiStateTakeover")}
+          </Badge>
+        ) : null}
         {ticket.status === "locked" && ticket.lockReason ? (
           <Badge variant="outline" className="border-status-locked/40 text-status-locked font-normal">
             {t(`status.lockReason.${ticket.lockReason}`)}
@@ -252,6 +298,18 @@ export function TicketDetailPage() {
               {t("ticket.actionClose")}
             </Button>
           </>
+        ) : null}
+
+        {canOperate && ticket.status !== "closed" && ticket.aiState ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={aiToggleMutation.isPending}
+            onClick={() => aiToggleMutation.mutate(ticket.aiState !== "active")}
+          >
+            <Sparkles className="size-4" />
+            {ticket.aiState === "active" ? t("ticket.aiPause") : t("ticket.aiResume")}
+          </Button>
         ) : null}
 
         {!canOperate ? (
@@ -345,6 +403,78 @@ export function TicketDetailPage() {
                     </div>
                   ) : null}
                 </>
+              ) : null}
+            </CardContent>
+          </Card>
+
+          {/* AI 摘要与分类建议 */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Wand2 className="size-4" />
+                {t("ticket.aiCardTitle")}
+              </CardTitle>
+              <CardDescription>{t("ticket.aiCardHint")}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {ticket.aiSummary ? (
+                <div className="bg-muted/40 space-y-1 rounded-lg border p-3">
+                  <p className="text-muted-foreground text-xs">
+                    {t("ticket.aiSummaryLabel")}
+                    {ticket.aiSummaryAt
+                      ? ` · ${formatDateTime(ticket.aiSummaryAt, i18n.language)}`
+                      : ""}
+                  </p>
+                  <p className="text-sm break-words whitespace-pre-wrap">{ticket.aiSummary}</p>
+                </div>
+              ) : (
+                <p className="text-muted-foreground text-xs">{t("ticket.aiSummaryEmpty")}</p>
+              )}
+
+              {ticket.aiClassificationSuggestion ? (
+                <div className="space-y-1 rounded-lg border border-primary/30 bg-primary/5 p-3">
+                  <p className="text-muted-foreground text-xs">{t("ticket.aiClassifyLabel")}</p>
+                  <p className="text-sm">
+                    <span className="font-medium">{ticket.aiClassificationSuggestion.type}</span>
+                    {ticket.aiClassificationSuggestion.reason ? (
+                      <span className="text-muted-foreground"> — {ticket.aiClassificationSuggestion.reason}</span>
+                    ) : null}
+                  </p>
+                  {canOperate && ticket.status !== "closed" ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="mt-1"
+                      disabled={aiApplyMutation.isPending}
+                      onClick={() => aiApplyMutation.mutate(ticket.aiClassificationSuggestion!.type)}
+                    >
+                      {t("ticket.aiClassifyApply")}
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {canOperate ? (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={aiSummaryMutation.isPending}
+                    onClick={() => aiSummaryMutation.mutate()}
+                  >
+                    <FileText className="size-4" />
+                    {ticket.aiSummary ? t("ticket.aiSummaryRefresh") : t("ticket.aiSummaryGenerate")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={aiClassifyMutation.isPending}
+                    onClick={() => aiClassifyMutation.mutate()}
+                  >
+                    <Sparkles className="size-4" />
+                    {t("ticket.aiClassifyTrigger")}
+                  </Button>
+                </div>
               ) : null}
             </CardContent>
           </Card>
@@ -474,7 +604,12 @@ const MessageItem = memo(function MessageItem({ message, language }: { message: 
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="font-medium">{message.userName || message.userId}</span>
-          {message.isBot ? (
+          {message.isAi ? (
+            <Badge variant="secondary" className="h-4 border-primary/30 px-1.5 text-[10px] text-primary">
+              <Sparkles className="size-2.5" />
+              {t("ticket.fromAI")}
+            </Badge>
+          ) : message.isBot ? (
             <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
               {t("ticket.fromBot")}
             </Badge>

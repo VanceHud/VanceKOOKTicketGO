@@ -19,6 +19,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Sparkles,
   Trash2,
   UserPlus,
   X,
@@ -119,6 +120,16 @@ export function TicketTypesPage() {
       api.patch<TicketType>(`/types/${payload.id}`, { enabled: payload.enabled }),
     onSuccess: (_data, variables) => {
       toastSuccess(variables.enabled ? t("types.enableSuccess") : t("types.disableSuccess"))
+      invalidate()
+    },
+    onError: (error) => toastError(error),
+  })
+
+  const toggleTypeAIMutation = useMutation({
+    mutationFn: (payload: { id: number; aiAutoReply: boolean }) =>
+      api.patch<TicketType>(`/types/${payload.id}`, { aiAutoReply: payload.aiAutoReply }),
+    onSuccess: (_data, variables) => {
+      toastSuccess(variables.aiAutoReply ? t("types.aiEnableSuccess") : t("types.aiDisableSuccess"))
       invalidate()
     },
     onError: (error) => toastError(error),
@@ -342,6 +353,17 @@ export function TicketTypesPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-1">
+                      <div className="mr-1 flex items-center gap-1.5" title={t("types.aiAutoReplyHint")}>
+                        <Sparkles className="text-muted-foreground size-3.5" />
+                        <Switch
+                          checked={item.aiAutoReply}
+                          disabled={toggleTypeAIMutation.isPending}
+                          aria-label={t("types.aiAutoReplyLabel")}
+                          onCheckedChange={(checked) =>
+                            toggleTypeAIMutation.mutate({ id: item.id, aiAutoReply: checked })
+                          }
+                        />
+                      </div>
                       <Switch
                         checked={item.enabled}
                         disabled={toggleTypeMutation.isPending}

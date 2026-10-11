@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VanceHud/VanceKOOKTicketGO/internal/ai"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/eventbus"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook"
 	"github.com/VanceHud/VanceKOOKTicketGO/internal/kook/kooktest"
@@ -49,9 +50,21 @@ type botEnv struct {
 	panelID uint
 	// typeID 是默认面板所属的工单类型（带 rolePanel 类型角色）。
 	typeID uint
+	// aiService 在注入 AI 服务时非空（AI 集成测试使用）。
+	aiService *ai.Service
 }
 
-func newBotEnv(t *testing.T) *botEnv {
+// botEnvOption 是测试环境的可选装配项。
+type botEnvOption func(*botEnv)
+
+// withAI 在机器人创建前构造并注入 AI 服务（此时 store/bus 已就绪）。
+func withAI(build func(*botEnv) *ai.Service) botEnvOption {
+	return func(env *botEnv) {
+		env.aiService = build(env)
+	}
+}
+
+func newBotEnv(t *testing.T, opts ...botEnvOption) *botEnv {
 	t.Helper()
 
 	loc, err := time.LoadLocation("Asia/Shanghai")
@@ -115,6 +128,9 @@ func newBotEnv(t *testing.T) *botEnv {
 	svc := ticket.NewService(st, bus, ticket.NewNoopPlatform(nil), loc, st.Settings.OutdateHours)
 
 	env := &botEnv{t: t, store: st, bus: bus, svc: svc, mock: mock, loc: loc, panelID: seededPanel.ID, typeID: seededType.ID}
+	for _, opt := range opts {
+		opt(env)
+	}
 
 	b, err := New(Deps{
 		Store:     st,
@@ -122,6 +138,7 @@ func newBotEnv(t *testing.T) *botEnv {
 		Tickets:   svc,
 		Location:  loc,
 		AppSecret: []byte("app-secret-for-bot-tests-0123456789"),
+		AI:        env.aiService,
 		Config: func(context.Context) (*Config, error) {
 			return &Config{
 				Token:          testToken,

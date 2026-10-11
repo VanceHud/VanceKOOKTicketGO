@@ -87,6 +87,11 @@ func NewRouter(d Deps) *gin.Engine {
 	operator.POST("/tickets/:no/lock", server.handleTicketLock)
 	operator.POST("/tickets/:no/reopen", server.handleTicketReopen)
 	operator.POST("/tickets/:no/notes", server.handleTicketAddNote)
+	// 工单级 AI 操作（摘要 / 分类 / 自动应答开关）：同样需要客服及以上
+	operator.POST("/tickets/:no/ai/summary", server.handleTicketAISummary)
+	operator.POST("/tickets/:no/ai/classify", server.handleTicketAIClassify)
+	operator.POST("/tickets/:no/ai/classify/apply", server.handleTicketAIClassifyApply)
+	operator.POST("/tickets/:no/ai/toggle", server.handleTicketAIToggle)
 
 	// 管理：仅管理员
 	admin := secured.Group("", auth.RequireRole(store.RoleAdmin))
@@ -125,6 +130,15 @@ func NewRouter(d Deps) *gin.Engine {
 	admin.POST("/bot/activity", server.handleActivityStart)
 	admin.DELETE("/bot/activity", server.handleActivityStop)
 	admin.PUT("/bot/activity/settings", server.handleActivitySettings)
+	// AI 设置与知识库管理：影响 AI 行为与全局配置，归入管理员权限
+	admin.GET("/ai/settings", server.handleAISettingsGet)
+	admin.PUT("/ai/settings", server.handleAISettingsUpdate)
+	admin.POST("/ai/test", server.handleAITest)
+	admin.GET("/ai/knowledge", server.handleAIKnowledgeList)
+	admin.POST("/ai/knowledge", server.handleAIKnowledgeCreate)
+	admin.POST("/ai/knowledge/search", server.handleAIKnowledgeSearch)
+	admin.PATCH("/ai/knowledge/:id", server.handleAIKnowledgeUpdate)
+	admin.DELETE("/ai/knowledge/:id", server.handleAIKnowledgeDelete)
 
 	// 静态资源与 SPA 前端。
 	if d.Web != nil {

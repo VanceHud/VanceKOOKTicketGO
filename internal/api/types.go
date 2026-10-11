@@ -24,6 +24,8 @@ type ticketTypeRequest struct {
 	Name        *string `json:"name"`
 	Description *string `json:"description"`
 	Enabled     *bool   `json:"enabled"`
+	// AIAutoReply 控制该类型工单是否启用 AI 自动应答（还需全局开关同时打开）。
+	AIAutoReply *bool `json:"aiAutoReply"`
 }
 
 // normalizeTicketTypeName 规整并校验类型名称。
@@ -95,6 +97,9 @@ func (s *Server) handleTypeCreate(c *gin.Context) {
 	if req.Enabled != nil {
 		item.Enabled = *req.Enabled
 	}
+	if req.AIAutoReply != nil {
+		item.AIAutoReply = *req.AIAutoReply
+	}
 	if err := s.Store.Types.Create(item); err != nil {
 		s.failStore(c, err, "type.create")
 		return
@@ -149,6 +154,9 @@ func (s *Server) handleTypeUpdate(c *gin.Context) {
 	}
 	if req.Enabled != nil {
 		updates["enabled"] = *req.Enabled
+	}
+	if req.AIAutoReply != nil {
+		updates["ai_auto_reply"] = *req.AIAutoReply
 	}
 
 	if len(updates) > 0 {

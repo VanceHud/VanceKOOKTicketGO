@@ -8,6 +8,7 @@
 import {
   BarChart3,
   Bot,
+  BookOpen,
   Gamepad2,
   LayoutDashboard,
   LayoutPanelLeft,
@@ -15,6 +16,7 @@ import {
   Settings,
   ShieldCheck,
   SmilePlus,
+  Sparkles,
   Ticket,
   Users,
 } from "lucide-react"
@@ -70,6 +72,8 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: "/bot", labelKey: "nav.bot", icon: Bot },
       { to: "/activity", labelKey: "nav.activity", icon: Gamepad2 },
+      { to: "/ai-settings", labelKey: "nav.aiSettings", icon: Sparkles, minRole: "admin" },
+      { to: "/ai-knowledge", labelKey: "nav.aiKnowledge", icon: BookOpen, minRole: "admin" },
       { to: "/users", labelKey: "nav.users", icon: Users, minRole: "admin" },
       { to: "/settings", labelKey: "nav.settings", icon: Settings, minRole: "admin" },
       { to: "/audit", labelKey: "nav.audit", icon: ScrollText, minRole: "admin" },

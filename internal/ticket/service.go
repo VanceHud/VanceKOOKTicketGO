@@ -206,6 +206,30 @@ func (s *Service) AddBotMessage(ctx context.Context, no, channelID, content stri
 	return message, nil
 }
 
+// AddAIMessage 记录一条 AI 自动应答生成的回复，并广播消息事件。
+//
+// 与 AddBotMessage 的差异：IsAI 标记 + 文本类型——时间线渲染「AI」徽章，
+// 学习闭环用它在人工纠正时识别“AI 回复之后又出现了人工回复”。
+// KOOK 侧的发送同样由调用方完成（见 bot 包对 ai.Sender 的实现）。
+func (s *Service) AddAIMessage(ctx context.Context, no, channelID, content string) (*store.TicketMessage, error) {
+	message := &store.TicketMessage{
+		TicketNo:  no,
+		ChannelID: channelID,
+		UserID:    "ai",
+		UserName:  "AI 助手",
+		Content:   content,
+		MsgType:   store.MsgTypeText,
+		IsBot:     true,
+		IsAI:      true,
+		CreatedAt: store.Now(),
+	}
+	if err := s.store.Tickets.AddMessage(message); err != nil {
+		return nil, err
+	}
+	s.publish(eventbus.EventTicketMessage, no, message)
+	return message, nil
+}
+
 // DiscardPending 回收占号：仅在状态仍为 pending 时生效（编号尚未对外暴露）。
 func (s *Service) DiscardPending(ctx context.Context, no string) error {
 	if err := s.store.Tickets.Delete(no); err != nil {

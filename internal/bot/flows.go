@@ -290,6 +290,11 @@ func (b *Bot) openTicket(ctx context.Context, panelChannelID, userID string, use
 	// 最后回到按钮所在的面板频道，给开单人一条「仅自己可见」的完成提示与频道跳转链接。
 	b.notifyTicketCreated(ctx, panelChannelID, userID, activated)
 
+	// AI 钩子：类型开了自动应答时把工单置为 AI 应答中。
+	if b.deps.AI != nil {
+		b.deps.AI.OnTicketOpened(ctx, activated)
+	}
+
 	b.deps.Store.Audit.Write(&store.AuditLog{
 		Actor:     userInfo.FullName(),
 		ActorType: store.ActorTypeKook,
@@ -384,6 +389,10 @@ func (b *Bot) closeTicket(ctx context.Context, channelID, userID, ticketNo strin
 		b.sendEphemeral(ctx, channelID, userID, "关闭工单失败："+friendlyError(err))
 		return
 	}
+	// AI 钩子：按配置在关单后异步生成摘要（不阻塞关单流程，结果落在 WebUI 详情页）。
+	if b.deps.AI != nil {
+		b.triggerCloseSummary(t.No)
+	}
 	b.deps.Logger.Info("工单已关闭", "ticket_no", t.No, "by", actor.Name,
 		"elapsed", time.Since(started).Round(time.Millisecond).String())
 }
@@ -420,6 +429,10 @@ func (b *Bot) reopenTicket(ctx context.Context, channelID, userID, ticketNo stri
 	if _, err := b.deps.Tickets.Reopen(ctx, t.No, actor); err != nil {
 		b.sendEphemeral(ctx, channelID, userID, "重新激活失败："+friendlyError(err))
 		return
+	}
+	// AI 钩子：重新激活时按类型开关重置人工接管状态。
+	if b.deps.AI != nil {
+		b.deps.AI.OnTicketReopened(ctx, t)
 	}
 	b.deps.Logger.Info("工单已重新激活", "ticket_no", t.No, "by", actor.Name)
 }
@@ -506,6 +519,9 @@ func (b *Bot) archiveMessage(ctx context.Context, event kook.Event) {
 		return
 	}
 	b.publishMessage(t.No, message)
+
+	// AI 钩子：开单人消息安排自动回复，管理员消息触发接管与知识捕获。
+	b.notifyAIMessage(ctx, t, message)
 
 	// 卡片消息的事件推送不带内容（用户上传的文件也被平台转成卡片消息下发），
 	// 需要异步调用 message/view 补全卡片 JSON 与媒体地址。

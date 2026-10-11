@@ -59,6 +59,8 @@ func (b *Bot) handleCommand(ctx context.Context, event kook.Event) {
 		b.cmdTicketComment(ctx, event, args)
 	case "tkclose":
 		b.cmdTicketClose(ctx, event, args)
+	case "tkai":
+		b.cmdTicketAI(ctx, event, args)
 	case "aar", "add_admin_role":
 		b.cmdAddAdminRole(ctx, event, args)
 	case "kill":
@@ -265,6 +267,52 @@ func (b *Bot) cmdTicketClose(ctx context.Context, event kook.Event, args []strin
 		return
 	}
 	b.deps.Logger.Info("工单已关闭", "ticket_no", t.No, "by", actor.Name, "note_len", len([]rune(note)))
+}
+
+// cmdTicketAI 在工单频道内暂停或恢复 AI 自动应答（对应 /tkai 命令）。
+//
+// 用法：/tkai off 暂停（转人工）；/tkai on 恢复（要求全局与类型开关都已开启）。
+// 恢复在重新激活工单时也会自动发生（按类型开关）。
+func (b *Bot) cmdTicketAI(ctx context.Context, event kook.Event, args []string) {
+	if b.deps.AI == nil {
+		b.replyEphemeral(ctx, event, "AI 能力未启用")
+		return
+	}
+	t, err := b.deps.Store.Tickets.ByChannel(event.TargetID)
+	if err != nil {
+		b.replyEphemeral(ctx, event, "该命令只能在工单频道内使用")
+		return
+	}
+	if !b.isTicketAdmin(ctx, event.AuthorID, t) {
+		b.replyEphemeral(ctx, event, "只有管理员可以切换 AI 状态")
+		return
+	}
+	if len(args) == 0 {
+		state := "未启用"
+		switch t.AIState {
+		case store.AITicketActive:
+			state = "AI 应答中"
+		case store.AITicketTakeover:
+			state = "人工已接管"
+		}
+		b.replyEphemeral(ctx, event, fmt.Sprintf("当前状态：%s\n用法：`/tkai on` 恢复 / `/tkai off` 暂停", state))
+		return
+	}
+
+	enable := strings.EqualFold(strings.TrimSpace(args[0]), "on")
+	if !enable && !strings.EqualFold(strings.TrimSpace(args[0]), "off") {
+		b.replyEphemeral(ctx, event, "用法：`/tkai on` 恢复 / `/tkai off` 暂停")
+		return
+	}
+	if err := b.deps.AI.ToggleTicket(t.No, enable); err != nil {
+		b.replyEphemeral(ctx, event, "切换失败："+friendlyError(err))
+		return
+	}
+	if enable {
+		b.replyEphemeral(ctx, event, "已恢复 AI 自动应答")
+	} else {
+		b.replyEphemeral(ctx, event, "已暂停 AI 自动应答，转人工处理")
+	}
 }
 
 // cmdAddAdminRole 把角色加入面板管理员或全局管理员（对应 /aar）。

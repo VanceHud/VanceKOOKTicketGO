@@ -311,6 +311,13 @@ func (r *TicketsRepo) CountMessages(no string) (int64, error) {
 	return total, err
 }
 
+// CountAIMessages 统计某工单的 AI 自动回复条数，用于「每单回复上限」护栏。
+func (r *TicketsRepo) CountAIMessages(no string) (int64, error) {
+	var total int64
+	err := r.db.Model(&TicketMessage{}).Where("ticket_no = ? AND is_ai = ?", no, true).Count(&total).Error
+	return total, err
+}
+
 // MaxExportMessages 是导出聊天记录时的消息条数上限。
 const MaxExportMessages = 20000
 
