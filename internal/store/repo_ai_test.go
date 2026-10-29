@@ -22,6 +22,29 @@ func TestAISettingsDefaultsAndRoundTrip(t *testing.T) {
 	if cfg.SystemPrompt != DefaultAISystemPrompt || cfg.Footer != DefaultAIFooter {
 		t.Fatal("默认提示词与尾注应生效")
 	}
+	// 存量实例落库了旧默认提示词：读取时自动升级为新默认。
+	if err := st.AI.SaveConfig(&AISettings{SystemPrompt: legacyDefaultAISystemPrompt}, "", false, testSecret()); err != nil {
+		t.Fatalf("保存旧默认提示词失败: %v", err)
+	}
+	cfg, err = st.AI.Config(testSecret())
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if cfg.SystemPrompt != DefaultAISystemPrompt {
+		t.Fatal("旧默认提示词应自动升级为新默认")
+	}
+	// 自定义提示词不受影响。
+	if err := st.AI.SaveConfig(&AISettings{SystemPrompt: "自定义"}, "", false, testSecret()); err != nil {
+		t.Fatalf("保存自定义提示词失败: %v", err)
+	}
+	cfg, _ = st.AI.Config(testSecret())
+	if cfg.SystemPrompt != "自定义" {
+		t.Fatalf("自定义提示词不应被覆盖: %q", cfg.SystemPrompt)
+	}
+	// 还原为空，避免影响后续断言。
+	if err := st.AI.SaveConfig(&AISettings{SystemPrompt: ""}, "", false, testSecret()); err != nil {
+		t.Fatalf("重置提示词失败: %v", err)
+	}
 	if cfg.QuietSeconds != DefaultAIQuietSeconds || cfg.MaxReplies != DefaultAIMaxReplies {
 		t.Fatal("默认护栏参数应生效")
 	}

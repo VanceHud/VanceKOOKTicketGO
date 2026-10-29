@@ -237,12 +237,8 @@ func (s *Service) generateReply(ctx context.Context, no string) {
 		return
 	}
 
-	reply, classification := parseReplyJSON(resp.Content)
+	action, reply, classification := parseReplyJSON(resp.Content)
 	reply = strings.TrimSpace(reply)
-	if reply == "" {
-		s.deps.Logger.Warn("AI 回复内容为空，跳过发送", "ticket_no", no)
-		return
-	}
 
 	// 分类建议（best-effort，失败不影响回复）。
 	if classification != nil && t.AIClassification == "" {
@@ -253,6 +249,20 @@ func (s *Service) generateReply(ctx context.Context, no string) {
 				s.publish(no, map[string]any{"aiClassification": encoded})
 			}
 		}
+	}
+
+	// 模型判断用户消息不需要回应（道谢、确认、寒暄收尾等）：静默跳过。
+	if action == replyActionSilent {
+		s.deps.Logger.Info("AI 判断无需回复，跳过发送", "ticket_no", no)
+		return
+	}
+	// 转人工未给话术时补兜底的，避免出现「发送了空消息」。
+	if action == replyActionEscalate && reply == "" {
+		reply = "这个问题我需要转交人工客服处理，请稍等。"
+	}
+	if reply == "" {
+		s.deps.Logger.Warn("AI 回复内容为空，跳过发送", "ticket_no", no)
+		return
 	}
 
 	// 发送（含可配置尾注）。
@@ -272,6 +282,13 @@ func (s *Service) generateReply(ctx context.Context, no string) {
 		return
 	}
 	s.deps.Logger.Info("AI 已回复工单", "ticket_no", no, "reply_no", replied+1)
+
+	// 模型主动转人工：单向接管（与回复上限一致），避免对同一用户连续瞎答，
+	// 可由 /tkai on 或工单重开恢复。
+	if action == replyActionEscalate {
+		s.deps.Logger.Info("AI 无法确定答案，转为等待人工", "ticket_no", no)
+		s.setAIState(no, store.AITicketTakeover)
+	}
 }
 
 // recentUserQuery 拼接最近的开单人消息作为知识检索查询。

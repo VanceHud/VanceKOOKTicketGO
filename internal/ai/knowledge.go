@@ -121,6 +121,16 @@ type knowledgeHit struct {
 	score float64
 }
 
+// 相关度门槛：与用户问题基本无关的知识注入提示词只会诱导模型套用错误答案，
+// 宁可不注入。
+const (
+	// minKeywordCoverage 是关键词模式要求的最小命中率（命中词数 / 查询词数）。
+	minKeywordCoverage = 0.5
+	// minEmbeddingSimilarity 是向量模式要求的最小余弦相似度
+	// （按常用中文 embedding 模型的分布取值，更换模型时可调整）。
+	minEmbeddingSimilarity = 0.75
+)
+
 // retrieveKnowledge 按查询检索 TopK 条启用中的知识。
 //
 // 配置了 embedding 模型：查询与条目都向量化后按余弦相似度排序，
@@ -209,7 +219,11 @@ func (s *Service) retrieveByEmbedding(ctx context.Context, cfg *store.AISettings
 		if len(vectorFor[i]) == 0 {
 			continue
 		}
-		score := cosine(vectors[0], vectorFor[i])
+		similarity := cosine(vectors[0], vectorFor[i])
+		if similarity < minEmbeddingSimilarity {
+			continue // 相似度过低：条目与问题无关，注入只会误导
+		}
+		score := similarity
 		if entries[i].IsCorrection {
 			score *= 1.25
 		}
@@ -219,6 +233,8 @@ func (s *Service) retrieveByEmbedding(ctx context.Context, cfg *store.AISettings
 }
 
 // retrieveByKeyword 用关键词计分检索（无 embedding 配置时的兜底）。
+//
+// 要求命中词覆盖率达标：零散命中一两个常见词的条目与问题基本无关。
 func retrieveByKeyword(entries []store.AIKnowledge, query string) []knowledgeHit {
 	terms := splitQueryTerms(query)
 	if len(terms) == 0 {
@@ -228,15 +244,16 @@ func retrieveByKeyword(entries []store.AIKnowledge, query string) []knowledgeHit
 	for i := range entries {
 		entry := entries[i]
 		haystack := entry.Question + "\n" + entry.Answer
-		var score float64
+		matched := 0
 		for _, term := range terms {
 			if strings.Contains(haystack, term) {
-				score++
+				matched++
 			}
 		}
-		if score <= 0 {
+		if matched == 0 || float64(matched)/float64(len(terms)) < minKeywordCoverage {
 			continue
 		}
+		score := float64(matched)
 		if entry.IsCorrection {
 			score *= 1.25
 		}

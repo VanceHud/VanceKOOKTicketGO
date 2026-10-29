@@ -401,29 +401,154 @@ func TestClassificationAndApply(t *testing.T) {
 
 func TestParseReplyJSONFallbacks(t *testing.T) {
 	// 纯 JSON。
-	reply, class := parseReplyJSON(`{"reply":"你好","suggested_type":"咨询","type_reason":"r"}`)
-	if reply != "你好" || class == nil || class.Type != "咨询" {
-		t.Fatalf("纯 JSON 解析不符: %q %+v", reply, class)
+	action, reply, class := parseReplyJSON(`{"action":"reply","reply":"你好","suggested_type":"咨询","type_reason":"r"}`)
+	if action != replyActionReply || reply != "你好" || class == nil || class.Type != "咨询" {
+		t.Fatalf("纯 JSON 解析不符: %q %q %+v", action, reply, class)
+	}
+	// action 缺省按 reply 处理。
+	action, reply, _ = parseReplyJSON(`{"reply":"你好"}`)
+	if action != replyActionReply || reply != "你好" {
+		t.Fatalf("action 缺省应按 reply: %q %q", action, reply)
+	}
+	// silent：无回复正文。
+	action, reply, _ = parseReplyJSON(`{"action":"silent","reply":""}`)
+	if action != replyActionSilent || reply != "" {
+		t.Fatalf("silent 解析不符: %q %q", action, reply)
+	}
+	// escalate。
+	action, reply, _ = parseReplyJSON(`{"action":"escalate","reply":"转人工"}`)
+	if action != replyActionEscalate || reply != "转人工" {
+		t.Fatalf("escalate 解析不符: %q %q", action, reply)
+	}
+	// 未知 action 值按 reply 处理。
+	action, reply, _ = parseReplyJSON(`{"action":"chat","reply":"你好"}`)
+	if action != replyActionReply || reply != "你好" {
+		t.Fatalf("未知 action 应按 reply: %q %q", action, reply)
 	}
 	// 代码块包裹。
-	reply, class = parseReplyJSON("```json\n{\"reply\":\"好的\"}\n```")
-	if reply != "好的" || class != nil {
-		t.Fatalf("代码块解析不符: %q %+v", reply, class)
+	action, reply, class = parseReplyJSON("```json\n{\"reply\":\"好的\"}\n```")
+	if action != replyActionReply || reply != "好的" || class != nil {
+		t.Fatalf("代码块解析不符: %q %q %+v", action, reply, class)
 	}
 	// 前后有说明文字。
-	reply, _ = parseReplyJSON(`以下是回复：{"reply":"就这样"} 希望有帮助`)
+	_, reply, _ = parseReplyJSON(`以下是回复：{"reply":"就这样"} 希望有帮助`)
 	if reply != "就这样" {
 		t.Fatalf("前后缀解析不符: %q", reply)
 	}
 	// 完全不是 JSON：整段作为回复。
-	reply, _ = parseReplyJSON("直接回答你")
-	if reply != "直接回答你" {
-		t.Fatalf("兜底解析不符: %q", reply)
+	action, reply, _ = parseReplyJSON("直接回答你")
+	if action != replyActionReply || reply != "直接回答你" {
+		t.Fatalf("兜底解析不符: %q %q", action, reply)
 	}
-	// JSON 但无 reply 字段：整段作为回复。
-	reply, _ = parseReplyJSON(`{"foo":"bar"}`)
-	if reply != `{"foo":"bar"}` {
-		t.Fatalf("无 reply 字段应兜底: %q", reply)
+	// JSON 但无 reply 与 action 字段：整段作为回复。
+	action, reply, _ = parseReplyJSON(`{"foo":"bar"}`)
+	if action != replyActionReply || reply != `{"foo":"bar"}` {
+		t.Fatalf("无 reply 字段应兜底: %q %q", action, reply)
+	}
+}
+
+func TestSilentActionSkipsSend(t *testing.T) {
+	client := &fakeClient{chatFn: func(req llm.ChatRequest) (string, error) {
+		return `{"action":"silent","reply":""}`, nil
+	}}
+	sender := &fakeSender{}
+	svc, st := newTestService(t, client, sender)
+
+	ticket, _ := seedTicket(t, st, "TK-260108-TEST", true)
+	svc.OnTicketOpened(context.Background(), ticket)
+	msg := addMessage(t, st, ticket.No, "u1", "好的，谢谢", false, false)
+	svc.OnUserMessage(context.Background(), ticket, msg)
+
+	// 等到 LLM 被调用过，再确认没有发送任何消息。
+	if !waitFor(t, 5*time.Second, func() bool { return len(client.chats) == 1 }) {
+		t.Fatal("等待 LLM 调用超时")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := sender.sent(); len(got) != 0 {
+		t.Fatalf("silent 不应发送消息: %v", got)
+	}
+	// 状态应保持 active（静默不等于接管）。
+	updated, _ := st.Tickets.ByNo(ticket.No)
+	if updated.AIState != store.AITicketActive {
+		t.Fatalf("silent 后应保持 active: %q", updated.AIState)
+	}
+}
+
+func TestEscalateActionSendsAndTakesOver(t *testing.T) {
+	client := &fakeClient{chatFn: func(req llm.ChatRequest) (string, error) {
+		return `{"action":"escalate","reply":"这个问题我需要转交人工客服处理"}`, nil
+	}}
+	sender := &fakeSender{}
+	svc, st := newTestService(t, client, sender)
+
+	ticket, _ := seedTicket(t, st, "TK-260109-TEST", true)
+	svc.OnTicketOpened(context.Background(), ticket)
+	msg := addMessage(t, st, ticket.No, "u1", "你们的赔偿政策到底怎么算", false, false)
+	svc.OnUserMessage(context.Background(), ticket, msg)
+
+	if !waitFor(t, 5*time.Second, func() bool { return len(sender.sent()) == 1 }) {
+		t.Fatal("等待 AI 回复超时")
+	}
+	if got := sender.sent()[0]; !strings.Contains(got, "转交人工客服") || !strings.Contains(got, "—— AI") {
+		t.Fatalf("转人工话术应含正文与尾注: %q", got)
+	}
+	if !waitFor(t, 3*time.Second, func() bool {
+		updated, err := st.Tickets.ByNo(ticket.No)
+		return err == nil && updated.AIState == store.AITicketTakeover
+	}) {
+		t.Fatal("escalate 后应转为接管")
+	}
+
+	// escalate 但未给话术：用兜底文案。
+	client2 := &fakeClient{chatFn: func(req llm.ChatRequest) (string, error) {
+		return `{"action":"escalate","reply":""}`, nil
+	}}
+	sender2 := &fakeSender{}
+	svc2, st2 := newTestService(t, client2, sender2)
+	ticket2, _ := seedTicket(t, st2, "TK-260110-TEST", true)
+	svc2.OnTicketOpened(context.Background(), ticket2)
+	msg2 := addMessage(t, st2, ticket2.No, "u1", "赔偿到底怎么算", false, false)
+	svc2.OnUserMessage(context.Background(), ticket2, msg2)
+	if !waitFor(t, 5*time.Second, func() bool { return len(sender2.sent()) == 1 }) {
+		t.Fatal("等待兜底转人工回复超时")
+	}
+	if got := sender2.sent()[0]; !strings.Contains(got, "人工客服") {
+		t.Fatalf("escalate 空话术应使用兜底文案: %q", got)
+	}
+}
+
+func TestReplyRequestContract(t *testing.T) {
+	cfg := &store.AISettings{SystemPrompt: "你是客服", Temperature: 0.4}
+	ticket := &store.Ticket{No: "TK-1", TypeName: "咨询", UserID: "u1", UserName: "提问者"}
+	messages := []store.TicketMessage{
+		{TicketNo: "TK-1", UserID: "u1", Content: "退款多久", MsgType: store.MsgTypeText},
+	}
+
+	// 回复请求始终开启 JSON mode，并携带输出协议。
+	req := buildReplyRequest(cfg, ticket, messages, nil, nil, false)
+	if !req.JSONMode {
+		t.Fatal("回复请求应始终开启 JSONMode")
+	}
+	system := req.Messages[0].Content
+	for _, want := range []string{`"action"`, "silent", "escalate", "suggested_type 与 type_reason 留空"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("输出协议缺少 %q: %s", want, system)
+		}
+	}
+
+	// 需要分类时给出类型候选。
+	req = buildReplyRequest(cfg, ticket, messages, nil, []string{"咨询", "投诉"}, true)
+	if !strings.Contains(req.Messages[0].Content, "咨询、投诉") {
+		t.Fatalf("分类候选未进入协议: %s", req.Messages[0].Content)
+	}
+
+	// 知识示例带相关度提示。
+	req = buildReplyRequest(cfg, ticket, messages, []store.AIKnowledge{
+		{Question: "退款多久到账", Answer: "3-5 个工作日"},
+	}, nil, false)
+	system = req.Messages[0].Content
+	if !strings.Contains(system, "确实相关时才参考") || !strings.Contains(system, "3-5 个工作日") {
+		t.Fatalf("知识示例提示不符: %s", system)
 	}
 }
 
@@ -443,5 +568,43 @@ func TestKeywordRetrievalAndCorrectionBoost(t *testing.T) {
 	}, "退款\n多久")
 	if len(corrected) != 1 || corrected[0].score <= hits[0].score {
 		t.Fatalf("纠正条目应加权: %+v vs %+v", corrected, hits)
+	}
+}
+
+func TestRetrievalRelevanceThresholds(t *testing.T) {
+	// 关键词模式：4 个查询词只命中 1 个（覆盖率 < 0.5）应被过滤。
+	hits := retrieveByKeyword([]store.AIKnowledge{
+		{Question: "怎么改密码", Answer: "设置里改"},
+	}, "退款\n多久\n到账\n密码")
+	if len(hits) != 0 {
+		t.Fatalf("覆盖率不足应被过滤: %+v", hits)
+	}
+
+	// 向量模式：余弦相似度低于阈值应被过滤。
+	client := &fakeClient{embedFn: func(texts []string) ([][]float32, error) {
+		// 查询向量固定为 [1,0]；条目向量已落库，不参与本次嵌入。
+		return [][]float32{{1, 0}}, nil
+	}}
+	sender := &fakeSender{}
+	svc, st := newTestService(t, client, sender)
+	if err := st.AI.SaveConfig(&store.AISettings{
+		Enabled: true, BaseURL: "https://fake", Model: "fake-model",
+		EmbeddingModel: "fake-emb", SystemPrompt: "你是客服",
+		QuietSeconds: 1, MaxReplies: 10, ContextMessages: 20, KnowledgeTopK: 5,
+	}, "fake-key", false, testAISecret()); err != nil {
+		t.Fatalf("保存配置失败: %v", err)
+	}
+	entries := []store.AIKnowledge{
+		{Question: "无关问题", Answer: "无关答案", Embedding: "[0,1]"},           // 相似度 0
+		{Question: "退款多久到账", Answer: "3-5 个工作日", Embedding: "[0.6,0.8]"}, // 相似度 0.6
+		{Question: "退款时效", Answer: "同上", Embedding: "[1,0]"},             // 相似度 1
+	}
+	cfg, err := svc.config()
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	hits = svc.retrieveByEmbedding(context.Background(), cfg, entries, "退款多久到账")
+	if len(hits) != 1 || hits[0].entry.Question != "退款时效" {
+		t.Fatalf("低相似度条目应被过滤: %+v", hits)
 	}
 }

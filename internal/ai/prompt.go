@@ -17,14 +17,26 @@ func errInvalidState(message string) error {
 	return fmt.Errorf("%w：%s", ErrInvalidAIState, message)
 }
 
+// 回复决策动作：模型在输出 JSON 里先表态，服务层据此决定发不发、怎么发。
+const (
+	// replyActionReply 正常回复用户。
+	replyActionReply = "reply"
+	// replyActionSilent 用户消息不需要回应（道谢、确认、表情、寒暄收尾）：不发送。
+	replyActionSilent = "silent"
+	// replyActionEscalate 模型无法确定答案：发送转人工说明并接管，避免连续瞎答。
+	replyActionEscalate = "escalate"
+)
+
 // buildReplyRequest 组装自动应答的对话请求。
 //
-// 消息结构：system（模板 + 知识示例 + 可选的分类指令）→ 对话历史
+// 消息结构：system（模板 + 知识示例 + 输出协议）→ 对话历史
 // （开单人 = user，人工/AI 回复 = assistant，媒体消息转占位符）。
+// 输出协议由服务层统一追加、不走管理员模板，保证契约不被改坏。
 func buildReplyRequest(cfg *store.AISettings, t *store.Ticket, messages []store.TicketMessage, knowledge []store.AIKnowledge, typeNames []string, wantClassification bool) llm.ChatRequest {
 	system := renderSystemPrompt(cfg.SystemPrompt, t)
 	if len(knowledge) > 0 {
-		system += "\n\n以下是历史工单中人工客服的参考回复示例（优先参考，尤其是标注「人工纠正」的）："
+		system += "\n\n以下是历史工单中人工客服的参考回复示例（优先参考，尤其是标注「人工纠正」的；" +
+			"仅当示例与用户当前问题确实相关时才参考，不相关必须忽略）："
 		for i, entry := range knowledge {
 			label := "示例"
 			if entry.IsCorrection {
@@ -35,14 +47,19 @@ func buildReplyRequest(cfg *store.AISettings, t *store.Ticket, messages []store.
 		}
 	}
 
-	// 分类指令：让模型在同一次调用里返回建议类型（省一次调用）。
-	// JSON 输出对部分服务商不可用，解析端做了完整容错（见 parseReplyJSON）。
-	jsonMode := false
+	// 输出协议：回复决策与分类建议并到同一次调用（省一次调用）。
+	// 解析端对非 JSON 输出做了完整容错（见 parseReplyJSON），主链路不中断。
+	system += "\n\n你必须只返回一个 JSON 对象，格式："
+	system += `{"action": "...", "reply": "...", "suggested_type": "", "type_reason": ""}`
+	system += "\naction 取值："
+	system += "\n- \"reply\"：用户的消息需要客服回应，reply 填回复内容；"
+	system += "\n- \"silent\"：用户的消息不需要回应（如道谢、确认、表情、寒暄收尾），reply 留空；"
+	system += "\n- \"escalate\"：你无法依据对话与参考示例确定答案，reply 填一句简短的转人工说明，不要猜测答案。"
 	if wantClassification && len(typeNames) > 0 {
-		system += "\n\n同时判断该工单最匹配的类型。必须只返回一个 JSON 对象，格式："
-		system += `{"reply": "给用户的回复", "suggested_type": "类型名", "type_reason": "一句话理由"}`
-		system += "\nsuggested_type 只能从这些类型中选择：" + strings.Join(typeNames, "、")
-		jsonMode = true
+		system += "\nsuggested_type 填该工单最匹配的类型（只能从这些类型中选择：" +
+			strings.Join(typeNames, "、") + "），type_reason 填一句话理由；"
+	} else {
+		system += "\nsuggested_type 与 type_reason 留空；"
 	}
 
 	chatMessages := make([]llm.Message, 0, len(messages)+1)
@@ -65,7 +82,7 @@ func buildReplyRequest(cfg *store.AISettings, t *store.Ticket, messages []store.
 		Messages:    chatMessages,
 		Temperature: cfg.Temperature,
 		MaxTokens:   1024,
-		JSONMode:    jsonMode,
+		JSONMode:    true,
 	}
 }
 
@@ -175,21 +192,30 @@ func typeNameOrEmpty(t *store.Ticket) string {
 
 // replyJSON 是自动应答请求的期望输出结构。
 type replyJSON struct {
+	Action        string `json:"action"`
 	Reply         string `json:"reply"`
 	SuggestedType string `json:"suggested_type"`
 	TypeReason    string `json:"type_reason"`
 }
 
-// parseReplyJSON 解析自动应答的模型输出。
+// parseReplyJSON 解析自动应答的模型输出，返回决策动作、回复正文与分类建议。
 //
 // 容错策略：模型可能忽略 JSON 指令、包一层 ```json 代码块、或在 JSON 前后
-// 加说明文字。先尝试提取首个平衡的 JSON 对象；解析成功且含 reply 字段就用
-// 结构化结果，否则把整段输出当作回复正文——**回复主链路绝不能因解析失败而中断**。
-func parseReplyJSON(content string) (string, *Classification) {
+// 加说明文字。先尝试提取首个平衡的 JSON 对象；解析成功就取结构化结果
+// （action 缺省或无法识别时按 reply 处理），否则把整段输出当作回复正文——
+// **回复主链路绝不能因解析失败而中断**。
+func parseReplyJSON(content string) (string, string, *Classification) {
 	raw := extractJSONObject(content)
 	if raw != "" {
 		var parsed replyJSON
-		if err := json.Unmarshal([]byte(raw), &parsed); err == nil && strings.TrimSpace(parsed.Reply) != "" {
+		if err := json.Unmarshal([]byte(raw), &parsed); err == nil &&
+			(strings.TrimSpace(parsed.Reply) != "" || parsed.Action != "") {
+			action := strings.ToLower(strings.TrimSpace(parsed.Action))
+			switch action {
+			case replyActionSilent, replyActionEscalate:
+			default:
+				action = replyActionReply
+			}
 			var classification *Classification
 			if strings.TrimSpace(parsed.SuggestedType) != "" {
 				classification = &Classification{
@@ -197,10 +223,10 @@ func parseReplyJSON(content string) (string, *Classification) {
 					Reason: strings.TrimSpace(parsed.TypeReason),
 				}
 			}
-			return parsed.Reply, classification
+			return action, parsed.Reply, classification
 		}
 	}
-	return content, nil
+	return replyActionReply, content, nil
 }
 
 // parseClassificationJSON 解析分类请求的模型输出。

@@ -41,19 +41,32 @@ const (
 // 全部默认关闭 / 保守取值：AI 是增强能力，升级后不改变现有工单流程的行为，
 // 管理员在 WebUI 显式开启后才生效。
 const (
-	DefaultAIQuietSeconds    = 5
+	DefaultAIQuietSeconds    = 8
 	DefaultAIMaxReplies      = 10
 	DefaultAIContextMessages = 20
 	DefaultAIKnowledgeTopK   = 5
 	DefaultAICallRetention   = 90
-	DefaultAITemperature     = 0.7
+	DefaultAITemperature     = 0.4
 )
 
 // DefaultAISystemPrompt 是自动应答的系统提示词模板。
 //
 // 支持占位符：{type_name} 工单类型、{ticket_no} 工单编号、{user_name} 开单人昵称。
-// 知识示例由服务层拼接后追加，不通过模板注入（避免管理员模板破坏结构）。
+// 知识示例与输出协议（action / JSON 契约）由服务层拼接后追加，
+// 不通过模板注入（避免管理员模板破坏结构）。
 const DefaultAISystemPrompt = `你是工单 {ticket_no}（类型：{type_name}）的客服助手，正在回复用户 {user_name}。
+要求：
+- 用与用户相同的语言回复，语气礼貌、直接了当；
+- 只依据对话内容与提供的参考示例回答，严禁编造政策、时间、金额或承诺；
+- 参考示例与用户当前问题不相关时必须忽略，不得套用；
+- 回复控制在 300 字以内。`
+
+// legacyDefaultAISystemPrompt 是上一版默认提示词。
+//
+// 管理员在 WebUI 保存设置时会把当时的默认值整体落库，导致后续修改常量
+// 对存量实例不生效；Config 读取时把仍是旧默认的值视为「未自定义」，
+// 自动升级到新默认（真正自定义过的提示词不受影响）。
+const legacyDefaultAISystemPrompt = `你是工单 {ticket_no}（类型：{type_name}）的客服助手，正在回复用户 {user_name}。
 要求：
 - 用与用户相同的语言回复，语气礼貌、直接了当；
 - 只依据对话内容与提供的参考示例回答，不要编造政策、时间或承诺；
@@ -121,7 +134,7 @@ func (r *AIRepo) Config(appSecret []byte) (*AISettings, error) {
 		AutoSummaryOnClose: all[SettingAIAutoSummaryOnClose] == "true",
 		CallRetentionDays:  parseIntOr(all[SettingAICallRetentionDays], DefaultAICallRetention),
 	}
-	if cfg.SystemPrompt == "" {
+	if cfg.SystemPrompt == "" || cfg.SystemPrompt == legacyDefaultAISystemPrompt {
 		cfg.SystemPrompt = DefaultAISystemPrompt
 	}
 	if cfg.Footer == "" {
